@@ -12,6 +12,7 @@ import {
   currentBlinds,
   declareOptions,
   declareTargets,
+  alchemyChoices,
   findAug,
   legalActions,
   LegalActions,
@@ -35,7 +36,7 @@ import {
   type MaskRules,
 } from './core.js';
 import { fullDeck } from './cards.js';
-import { immunityCandidates, stealOptions } from './game.js';
+import { immunityCandidates, rechargeError, rechargeTargets, stealOptions } from './game.js';
 import { countingInfo, CountingView } from './counting.js';
 import { ACTIVE } from './effects.js';
 import type { GameState, NoteKind, Phase, PlayerState, Street } from './types.js';
@@ -292,6 +293,8 @@ export interface PlayerView {
   respond: RespondView | null;
   /** 카드 경매로 공개된 카드 (가림 규칙 적용) */
   auctionCard: Card | null;
+  /** 나만 미리 본 앞으로의 보드 카드 (예지·턴과 리버 사이). 보드 칸 위치와 함께 */
+  peek: { index: number; card: Card; label: string }[];
   you: {
     id: string;
     /** 자리에 앉아 있는가 (중도 참여 대기자·자리를 비켜 준 탈락자는 false) */
@@ -313,11 +316,19 @@ export interface PlayerView {
     pickDone: boolean;
     /** 폭주기관차: 이번 선택에서 더 가져갈 수 있는 개수 */
     pickExtra: number;
+    /** 재충전 카드 (재충전 선택이 켜진 방, 증강 선택 중일 때만. 재충전 여부는 본인에게만) */
+    recharge: {
+      enabled: boolean;
+      reason: string | null;
+      /** 재충전 카드를 골라 되돌릴 증강을 고르는 중 */
+      pending: boolean;
+      targets: { id: AugmentId; name: string; stars: Stars; usesLeft: number; maxUses: number }[];
+    } | null;
     /** 부활 대기: 돌아올 핸드 번호 */
     dormant: number | null;
     discard: { pending: boolean; chosen: number | null } | null;
     /** 선언 기회 (되감기·봉인·밥상 뒤집기) */
-    declare: { options: AugmentInfo[]; targets: Partial<Record<AugmentId, string[]>> } | null;
+    declare: { options: AugmentInfo[]; targets: Partial<Record<AugmentId, string[]>>; alchemy: { cardIndex: number; choice: number }[] } | null;
     /** 애착: 다음 핸드로 가져갈 카드 선택 */
     attach: { cards: Card[] } | null;
     counting: CountingView | null;
@@ -695,6 +706,7 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     reaction,
     respond: respondView(state, me, bb),
     auctionCard: state.auctionCard && !mask.board ? blurCard(state.auctionCard) : null,
+    peek: seated && !mask.board ? peekCards(state, me).map((x) => ({ ...x, card: blurCard(x.card) })) : [],
     you: {
       id: me.id,
       seated,
@@ -713,12 +725,23 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
       pick: me.pickOptions ? me.pickOptions.map(info) : null,
       pickDone: seated && state.phase === 'augmentSelect' && !me.pickOptions,
       pickExtra: me.pickOptions ? me.pickExtra : 0,
+      recharge:
+        seated && me.pickOptions && state.options.recharge && state.phase === 'augmentSelect'
+          ? {
+              enabled: !rechargeError(state, me),
+              reason: rechargeError(state, me),
+              pending: me.rechargePending,
+              targets: rechargeTargets(me).map((a) => ({ id: a.id, name: AUGMENTS[a.id].name, stars: AUGMENTS[a.id].stars, usesLeft: a.usesLeft ?? 0, maxUses: AUGMENTS[a.id].uses!.count })),
+            }
+          : null,
       dormant: me.dormant,
       discard:
         seated && state.phase === 'discard' && live(me) && me.hole.length === 3
           ? { pending: me.pendingDiscard === null, chosen: me.pendingDiscard }
           : null,
-      declare: declOpts.length ? { options: declOpts.map(info), targets: Object.fromEntries(declOpts.map((id) => [id, declareTargets(state, me, id)])) } : null,
+      declare: declOpts.length
+        ? { options: declOpts.map(info), targets: Object.fromEntries(declOpts.map((id) => [id, declareTargets(state, me, id)])), alchemy: alchemyChoices(state, me) }
+        : null,
       attach: seated && me.attachPending && state.phase === 'handEnd' ? { cards: [...me.hole] } : null,
       counting,
       tax: taxFor(state, me),
@@ -755,6 +778,25 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     log,
     winnerId: state.winnerId,
   };
+}
+
+/** 내가 증강으로 미리 본, 아직 공개되지 않은 보드 카드 (내 정보 기록에서만 가져온다) */
+function peekCards(state: GameState, me: PlayerState): { index: number; card: Card; label: string }[] {
+  const out: { index: number; card: Card; label: string }[] = [];
+  const seen = me.notes.filter((n) => n.hand === state.handNumber && n.kind === 'foresight' && n.cards?.length);
+  me.foreseen.forEach((idx, k) => {
+    const c = seen[k]?.cards?.[0];
+    if (c && idx >= state.boardRevealed) out.push({ index: idx, card: c, label: '예지' });
+  });
+  if (me.turnRiver) {
+    const [a, b] = me.turnRiver.idx;
+    const [ca, cb] = me.turnRiver.cards;
+    const swap = me.turnRiver.swap === true;
+    for (const [idx, c] of [[a, swap ? cb : ca], [b, swap ? ca : cb]] as [number, Card][]) {
+      if (idx >= state.boardRevealed && !out.some((x) => x.index === idx)) out.push({ index: idx, card: c, label: '턴·리버' });
+    }
+  }
+  return out.sort((x, y) => x.index - y.index);
 }
 
 function respondView(state: GameState, me: PlayerState, bb: number): RespondView | null {

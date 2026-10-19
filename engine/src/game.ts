@@ -40,7 +40,7 @@ import {
   seatOrderFromDealer,
   taxError,
 } from './core.js';
-import { ACTIVE, Ctx, EngineOps, holeCardCount, PASSIVE, TASKS, windowOptions, windowTargets } from './effects.js';
+import { ACTIVE, Ctx, EngineOps, holeCardCount, PASSIVE, TASKS, windowOptions, windowTargets, windowValidParams } from './effects.js';
 import { decidePot, type Contender, type PotDecision } from './showdown.js';
 import { contenderFor, handEvalFor } from './standing.js';
 import type {
@@ -91,6 +91,8 @@ export interface CreateGameOptions {
   rng?: Rng;
   debug?: boolean;
   dealerSeat?: number;
+  /** 증강 선택에 재충전 카드 (기본 끄기) */
+  recharge?: boolean;
   /** 테스트 편의: 지정하면 고정 주기 N핸드 */
   handsPerLevel?: number;
   /** false 면 첫 증강 선택 없이 '핸드 종료' 상태로 만들어 두고, 호출 측이 startNextHand 로 첫 핸드를 시작한다 */
@@ -168,6 +170,8 @@ function newPlayer(np: NewPlayer, seat: number, chips: number): PlayerState {
     alchemy: null,
     vpipHand: false,
     aggressed: false,
+    rechargePending: false,
+    rechargeDone: false,
   };
 }
 
@@ -233,6 +237,7 @@ export function createGame(players: NewPlayer[], opts: CreateGameOptions = {}): 
       levelMode: opts.handsPerLevel !== undefined ? 'fixed' : (opts.levelMode ?? 'auto'),
       fixedLevelHands: Math.max(1, fixed ?? 10),
       debug: !!opts.debug,
+      recharge: !!opts.recharge,
     },
     rng,
     players: players.map((np, seat) => newPlayer(np, seat, startingChips)),
@@ -298,7 +303,7 @@ export function createGame(players: NewPlayer[], opts: CreateGameOptions = {}): 
     nextDeal: null,
     forceLevelUp: false,
     taxers: [],
-    stats: { picks: {}, uses: {}, bankChips: 0, bankTaxed: 0, bankPaid: 0, joinChips: 0, kickedChips: 0, heavenFolds: 0 },
+    stats: { picks: {}, uses: {}, bankChips: 0, bankTaxed: 0, bankPaid: 0, joinChips: 0, kickedChips: 0, heavenFolds: 0, recharges: {} },
   };
   state.levelHands = levelHandsFor(state);
   const { sb, bb } = currentBlinds(state);
@@ -369,6 +374,8 @@ function startPickRound(state: GameState): void {
   }
   for (const p of state.players) {
     p.pickOptions = null;
+    p.rechargePending = false;
+    p.rechargeDone = false;
     if (!active(p)) continue;
     if (p.skipPicks > 0) {
       p.skipPicks--;
@@ -634,6 +641,7 @@ function applyPick(state: GameState, p: PlayerState, augment: AugmentId, parity?
   if (state.phase !== 'augmentSelect') return '지금은 증강 선택 단계가 아닙니다.';
   if (!p.pickOptions) return '선택할 증강이 없습니다.';
   if (!p.pickOptions.includes(augment)) return '선택지에 없는 증강입니다.';
+  p.rechargePending = false;
   const aug = grantAugment(state, p, augment, undefined, parity);
   const rest = p.pickOptions.filter((o) => o !== augment);
   p.pickOptions = null;
@@ -650,6 +658,50 @@ function applyPick(state: GameState, p: PlayerState, augment: AugmentId, parity?
   }
   if (!state.players.some((x) => x.pickOptions)) beginHand(state);
   return null;
+}
+
+/** 재충전 대상: 사용 횟수가 줄어든 액티브 증강 (게임 N회형, 패시브 제외) */
+export function rechargeTargets(p: PlayerState): OwnedAugment[] {
+  return p.augments.filter((a) => {
+    const d = AUGMENTS[a.id];
+    return d.trigger !== 'passive' && d.uses?.per === 'game' && (a.usesLeft ?? 0) < d.uses.count;
+  });
+}
+
+/** 지금 재충전 카드를 쓸 수 있는가 (재충전 여부는 본인에게만) */
+export function rechargeError(state: GameState, p: PlayerState): string | null {
+  if (!state.options.recharge) return '재충전 선택이 꺼져 있습니다.';
+  if (state.phase !== 'augmentSelect' || !p.pickOptions || !state.players.includes(p)) return '지금은 증강 선택 중이 아닙니다.';
+  if (p.rechargeDone) return '이번 선택에서는 이미 재충전했습니다.';
+  if (!rechargeTargets(p).length) return '사용 횟수가 줄어든 액티브 증강이 없습니다.';
+  return null;
+}
+
+/** 재충전: 새 증강 대신 내 액티브 증강 1개를 처음 횟수로 되돌린다 (폭주기관차 선택 중이면 그중 하나로) */
+function applyRecharge(state: GameState, p: PlayerState, id: AugmentId | undefined): string | null {
+  const err = rechargeError(state, p);
+  if (err) return err;
+  if (id === undefined) {
+    p.rechargePending = true;
+    return null;
+  }
+  const a = rechargeTargets(p).find((x) => x.id === id);
+  if (!a) return '되돌릴 수 있는 증강이 아닙니다.';
+  a.usesLeft = AUGMENTS[id].uses!.count;
+  p.rechargePending = false;
+  p.rechargeDone = true;
+  (state.stats.recharges[p.id] ??= []).push(id);
+  addLog(state, `재충전: ${augLabel(id)}의 사용 횟수를 처음(${a.usesLeft}회)으로 되돌렸습니다`, { to: [p.id] });
+  if (p.pickExtra > 0) p.pickExtra--;
+  else p.pickOptions = null;
+  if (!state.players.some((x) => x.pickOptions)) beginHand(state);
+  return null;
+}
+
+/** 재충전 기본값: 횟수가 가장 많이 줄어든 증강 */
+function rechargeDefault(p: PlayerState): AugmentId {
+  const list = rechargeTargets(p).map((a) => ({ id: a.id, lost: AUGMENTS[a.id].uses!.count - (a.usesLeft ?? 0) }));
+  return list.sort((x, y) => y.lost - x.lost)[0].id;
 }
 
 /** 잠복: 숨길 증강을 고른다 (다음 핸드가 시작되기 전까지 바꿀 수 있음, 보유 수는 그대로) */
@@ -1233,7 +1285,7 @@ function applyBet(state: GameState, idx: number, a: BetAction): string | null {
       if (target < minTo && target !== maxTo) return `최소 ${minTo}까지 레이즈해야 합니다.`;
       const opening = state.currentBet === 0;
       const raiseSize = target - state.currentBet;
-      p.aggressed = true;
+      if (state.street === 'river') p.aggressed = true;
       if (state.street === 'preflop') p.vpipHand = true;
       putChips(p, target - level);
       if (raiseSize >= state.minRaise) state.minRaise = raiseSize;
@@ -1370,6 +1422,12 @@ function startDeclareWindow(state: GameState, stage: 'flop' | 'turn' | 'river' |
 /** 선언 기회에 지목형 증강(공동 환승·명추리 등)으로 고를 수 있는 대상 */
 export function declareTargets(state: GameState, p: PlayerState, id: AugmentId): string[] {
   return declareOptions(state, p).includes(id) ? windowTargets(state, opsFor(state), p, id) : [];
+}
+
+/** 연금술: 지금 고를 수 있는 (홀카드, 올림/내림) 조합 */
+export function alchemyChoices(state: GameState, p: PlayerState): { cardIndex: number; choice: number }[] {
+  if (!declareOptions(state, p).includes('alchemy')) return [];
+  return windowValidParams(state, opsFor(state), p, 'alchemy').map((x) => ({ cardIndex: x.cardIndex!, choice: x.choice! }));
 }
 
 export function declareOptions(state: GameState, p: PlayerState): AugmentId[] {
@@ -2569,6 +2627,9 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
     case 'draw':
       err = applyDraw(state, p, action.accept === true);
       break;
+    case 'recharge':
+      err = action.augment === undefined || isAugmentId(action.augment) ? applyRecharge(state, p, action.augment) : '알 수 없는 증강입니다.';
+      break;
     case 'lurk':
       err = isAugmentId(action.augment) ? applyLurk(state, p, action.augment) : '알 수 없는 증강입니다.';
       break;
@@ -2617,6 +2678,8 @@ export function defaultActionFor(state: GameState, playerId: string): GameAction
   const p = playerById(state, playerId)!;
   switch (pending.kind) {
     case 'pick':
+      // 재충전 카드를 고른 뒤 대상을 고르지 않았으면 횟수가 가장 많이 줄어든 증강
+      if (p.rechargePending && !rechargeError(state, p)) return { type: 'recharge', augment: rechargeDefault(p) };
       return { type: 'pick', augment: pickOne(p.pickOptions!, state.rng) };
     case 'turn':
       if (owed(state, p) === 0) return { type: 'check' };

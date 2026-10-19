@@ -17,6 +17,9 @@ import {
   Category,
   turnSecondsFor,
   kickPlayer,
+  addJoiner,
+  joinerPending,
+  joinerTimeout,
   AUGMENTS,
   ALL_AUGMENT_IDS,
   type AugmentId,
@@ -24,7 +27,7 @@ import {
   type GameAction,
   type GameState,
 } from '../src/index.js';
-import { expectedChips, makePlayers, playGame, totalChips } from './helpers.js';
+import { expectedChips, makePlayers, playGame, stepBots, totalChips } from './helpers.js';
 
 interface SetupOpts {
   dealer?: number;
@@ -930,7 +933,8 @@ describe('6. 확률·통계', () => {
     act(s, 'p1', { type: 'call' });
     act(s, 'p2', { type: 'call' });
     act(s, 'p3', { type: 'check' });
-    passUntil(s, () => s.street === 'flop');
+    passUntil(s, () => s.street === 'river');
+    // 리버에서 베팅했는데 쇼다운 족보가 하이카드 → 블러프
     act(s, 'p2', { type: 'raise', amount: 40 });
     act(s, 'p3', { type: 'call' });
     act(s, 'p1', { type: 'call' });
@@ -965,5 +969,164 @@ describe('6. 확률·통계', () => {
     use(u, 'p1', 'fateThread', { targetId: 'p2' });
     resolveAll(u);
     expect(lastNote(u, 'p1')).toMatch(/승률은 0\.0%/);
+  });
+});
+
+describe('미리 본 카드 표시', () => {
+  it('예지·턴과 리버 사이로 본 앞으로의 보드 카드는 본인 뷰의 보드 칸 위치에만 (공개되면 사라짐)', () => {
+    const s = setup(3, { augs: { p2: ['foresight'] }, deal: { board: cards(BOARD) } });
+    passUntil(s, () => s.street === 'flop');
+    use(s, 'p2', 'foresight');
+    resolveAll(s);
+    expect(view(s, 'p2').peek).toEqual([{ index: 3, card: '4h', label: '예지' }]);
+    expect(view(s, 'p1').peek).toEqual([]);
+    passUntil(s, () => s.street === 'turn');
+    expect(view(s, 'p2').peek).toEqual([]);
+  });
+});
+
+// ───────────────────────── 7. 재충전 선택 ─────────────────────────
+
+describe('7. 재충전 선택', () => {
+  /** 다음 핸드를 증강 선택 라운드로 시작 */
+  function toPickRound(s: GameState, before?: () => void) {
+    toShowdown(s);
+    before?.();
+    s.forceLevelUp = true;
+    ok(startNextHand(s));
+    expect(s.phase).toBe('augmentSelect');
+  }
+  function rechargeGame(on: boolean, extra: Partial<SetupOpts> = {}) {
+    return setup(3, {
+      augs: { p1: ['thermal', 'observer'], p2: ['clairvoyance'] },
+      before: (st) => {
+        st.options.recharge = on;
+        st.players[0].augments[0].usesLeft = 1;
+      },
+      ...extra,
+    });
+  }
+
+  it('재충전 카드: 줄어든 액티브 증강 1개를 처음 횟수로, 새 증강은 받지 않고 보유 수도 그대로, 본인에게만', () => {
+    const s = rechargeGame(true);
+    toPickRound(s);
+    const v = view(s, 'p1').you.recharge!;
+    expect(v.enabled).toBe(true);
+    expect(v.targets.map((t) => [t.id, t.usesLeft, t.maxUses])).toEqual([['thermal', 1, 3]]);
+    // 쓰지 않은 사람은 비활성화, 다른 사람 뷰에는 내 재충전 정보가 없다
+    expect(view(s, 'p2').you.recharge).toMatchObject({ enabled: false, targets: [] });
+    act(s, 'p1', { type: 'recharge' });
+    expect(view(s, 'p1').you.recharge!.pending).toBe(true);
+    act(s, 'p1', { type: 'recharge', augment: 'thermal' });
+    expect(P(s, 'p1').augments.map((a) => [a.id, a.usesLeft])).toEqual([['thermal', 3], ['observer', null]]);
+    expect(s.stats.recharges.p1).toEqual(['thermal']);
+    const otherAfter = view(s, 'p2');
+    expect(otherAfter.players.find((p) => p.id === 'p1')!.augmentCount).toBe(2);
+    expect(JSON.stringify(otherAfter)).not.toContain('재충전');
+    // 패시브는 대상이 아니다
+    expect(applyAction(s, 'p1', { type: 'recharge', augment: 'observer' }).ok).toBe(false);
+  });
+
+  it('재충전: 끄면 카드가 없고, 대상을 고르지 않고 시간이 지나면 가장 많이 줄어든 증강을 되돌린다', () => {
+    const off = rechargeGame(false);
+    toPickRound(off);
+    expect(view(off, 'p1').you.recharge).toBeNull();
+    expect(applyAction(off, 'p1', { type: 'recharge' }).ok).toBe(false);
+
+    const s = rechargeGame(true, { augs: { p1: ['thermal', 'blank'], p2: ['clairvoyance'] } });
+    P(s, 'p1').augments[0].usesLeft = 3;
+    P(s, 'p1').augments[1].usesLeft = 0;
+    toPickRound(s);
+    act(s, 'p1', { type: 'recharge' });
+    applyTimeouts(s);
+    expect(P(s, 'p1').augments.find((a) => a.id === 'blank')!.usesLeft).toBe(AUGMENTS.blank.uses!.count);
+    expect(P(s, 'p1').augments).toHaveLength(2);
+  });
+
+  it('재충전: 하이리스크로 선택을 잃으면 함께 사라지고, 폭주기관차 다중 선택에서는 한 번만, 중도 참여 선택에는 없다', () => {
+    const s = rechargeGame(true);
+    toPickRound(s, () => (P(s, 'p1').skipPicks = 1));
+    expect(view(s, 'p1').you.recharge).toBeNull();
+
+    const t = rechargeGame(true, { augs: { p1: ['thermal', 'runaway'], p2: ['clairvoyance'] } });
+    toPickRound(t, () => (P(t, 'p1').streak = 3));
+    act(t, 'p1', { type: 'recharge', augment: 'thermal' });
+    expect(P(t, 'p1').pickOptions).not.toBeNull();
+    expect(view(t, 'p1').you.recharge!.enabled).toBe(false);
+    act(t, 'p1', { type: 'pick', augment: P(t, 'p1').pickOptions![0] });
+    expect(P(t, 'p1').augments).toHaveLength(3);
+
+    const u = rechargeGame(true);
+    toShowdown(u);
+    ok(addJoiner(u, { id: 'j1', name: 'J1', isBot: false }));
+    expect(view(u, 'j1').you.recharge).toBeNull();
+    expect(applyAction(u, 'j1', { type: 'recharge' }).ok).toBe(false);
+  });
+});
+
+// ───────────────────────── 전체 게임 ─────────────────────────
+
+describe('3차 풀 포함 봇 게임', () => {
+  it.each([
+    [8, true],
+    [8, false],
+    [5, true],
+  ])('%i인 (재충전 %s): 3차 증강을 잔뜩 들고 중도 참여·추방·부활이 섞여도 우승자 결정까지, 칩 보존', (n, recharge) => {
+    for (const seed of [21, 22]) {
+      const rng = seededRng(seed * 7 + n);
+      const s = createGame(makePlayers(n), { rng, handsPerLevel: 3, debug: true, initialPick: false, recharge });
+      const pool3 = ALL_AUGMENT_IDS.filter((id) => AUGMENTS[id].pool === 3);
+      let uniqueGiven = false;
+      for (const p of s.players) {
+        const owned: AugmentId[] = [];
+        // 부활 확인용: 절반은 3일 안에 오리라
+        if (rng.int(2)) {
+          owned.push('comeBack');
+          ok(debugGiveAugment(s, p.id, 'comeBack'));
+        }
+        for (let k = 0; k < 8; k++) {
+          const id = pool3[rng.int(pool3.length)];
+          if (!canHold(owned, id) || (AUGMENTS[id].unique && uniqueGiven)) continue;
+          if (AUGMENTS[id].unique) uniqueGiven = true;
+          owned.push(id);
+          ok(debugGiveAugment(s, p.id, id));
+        }
+      }
+      const initial = totalChips(s);
+      let joined = 0;
+      let kicked = false;
+      let revived = false;
+      for (let i = 0; i < 200000 && s.phase !== 'gameOver'; i++) {
+        if (joined < 2 && s.handNumber >= 3 + joined * 3 && s.joiners.length === 0 && s.phase === 'handEnd') {
+          ok(addJoiner(s, { id: `j${joined}`, name: `J${joined}`, isBot: true }));
+          joined++;
+        }
+        if (!kicked && s.handNumber >= 6 && s.phase === 'betting') {
+          const victim = s.players.find((p) => !p.out && !p.kicked && p.id !== 'p1');
+          if (victim) ok(kickPlayer(s, victim.id));
+          kicked = true;
+        }
+        if (s.players.some((p) => p.dormant !== null)) revived ||= false;
+        for (const { id } of joinerPending(s)) joinerTimeout(s, id);
+        const before = s.players.filter((p) => p.dormant !== null).map((p) => p.id);
+        stepBots(s, rng);
+        if (before.some((id) => s.players.find((p) => p.id === id && p.dormant === null && !p.out))) revived = true;
+        if (s.phase !== 'reaction') expect(totalChips(s)).toBe(expectedChips(s, initial));
+      }
+      expect(s.phase).toBe('gameOver');
+      expect(s.players.filter((p) => !p.out && !p.kicked)).toHaveLength(1);
+      expect(joined).toBeGreaterThan(0);
+      void revived;
+    }
+  }, 300000);
+
+  it('운명의 실 승률 계산은 8인 게임에서도 1초 안에', () => {
+    const s = setup(8, { augs: { p1: ['fateThread'] } });
+    passUntil(s, () => s.street === 'flop');
+    const t0 = Date.now();
+    use(s, 'p1', 'fateThread', { targetId: 'p5' });
+    resolveAll(s);
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(lastNote(s, 'p1')).toMatch(/승률은 \d+\.\d%/);
   });
 });

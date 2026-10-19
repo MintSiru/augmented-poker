@@ -78,6 +78,7 @@ export const DEFAULT_SETTINGS: RoomSettings = {
   blindSchedule: 'standard',
   midJoin: true,
   autoKickMinutes: 5,
+  recharge: false,
 };
 
 export const ROOM_NAME_MAX = 20;
@@ -437,7 +438,7 @@ export class Room {
     const keys = Object.keys(patch);
     if (this.game) {
       const locked = keys.filter((k) => k !== 'isPublic' && k !== 'name' && !IN_GAME_SETTINGS.includes(k as keyof RoomSettings));
-      if (locked.length) return '게임이 시작된 뒤에는 칩과 블라인드 설정을 바꿀 수 없습니다.';
+      if (locked.length) return '게임이 시작된 뒤에는 칩·블라인드·재충전 설정을 바꿀 수 없습니다.';
     }
     let name = this.name;
     let isPublic = this.isPublic;
@@ -496,6 +497,10 @@ export class Room {
     if (patch.midJoin !== undefined) {
       if (typeof patch.midJoin !== 'boolean') return '잘못된 값입니다.';
       s.midJoin = patch.midJoin;
+    }
+    if (patch.recharge !== undefined) {
+      if (typeof patch.recharge !== 'boolean') return '잘못된 값입니다.';
+      s.recharge = patch.recharge;
     }
     if (patch.autoKickMinutes !== undefined) {
       if (!(AUTO_KICK_CHOICES as readonly unknown[]).includes(patch.autoKickMinutes)) return '자동 추방은 끄기/3분/5분/10분 중에서 고르세요.';
@@ -561,6 +566,7 @@ export class Room {
         blindSchedule: s.blindSchedule,
         levelMode: s.levelMode,
         fixedLevelHands: s.levelHands,
+        recharge: s.recharge,
       },
     );
     for (const m of this.humans()) if (!m.connected) m.absentStreak = 0;

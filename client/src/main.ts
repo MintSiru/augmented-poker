@@ -53,6 +53,8 @@ const app = {
   rumor: 'observer' as string,
   /** 좌석 위에 잠깐 크게 띄우는 행동 표시: playerId → 문구·종류·끝 시각 */
   flashes: new Map<string, { text: string; kind: string; until: number }>(),
+  /** 증강으로 새로 알게 된 정보를 크게 보여 주는 창 */
+  reveal: null as { title: string; body: string; cards: string[]; until: number } | null,
   /** 효과음을 낸 마지막 로그 번호 */
   sfxSeq: 0,
   lastTickSec: -1,
@@ -232,6 +234,21 @@ function onGameUpdate(prev: PlayerView | null, next: PlayerView) {
     kinds.forEach((k, i) => setTimeout(() => play(k), i * 110));
   }
   app.sfxSeq = Math.max(app.sfxSeq, next.log.at(-1)?.seq ?? 0);
+  // 증강으로 새로 알게 된 비공개 정보: 화면 가운데 위에 크게 (같은 핸드 안에서 새로 생긴 것만)
+  if (prev && prev.handNumber === next.handNumber && next.you.notes.length > prev.you.notes.length) {
+    const fresh = next.you.notes.slice(prev.you.notes.length).filter((n) => n.hand === next.handNumber);
+    const n = fresh.at(-1);
+    if (n) {
+      const i = n.text.indexOf(':');
+      app.reveal = {
+        title: i > 0 ? n.text.slice(0, i) : '나만 아는 정보',
+        body: i > 0 ? n.text.slice(i + 1).trim() : n.text,
+        cards: n.cards ?? [],
+        until: now + 6000,
+      };
+      setTimeout(() => app.env && renderGame(), 6100);
+    }
+  }
   // 내 차례가 새로 오면 알림음
   if (next.toActId === next.you.id && prev?.toActId !== next.you.id) setTimeout(() => play('turn'), 150);
 }
@@ -437,6 +454,7 @@ function settingsSummary(s: RoomSettings, bots: number | null): string {
     <li>상승: ${s.levelMode === 'auto' ? '자동 (남은 인원 × 2핸드)' : `${s.levelHands}핸드마다`} · ${s.blindSchedule === 'x1.5' ? '1.5배씩' : '기본 표'}</li>
     <li class="muted">${blindPreview(s)}</li>
     <li>중도 참여 ${s.midJoin ? '허용' : '끔'} · 연결 끊긴 플레이어 자동 추방 ${KICK_LABEL[s.autoKickMinutes] ?? `${s.autoKickMinutes}분`}</li>
+    <li>재충전 선택 ${s.recharge ? '켜짐' : '꺼짐'}</li>
   </ul>`;
 }
 
@@ -469,6 +487,11 @@ function settingsForm(s: RoomSettings, room: { name: string; isPublic: boolean }
     ${inGame ? '' : `<label>블라인드 상승 방식 <select data-setting="blindSchedule" data-kind="str">${opt(['standard', 'x1.5'], s.blindSchedule, (v) => (v === 'standard' ? '기본 표' : '1.5배씩'))}</select></label>`}
     <div class="muted small-note">${blindPreview(s)}</div>
     <label class="check"><input type="checkbox" data-setting="midJoin" ${s.midJoin ? 'checked' : ''}/> 중도 참여 허용</label>
+    ${
+      inGame
+        ? `<div class="locked-row">재충전 선택 ${s.recharge ? '켜짐' : '꺼짐'} <span class="muted">(잠김)</span></div>`
+        : `<label class="check" title="증강 선택 화면에 재충전 카드: 새 증강 대신 내 액티브 증강 1개의 횟수를 처음으로 되돌림"><input type="checkbox" data-setting="recharge" ${s.recharge ? 'checked' : ''}/> 재충전 선택 허용</label>`
+    }
     <label>연결 끊긴 플레이어 자동 추방 <select data-setting="autoKickMinutes">${opt([0, 3, 5, 10], s.autoKickMinutes, (v) => KICK_LABEL[Number(v)])}</select></label>`;
 }
 
@@ -685,6 +708,17 @@ function canKick(p: PublicPlayerView): boolean {
   return !p.connected || p.sittingOut;
 }
 
+/** 증강으로 새로 알게 된 정보 (예지·투시 등): 큰 카드와 함께 몇 초간 */
+function revealHtml(): string {
+  const r = app.reveal;
+  if (!r || r.until < Date.now()) return '';
+  return `<div class="reveal" data-a="closeReveal" title="눌러서 닫기">
+      <div class="reveal-title">🔮 ${esc(r.title)} <span class="muted">· 나만 보임</span></div>
+      ${r.cards.length ? `<div class="reveal-cards">${r.cards.map((c) => cardHtml(c, { size: 'lg' })).join('')}</div>` : ''}
+      <div class="reveal-body">${richText(r.body)}</div>
+    </div>`;
+}
+
 function reactionHtml(v: PlayerView): string {
   const r = v.reaction;
   if (!r) return '';
@@ -719,8 +753,14 @@ function renderTable(v: PlayerView) {
   const seats = v.players.map((p, i) => seatHtml(v, p, (i - mySeat + n) % n, n)).join('');
   patch($('#g-seats'), seats);
 
-  const slots = Array.from({ length: Math.max(5, v.board.length) }, (_, i) => {
-    if (i >= v.board.length) return '<span class="card slot md"></span>';
+  const peekAt = new Map(v.peek.map((x) => [x.index, x]));
+  const slots = Array.from({ length: Math.max(5, v.board.length, ...v.peek.map((x) => x.index + 1)) }, (_, i) => {
+    if (i >= v.board.length) {
+      const pk = peekAt.get(i);
+      // 나만 미리 본 카드: 흐릿하게 + 표시
+      if (pk) return `<span class="peek-slot" title="${esc(pk.label)}: 나만 미리 본 카드 (아직 공개 전)">${cardHtml(pk.card, { size: 'md', extra: 'peek' })}<i>${esc(pk.label)}</i></span>`;
+      return '<span class="card slot md"></span>';
+    }
     const c = v.board[i];
     if (!c) return `<span class="card back md fog" title="짙은 안개: 쇼다운 때 공개"></span>`;
     // 봉인된 카드는 족보 계산에서 빠지므로 강조하지 않는다
@@ -750,6 +790,7 @@ function renderTable(v: PlayerView) {
      ${reserved.length ? `<div class="reserved">${reserved.map((r) => `<span class="res-card" title="${esc(r.label)}">${cardHtml(r.card, { size: 'sm', extra: 'inline' })} 예약</span>`).join('')}</div>` : ''}
      <div class="pot"><span class="pot-chips"></span>팟 ${v.potApprox ? '약 ' : ''}${fmt(v.pot)}</div>
      ${feed ? `<div class="feed">${feed}</div>` : ''}
+     ${revealHtml()}
      ${reactionHtml(v) || `<div class="center-wait">${waitingText(v)} <span class="timer-text" data-timer></span></div>`}`,
   );
 
@@ -1068,7 +1109,13 @@ function renderNotes(v: PlayerView) {
   const noteHtml = notes.length
     ? `<div class="notes"><h4>나만 아는 정보</h4>${notes
         .slice(-8)
-        .map((n) => `<div class="note k-${n.kind}">${richText(n.text)}${n.hand !== v.handNumber ? ` <span class="muted">(#${n.hand})</span>` : ''}</div>`)
+        .map((n) => {
+          const i = n.text.indexOf(':');
+          const title = i > 0 ? n.text.slice(0, i) : '';
+          const body = i > 0 ? n.text.slice(i + 1).trim() : n.text;
+          const big = n.cards?.length && n.hand === v.handNumber ? `<span class="note-cards">${n.cards.map((c) => cardHtml(c, { size: 'sm' })).join('')}</span>` : '';
+          return `<div class="note k-${n.kind}">${title ? `<b class="note-title">${esc(title)}</b>` : ''}${big}<span class="note-body">${richText(body)}</span>${n.hand !== v.handNumber ? ` <span class="muted">(#${n.hand})</span>` : ''}</div>`;
+        })
         .join('')}</div>`
     : '';
   patch($('#g-notes'), statusHtml + noteHtml + countingHtml(v));
@@ -1570,6 +1617,10 @@ document.addEventListener('click', async (ev) => {
     }
     case 'attach':
       return act({ type: 'attach', cardIndex: Number(t.dataset.i) });
+    case 'closeReveal':
+      app.reveal = null;
+      if (app.env) renderGame();
+      return;
     case 'counter':
       return act({ type: 'counter' });
     case 'steal':

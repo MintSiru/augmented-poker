@@ -203,7 +203,10 @@ export interface PlayerState {
   promoted: boolean;
   /** 연금술: 이번 핸드 족보 계산에서 바꾼 홀카드 (공개) */
   alchemy: { index: number; from: Card; to: Card } | null;
-  /** 기록관용: 이번 핸드 프리플랍에 자발적으로 칩을 냈는가, 베팅·레이즈했는가 */
+  /** 재충전: 되돌릴 증강을 고르는 중 / 이번 선택 라운드에서 이미 재충전했는가 */
+  rechargePending: boolean;
+  rechargeDone: boolean;
+  /** 기록관용: 이번 핸드 프리플랍에 자발적으로 칩을 냈는가, 리버에서 베팅·레이즈했는가 */
   vpipHand: boolean;
   aggressed: boolean;
   /** 이 플레이어에게 보여 줄 로그의 시작 번호 (중도 참여자는 참여 이후 로그만 본다) */
@@ -297,6 +300,8 @@ export interface GameOptions {
   /** 고정 주기일 때 레벨당 핸드 수 */
   fixedLevelHands: number;
   debug: boolean;
+  /** 증강 선택에 "재충전" 카드를 보여 준다 */
+  recharge: boolean;
 }
 
 /** 사용된 카드 (카운팅 보유자에게만 보임) */
@@ -415,6 +420,8 @@ export interface GameStats {
   joinChips: number;
   /** 추방으로 사라진 칩 */
   kickedChips: number;
+  /** 플레이어별 재충전한 증강 */
+  recharges: Record<string, AugmentId[]>;
 }
 
 export interface GameState {
@@ -552,6 +559,8 @@ export type GameAction =
   | { type: 'draw'; accept: boolean }
   /** 탈취: 반응 대기 중인 선언을 빼앗고 대상·카드를 다시 고른다 */
   | { type: 'steal'; targetId?: string; boardIndex?: number; cardIndex?: number; choice?: number }
+  /** 재충전: augment 없이 보내면 재충전 카드를 고른 상태(대상 고르기), augment 를 주면 그 증강을 처음 횟수로 */
+  | { type: 'recharge'; augment?: AugmentId }
   /** 잠복: 숨길 증강 고르기 */
   | { type: 'lurk'; augment: AugmentId }
   /** 제안·입찰·비공개 선언에 대한 응답 */

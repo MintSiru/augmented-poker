@@ -514,3 +514,25 @@ body.blurred #g-center .board { filter: blur(1.2px) saturate(.6); }
 .seat.team-3 { --team-c: #aed581; }
 .rx-steal { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin-top: 6px; }
 .seat-rec { font-size: 11px; color: #c9d8a6; margin-top: 2px; }
+
+/* 증강으로 알게 된 정보: 크게 보여 주는 창 */
+.reveal {
+  position: absolute; left: 50%; top: 4%; transform: translateX(-50%); z-index: 30;
+  min-width: 240px; max-width: 92%; padding: 12px 16px; border-radius: 14px; cursor: pointer;
+  background: rgba(32, 22, 58, 0.96); border: 2px solid #b48cff; box-shadow: 0 8px 30px rgba(0, 0, 0, 0.55), 0 0 22px rgba(180, 140, 255, 0.35);
+  text-align: center; animation: reveal-in 0.35s ease-out;
+}
+.reveal-title { font-weight: 700; color: #d9c6ff; font-size: 15px; margin-bottom: 8px; }
+.reveal-cards { display: flex; gap: 8px; justify-content: center; margin: 6px 0 8px; }
+.reveal-body { font-size: 14px; line-height: 1.5; }
+@keyframes reveal-in { from { opacity: 0; transform: translate(-50%, -10px) scale(0.95); } to { opacity: 1; transform: translate(-50%, 0) scale(1); } }
+
+/* 나만 미리 본 보드 카드 */
+.peek-slot { position: relative; display: inline-flex; flex-direction: column; align-items: center; }
+.peek-slot .card.peek { opacity: 0.75; outline: 2px dashed #b48cff; outline-offset: 2px; }
+.peek-slot i { position: absolute; bottom: -16px; font-size: 10px; font-style: normal; color: #d9c6ff; white-space: nowrap; }
+
+/* 나만 아는 정보 목록 */
+.note { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; font-size: 13px; padding: 5px 0; border-bottom: 1px dashed rgba(255, 255, 255, 0.06); }
+.note-title { font-size: 11px; padding: 1px 7px; border-radius: 9px; background: #3a2d63; color: #d9c6ff; font-weight: 600; }
+.note-cards { display: inline-flex; gap: 3px; }

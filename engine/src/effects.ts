@@ -1598,7 +1598,6 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
       const paid = transfer(state, owner, t, 2 * bbOf(state));
       // 틀린 카드는 다른 사람의 카드일 수 있으므로 공개하지 않는다
       addLog(state, `명추리 실패: ${owner.name}이(가) 부른 카드는 ${known ? '이미 알려진 카드라 인정되지 않습니다' : `${t.name}의 카드가 아닙니다`} — 폴드하고 ${t.name}에게 ${paid}칩을 냅니다`);
-      addLog(state, `명추리: 내가 부른 카드 ${cardToken(card)}`, { to: [owner.id] });
       ctx.ops.fold(owner, false);
     },
   },
@@ -2173,6 +2172,13 @@ function windowSamples(state: GameState, p: PlayerState, id: AugmentId): ActiveP
     const known = id === 'nameIt' ? new Set(knownCardsFor(state, p, t)) : null;
     return { targetId: t.id, ...(known ? { card: fullDeck().find((c) => !known.has(c)) } : {}) };
   });
+}
+
+/** 선언 기회에 이 증강으로 고를 수 있는 인자 조합 (연금술의 카드·방향 등) */
+export function windowValidParams(state: GameState, ops: EngineOps, p: PlayerState, id: AugmentId): ActiveParams[] {
+  const a = findAug(p, id);
+  if (!a) return [];
+  return windowSamples(state, p, id).filter((params) => !ACTIVE[id]?.check({ state, ops, owner: p, aug: a }, params, false));
 }
 
 /** 선언 기회에 이 증강으로 지목할 수 있는 대상 */
