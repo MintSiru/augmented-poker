@@ -25,6 +25,7 @@ import {
   live,
   lockError,
   maskFor,
+  boardView,
   publicCards,
   taxFor,
   turnCutFor,
@@ -149,6 +150,8 @@ export interface ShowdownEntryView {
   /** 동점 처리 증강으로 이긴 경우 */
   tiebreak: string[];
   won: number;
+  /** 두 번째 보드의 족보 */
+  alt: { label: string; handName: string }[];
 }
 
 export interface HandResultView {
@@ -157,7 +160,9 @@ export interface HandResultView {
   board: Card[];
   sealed: number[];
   entries: ShowdownEntryView[];
-  pots: { amount: number; winners: string[]; label: string }[];
+  pots: { amount: number; winners: string[]; label: string; units: { label: string; amount: number; winners: string[] }[] | null }[];
+  /** 두 번째 보드 (더블 보드·두 번의 운명) */
+  board2: Card[] | null;
   won: Record<string, number>;
   table: string[];
   extras: string[];
@@ -205,6 +210,14 @@ export interface TableView {
   roundRaises: number;
   /** 자물쇠가 걸린 라운드 */
   locked: boolean;
+  highLow: boolean;
+  lastStand: boolean;
+  capitalism: boolean;
+  /** 자석이 지정한 무늬 */
+  magnetSuit: string | null;
+  twoFates: boolean;
+  /** 스트리트별 누적 공개 장수 (거꾸로 강을 거슬러면 1-2-5) */
+  revealPlan: number[];
 }
 
 export interface PlayerView {
@@ -225,6 +238,10 @@ export interface PlayerView {
   street: Street;
   /** 공개된 보드 (짙은 안개·실명 다트로 가려진 카드는 null, 무늬를 가리면 'A?' 처럼 숫자만) */
   board: (Card | null)[];
+  /** 두 번째 보드 (더블 보드·두 번의 운명), 가림 규칙은 첫 보드와 같다 */
+  board2: (Card | null)[] | null;
+  /** 미리 공개된 예약 카드 (미리 온 결말·동결) */
+  reserved: { index: number; card: Card; label: string }[];
   /** 나에게 걸린 가림 규칙 */
   masks: MaskRules;
   /** 팟·현재 베팅이 대략값인가 */
@@ -289,6 +306,10 @@ export interface PlayerView {
       showChoose: boolean;
       ironWall: boolean;
       blackjackOn: boolean;
+      /** 턴과 리버 사이: 미리 본 두 카드와 순서 */
+      turnRiver: { cards: Card[]; swap: boolean | null } | null;
+      /** 무승부로 하지 않을래?: 제안할 수 있는 상대 */
+      drawPrompt: { winnerName: string } | null;
     };
   };
   result: HandResultView | null;
@@ -347,7 +368,12 @@ function sampleParams(state: GameState, me: PlayerState, id: AugmentId, targets:
     case 'destinyDraw':
       return { card: fullDeck().find((c) => c !== me.keptCard && c !== me.lockerStored) };
     case 'bet':
+    case 'magnet':
       return { choice: 0 };
+    case 'freeze':
+      return { boardIndex: 0 };
+    case 'swapBoard':
+      return { cardIndex: 0, boardIndex: 0 };
     case 'rumor':
       return { augment: 'observer' };
     default:
@@ -441,13 +467,16 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
           variants: x.applied.map((v) => VARIANT_LABEL[v]),
           tiebreak: x.tiebreak.map(nameOfAug),
           won: r.won[x.id] ?? 0,
+          alt: (x.alt ?? []).map((a) => ({ ...a })),
         };
       }),
       pots: r.pots.map((pt, k) => ({
         amount: pt.amount,
         winners: pt.winners.map(nameById),
         label: r.pots.length > 1 ? (k === 0 ? '메인팟' : `사이드팟 ${k}`) : '팟',
+        units: pt.units ? pt.units.map((u) => ({ label: u.label, amount: u.amount, winners: u.winners.map(nameById) })) : null,
       })),
+      board2: r.board2 ? [...r.board2] : null,
       won: { ...r.won },
       table: [...r.table],
       extras: [...r.extras],
@@ -572,6 +601,8 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     currentBet: approx(state.currentBet),
     masks: mask,
     potApprox: mask.amounts,
+    board2: state.board2 ? boardView(state, state.board2, me).map((c) => (c ? blurCard(c) : c)) : null,
+    reserved: mask.board ? [] : state.reservedPublic.map((r) => ({ index: r.index, card: blurCard(r.card), label: r.label })),
     players,
     toActId: state.phase === 'betting' && state.toAct !== null ? state.players[state.toAct].id : null,
     lastAggressorId:
@@ -595,6 +626,12 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
       raiseCap: state.phase === 'betting' || state.phase === 'reaction' ? state.round.raiseCap : null,
       roundRaises: state.round.raises,
       locked: !!lockError(state),
+      highLow: e.highLow,
+      lastStand: e.lastStand,
+      capitalism: e.capitalism,
+      magnetSuit: e.magnet?.suit ?? null,
+      twoFates: e.twoFates,
+      revealPlan: [...state.revealPlan],
     },
     reaction,
     you: {
@@ -635,6 +672,8 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
         showChoose: seated && me.showPending && state.phase === 'handEnd',
         ironWall: me.ironWall,
         blackjackOn: me.blackjackOn,
+        turnRiver: me.turnRiver ? { cards: [...me.turnRiver.cards], swap: me.turnRiver.swap } : null,
+        drawPrompt: me.drawPrompt && state.phase === 'handEnd' ? { winnerName: nameById(me.drawPrompt.winnerId) } : null,
       },
     },
     result,
@@ -662,6 +701,12 @@ function tableNotes(state: GameState): string[] {
     if (e.blindDarted.length && !e.fogLifted) out.push(`실명 다트: ${e.blindDarted.map((id) => state.players.find((p) => p.id === id)?.name ?? '?').join(', ')}`);
     if (state.round.raiseCap !== null && (state.phase === 'betting' || state.phase === 'reaction')) out.push('서킷브레이커: 레이즈 1회 제한');
     if (state.round.locked) out.push('자물쇠: 증강 사용 불가');
+    if (e.highLow) out.push('하이로우');
+    if (e.lastStand) out.push('배수진: 폴드·레이즈 금지');
+    if (e.capitalism) out.push('자본주의');
+    if (e.magnet) out.push(`자석: ${({ s: '♠', h: '♥', d: '♦', c: '♣' } as Record<string, string>)[e.magnet.suit]}${e.magnet.used ? ' (사용됨)' : ''}`);
+    if (state.board2) out.push(e.twoFates ? '두 번의 운명' : '더블 보드');
+    if (state.revealPlan[0] !== 3) out.push('거꾸로 강을 거슬러 (1-1-3)');
     if (e.glass) out.push('유리 테이블');
     if (e.blackout) out.push('암전');
     if (e.fogSeers.length && !e.fogLifted) out.push('짙은 안개');
@@ -670,6 +715,9 @@ function tableNotes(state: GameState): string[] {
   }
   if (state.blackoutNext) out.push('다음 핸드 암전');
   if (state.bombNext) out.push('다음 핸드 폭탄 팟');
+  if (state.nextHand.reverse) out.push('다음 핸드 거꾸로 강을 거슬러');
+  if (state.nextHand.prophecy) out.push('다음 핸드 미리 온 결말');
+  if (state.nextHand.freezeCard) out.push(`다음 핸드 동결 [${state.nextHand.freezeCard}]`);
   if (state.underdogLeft > 0) out.push(`언더독 ${state.underdogLeft}핸드 남음`);
   return out;
 }

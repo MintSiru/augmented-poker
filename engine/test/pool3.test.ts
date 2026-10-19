@@ -203,3 +203,237 @@ describe('1. 시야·시간 제어', () => {
     expect(s.stats.heavenFolds).toBe(1);
   });
 });
+
+// ───────────────────────── 2. 보드·팟 구조 ─────────────────────────
+
+/** 다음 선언 기회(declare)까지 진행 */
+const toWindow = (s: GameState, stage: string) => passUntil(s, () => s.phase === 'declare' && s.windowStage === stage);
+
+describe('2. 보드·팟 구조', () => {
+  it('보드 7장 + 홀카드 중 최선 5장으로 판정한다', () => {
+    const r = evaluatePlayerHand(cards('2c 3d'), cards('Ah Kh Qh Jh 9c 8d Th'), {});
+    expect(r.value.name).toBe('로열 플러시');
+  });
+
+  it('나누어떨어지지 않는 칩은 딜러 왼쪽에 가장 가까운 승자에게 모두 간다', async () => {
+    const { splitPot } = await import('../src/pots.js');
+    expect([...splitPot(11, ['a', 'b', 'c'])]).toEqual([['a', 5], ['b', 3], ['c', 3]]);
+  });
+
+  it('플러스 원: 리버 직후 6번째 보드 카드를 공개하고 6장으로 판정', () => {
+    const s = setup(3, { augs: { p1: ['plusOne'] }, deal: { board: cards('2h 5d 9c Jd Ks'), hands: { p1: cards('Qc 3s'), p2: cards('Kd 4c'), p3: cards('6c 7c') } }, before: (st) => ok(debugSetNextDeal(st, { board: cards('2h 5d 9c Jd Ks'), hands: { p1: cards('Qc 3s'), p2: cards('Kd 4c'), p3: cards('6c 7c') }, deck: ['Tc'] })) });
+    toWindow(s, 'river');
+    act(s, 'p1', { type: 'declare', augment: 'plusOne' });
+    resolveAll(s);
+    expect(s.boardRevealed).toBe(6);
+    expect(s.board[5]).toBe('Tc');
+    expect(view(s, 'p2').board).toHaveLength(6);
+    toShowdown(s);
+    // p1: 9-T-J-Q-K 스트레이트 (6번째 카드 Tc 사용)
+    expect(s.result!.won.p1).toBe(60);
+  });
+
+  it('자본주의: 플랍·턴 라운드가 끝날 때 가장 크게 베팅한 사람이 보드를 1장 더 깔지 정한다 (최대 7장)', () => {
+    const s = setup(3, { augs: { p2: ['capitalism'] } });
+    passUntil(s, () => s.street === 'flop');
+    use(s, 'p2', 'capitalism');
+    resolveAll(s);
+    act(s, 'p2', { type: 'raise', amount: 40 });
+    act(s, 'p3', { type: 'call' });
+    act(s, 'p1', { type: 'call' });
+    expect(s.phase).toBe('declare');
+    expect(getPending(s).playerIds).toEqual(['p2']);
+    expect(view(s, 'p2').you.declare!.options.map((o) => o.id)).toEqual(['capitalism']);
+    act(s, 'p2', { type: 'declare', augment: 'capitalism' });
+    expect(s.board).toHaveLength(6);
+    expect(s.street).toBe('turn');
+    expect(s.boardRevealed).toBe(5); // 추가 1장 + 턴
+    // 아무도 베팅하지 않은 라운드는 추가 없음
+    passUntil(s, () => s.street === 'river');
+    expect(s.board).toHaveLength(6);
+    expect(s.boardRevealed).toBe(6);
+  });
+
+  it('거꾸로 강을 거슬러: 다음 핸드 보드가 1 → 1 → 3장 순서로 공개', () => {
+    const s = setup(3, { augs: { p1: ['reverseRiver'] }, before: (st) => use(st, 'p1', 'reverseRiver') });
+    expect(view(s, 'p2').table.revealPlan).toEqual([1, 2, 5]);
+    passUntil(s, () => s.street === 'flop');
+    expect(s.boardRevealed).toBe(1);
+    passUntil(s, () => s.street === 'turn');
+    expect(s.boardRevealed).toBe(2);
+    passUntil(s, () => s.street === 'river');
+    expect(s.boardRevealed).toBe(5);
+  });
+
+  it('더블 보드: 보드 2세트, 각 보드의 승자가 팟을 반씩', () => {
+    const s = setup(3, {
+      augs: { p1: ['doubleBoard'] },
+      deal: { board: cards('Ah 2c 7d 9s Jc'), hands: { p1: cards('As Ad'), p2: cards('Ks 5c'), p3: cards('3c 4d') }, deck: cards('Kc Kd 3h 4s 8d') },
+    });
+    use(s, 'p1', 'doubleBoard');
+    resolveAll(s);
+    expect(s.board2).toEqual(cards('Kc Kd 3h 4s 8d'));
+    act(s, 'p1', { type: 'call' });
+    act(s, 'p2', { type: 'call' });
+    act(s, 'p3', { type: 'fold' });
+    passUntil(s, () => s.street === 'flop');
+    expect(view(s, 'p3').board2).toEqual(cards('Kc Kd 3h'));
+    toShowdown(s);
+    const pot = s.result!.pots[0];
+    expect(pot.units!.map((u) => [u.label, u.winners, u.amount])).toEqual([
+      ['첫 보드', ['p1'], 30],
+      ['두 번째 보드', ['p2'], 30],
+    ]);
+  });
+
+  it('두 번의 운명: 모두 올인이면 턴 직후 선언, 리버를 두 번 뽑아 팟을 반씩', () => {
+    const s = setup(2, {
+      augs: { p1: ['twoFates'] },
+      chips: [500, 500],
+      deal: { board: cards('Ah 2c 7d 9s Jc'), hands: { p1: cards('As 3d'), p2: cards('Ks Kd') }, deck: ['Kh'] },
+    });
+    act(s, 'p1', { type: 'allin' });
+    act(s, 'p2', { type: 'call' });
+    toWindow(s, 'turn');
+    act(s, 'p1', { type: 'declare', augment: 'twoFates' });
+    resolveAll(s);
+    expect(s.board2!.slice(0, 4)).toEqual(s.board.slice(0, 4));
+    expect(s.board2![4]).toBe('Kh');
+    toShowdown(s);
+    const u = s.result!.pots[0].units!;
+    expect(u.map((x) => x.winners)).toEqual([['p1'], ['p2']]);
+    expect(u.map((x) => x.amount)).toEqual([500, 500]);
+  });
+
+  it('미리 온 결말: 다음 핸드 리버를 미리 공개 예약, 되감기로 바꿀 수 없다', () => {
+    const s = setup(3, { augs: { p1: ['prophecy'], p2: ['rewind'] }, before: (st) => use(st, 'p1', 'prophecy') });
+    const res = view(s, 'p3').reserved;
+    expect(res).toHaveLength(1);
+    expect(res[0].index).toBe(4);
+    expect(res[0].card).toBe(s.board[4]);
+    toWindow(s, 'turn');
+    // 턴에서는 되감기 가능, 리버(예약)에서는 불가
+    act(s, getPending(s).playerIds[0], { type: 'declare', augment: null });
+    passUntil(s, () => s.street === 'river');
+    expect(s.board[4]).toBe(res[0].card);
+    expect(view(s, 'p2').you.declare).toBeNull();
+  });
+
+  it('턴과 리버 사이: 두 카드를 나만 미리 보고 순서를 정한다 (확정 카드라 양자택일 불가)', () => {
+    const s = setup(3, { augs: { p1: ['turnRiver', 'eitherOr'] }, deal: { board: cards(BOARD) } });
+    toWindow(s, 'flop');
+    expect(view(s, 'p1').you.declare!.options.map((o) => o.id).sort()).toEqual(['eitherOr', 'turnRiver']);
+    act(s, 'p1', { type: 'declare', augment: 'turnRiver' });
+    expect(view(s, 'p3').log.some((e) => e.text.includes('턴과 리버 사이'))).toBe(true);
+    resolveAll(s);
+    expect(view(s, 'p1').you.extra.turnRiver).toEqual({ cards: ['4h', '2s'], swap: null });
+    expect(JSON.stringify(view(s, 'p2'))).not.toMatch(/"4h"|"2s"|\[4h\]|\[2s\]/);
+    act(s, 'p1', { type: 'turnRiver', swap: true });
+    passUntil(s, () => s.street === 'river');
+    expect(s.board.slice(3, 5)).toEqual(['2s', '4h']);
+  });
+
+  it('하이로우: 가장 높은 패와 가장 낮은 패가 팟을 반씩', () => {
+    const s = setup(3, { augs: { p1: ['highLow'] }, deal: { board: cards('Ah 2c 7d 9s Jc'), hands: { p1: cards('As Ad'), p2: cards('3s 4d'), p3: cards('Kc Qd') } } });
+    use(s, 'p1', 'highLow');
+    resolveAll(s);
+    toShowdown(s);
+    const u = s.result!.pots[0].units!;
+    expect(u.map((x) => [x.label, x.winners])).toEqual([['하이', ['p1']], ['로우', ['p2']]]);
+  });
+
+  it('동결: 핸드가 끝날 때 지정한 보드 카드가 다음 핸드 플랍에 반드시 포함된다 (모두에게 공개)', () => {
+    const s = setup(3, { augs: { p1: ['freeze'] }, deal: { board: cards(BOARD) } });
+    toShowdown(s);
+    use(s, 'p1', 'freeze', { boardIndex: 1 });
+    resolveAll(s);
+    expect(view(s, 'p3').log.some((e) => e.text.includes('[Kd]'))).toBe(true);
+    ok(startNextHand(s));
+    expect(view(s, 'p2').reserved.map((r) => r.card)).toEqual(['Kd']);
+    expect(s.board.slice(0, 3)).toContain('Kd');
+  });
+
+  it('자석: 턴·리버 중 지정한 무늬가 아닌 카드가 처음 나오면 버리고 다시 뽑는다 (한 번만)', () => {
+    const s = setup(3, { augs: { p1: ['magnet'] }, deal: { board: cards('As Kd 7c 4h 2s'), deck: ['9d'] } });
+    passUntil(s, () => s.street === 'flop');
+    use(s, 'p1', 'magnet', { choice: 0 }); // 스페이드
+    resolveAll(s);
+    passUntil(s, () => s.street === 'turn');
+    expect(s.board[3]).toBe('9d'); // 4h 버리고 다시 뽑은 카드는 무늬와 관계없이 확정
+    passUntil(s, () => s.street === 'river');
+    expect(s.board[4]).toBe('2s');
+  });
+
+  it('맞바꾸기: 턴 이후 홀카드 1장과 보드 카드 1장을 바꾸고 공개', () => {
+    const s = setup(3, { augs: { p2: ['swapBoard'] }, deal: { board: cards(BOARD), hands: { p2: cards('Qc Jh') } } });
+    passUntil(s, () => s.street === 'flop');
+    expect(tryUse(s, 'p2', 'swapBoard', { cardIndex: 0, boardIndex: 0 }).ok).toBe(false);
+    passUntil(s, () => s.street === 'turn');
+    use(s, 'p2', 'swapBoard', { cardIndex: 0, boardIndex: 0 });
+    resolveAll(s);
+    expect(P(s, 'p2').hole).toEqual(['As', 'Jh']);
+    expect(s.board[0]).toBe('Qc');
+    expect(view(s, 'p3').log.some((e) => e.text.includes('[Qc]') && e.text.includes('[As]'))).toBe(true);
+  });
+
+  it('배수진: 폴드·레이즈 금지, 시간 초과면 콜, 면역이면 폴드 가능', () => {
+    const s = setup(3, { augs: { p1: ['lastStand'], p3: ['immunity'] } });
+    use(s, 'p1', 'lastStand');
+    act(s, 'p3', { type: 'immunity' });
+    resolveAll(s);
+    expect(applyAction(s, 'p1', { type: 'fold' }).ok).toBe(false);
+    expect(applyAction(s, 'p1', { type: 'raise', amount: 40 }).ok).toBe(false);
+    const l = legalActions(s, 'p1')!;
+    expect([l.fold, l.raise, l.allIn]).toEqual([false, false, false]);
+    applyTimeouts(s);
+    expect(P(s, 'p1').streetBet).toBe(20);
+    act(s, 'p2', { type: 'call' });
+    expect(legalActions(s, 'p3')!.fold).toBe(true);
+  });
+
+  it('사이드 팟 브레이커: 내 올인으로 생긴 사이드팟의 30%를 메인 팟 승리 후 가져온다', () => {
+    const s = setup(3, {
+      augs: { p1: ['sidePotBreaker'] },
+      chips: [100, 1000, 1000],
+      deal: { board: cards(BOARD), hands: { p1: cards('Ac Ah'), p2: cards('Kc Kh'), p3: cards('Qc Qd') } },
+    });
+    act(s, 'p1', { type: 'allin' });
+    act(s, 'p2', { type: 'raise', amount: 300 });
+    act(s, 'p3', { type: 'call' });
+    toShowdown(s);
+    expect(s.result!.pots.map((p) => p.amount)).toEqual([300, 400]);
+    const p2Before = P(s, 'p2').chips;
+    use(s, 'p1', 'sidePotBreaker');
+    resolveAll(s);
+    expect(P(s, 'p1').chips).toBe(300 + 120);
+    expect(P(s, 'p2').chips).toBe(p2Before - 120);
+  });
+
+  it('무승부로 하지 않을래?: 같은 족보 종류로 졌으면 결과 직후 나에게만 선택 창, 발동하면 반씩', () => {
+    const s = setup(3, { augs: { p2: ['drawOffer'] }, deal: { board: cards('As 9d 7c 4h 2s'), hands: { p1: cards('Kc Kh'), p2: cards('Qc Qh'), p3: cards('3c 5d') } } });
+    act(s, 'p1', { type: 'call' });
+    act(s, 'p2', { type: 'call' });
+    act(s, 'p3', { type: 'fold' });
+    toShowdown(s);
+    expect(view(s, 'p2').you.extra.drawPrompt).toEqual({ winnerName: 'P1' });
+    expect(view(s, 'p1').you.extra.drawPrompt).toBeNull();
+    expect(getPending(s).playerIds).toEqual(['p2']);
+    act(s, 'p2', { type: 'draw', accept: true });
+    expect(P(s, 'p1').chips).toBe(980 + 30);
+    expect(P(s, 'p2').chips).toBe(980 + 30);
+    expect(P(s, 'p2').augments[0].usesLeft).toBe(2);
+  });
+
+  it('무승부로 하지 않을래?: 승자가 동점 처리 증강을 가졌으면 상쇄되어 발동할 수 없다, 응답이 없으면 발동 안 함', () => {
+    const s = setup(3, { augs: { p2: ['drawOffer'], p1: ['kickerMaster'] }, deal: { board: cards('As 9d 7c 4h 2s'), hands: { p1: cards('Kc Kh'), p2: cards('Qc Qh'), p3: cards('8c 6d') } } });
+    toShowdown(s);
+    expect(view(s, 'p2').you.extra.drawPrompt).toBeNull();
+    const t = setup(3, { augs: { p2: ['drawOffer'] }, chips: [1000, 20, 1000], deal: { board: cards('As 9d 7c 4h 2s'), hands: { p1: cards('Kc Kh'), p2: cards('Qc Qh'), p3: cards('8c 6d') } } });
+    toShowdown(t);
+    expect(view(t, 'p2').you.extra.drawPrompt).not.toBeNull();
+    // 탈락 판정은 선택이 끝날 때까지 미룬다
+    expect(P(t, 'p2').out).toBe(false);
+    ok(startNextHand(t));
+    expect(P(t, 'p2').out).toBe(true);
+  });
+});

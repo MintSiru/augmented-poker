@@ -52,6 +52,8 @@ import type {
   GameState,
   HandResult,
   Joiner,
+  PotResult,
+  PotUnit,
   OwnedAugment,
   Pending,
   Phase,
@@ -308,6 +310,7 @@ function opsFor(state: GameState): EngineOps {
     restartRound: () => restartRound(state),
     highCardDuel: () => highCardDuel(state),
     restartHand: (p) => restartHand(state, p),
+    addBoardCard: (label) => addBoardCard(state, label),
     fold: (p, forced) => doFold(state, p, forced),
     afterBet: (idx) => {
       state.betActionSeq++;
@@ -882,8 +885,14 @@ function needsToAct(state: GameState, p: PlayerState): boolean {
   return canAct(p) && !(p.acted && owed(state, p) === 0);
 }
 
+/** 배수진: 이번 핸드 폴드 불가 (면역이면 폴드 가능) */
+function noFold(state: GameState, p: PlayerState): boolean {
+  return state.effects.lastStand && !state.effects.lastStandImmune.includes(p.id);
+}
+
 function canRaise(state: GameState, p: PlayerState): boolean {
   if (state.round.raiseCap === 0) return false; // 서킷브레이커 후 레이즈 1회 제한
+  if (state.effects.lastStand) return false; // 배수진: 체크·콜만
   return !p.acted || state.currentBet - p.actedLevel >= state.minRaise;
 }
 
@@ -1094,6 +1103,7 @@ function applyBet(state: GameState, idx: number, a: BetAction): string | null {
   const p = state.players[idx];
   const toCall = owed(state, p);
   if (p.forcedCall && (a.type === 'fold' || a.type === 'raise')) return '강제 집행 대상이라 콜해야 합니다.';
+  if (a.type === 'fold' && noFold(state, p)) return '배수진: 이번 핸드는 폴드할 수 없습니다.';
   switch (a.type) {
     case 'fold':
       doFold(state, p, false);
@@ -1129,6 +1139,7 @@ function applyBet(state: GameState, idx: number, a: BetAction): string | null {
         break;
       }
       if (state.round.raiseCap === 0) return '서킷브레이커: 이번 라운드는 레이즈를 1번만 허용합니다 (콜 또는 폴드).';
+      if (state.effects.lastStand) return '배수진: 이번 핸드는 체크·콜만 할 수 있습니다.';
       if (!canRaise(state, p)) return '완전한 레이즈가 없었으므로 다시 레이즈할 수 없습니다 (콜 또는 폴드).';
       const minTo = state.currentBet + state.minRaise;
       if (target < minTo && target !== maxTo) return `최소 ${minTo}까지 레이즈해야 합니다.`;
@@ -1731,28 +1742,65 @@ export function betCategory(score: readonly number[]): number {
 
 export const BET_CATEGORY_NAMES = [...CATEGORY_NAMES.slice(0, 7), '포카드 이상'];
 
+/** 쇼다운 판정 단위: 보드별(더블 보드·두 번의 운명) × 하이·로우 */
+interface JudgeUnit {
+  label: string;
+  boardIdx: number;
+  inverted: boolean;
+}
+
+function judgeUnits(state: GameState): { boards: { label: string; cards: Card[] }[]; units: JudgeUnit[] } {
+  const inverted = invertedNow(state);
+  const boards = [{ label: '', cards: evalBoard(state) }];
+  if (state.board2) {
+    const two = state.effects.twoFates;
+    boards[0].label = two ? '첫 리버' : '첫 보드';
+    boards.push({ label: two ? '두 번째 리버' : '두 번째 보드', cards: state.board2.slice(0, state.boardRevealed) });
+  }
+  const modes = state.effects.highLow
+    ? [
+        { label: '하이', inverted },
+        { label: '로우', inverted: !inverted },
+      ]
+    : [{ label: '', inverted }];
+  const units: JudgeUnit[] = [];
+  boards.forEach((b, boardIdx) => {
+    for (const m of modes) units.push({ label: [b.label, m.label].filter(Boolean).join(' · '), boardIdx, inverted: m.inverted });
+  });
+  return { boards, units };
+}
+
 function showdown(state: GameState): void {
   state.effects.fogLifted = true;
   const order = seatOrderFromDealer(state);
-  const board = evalBoard(state);
-  const inverted = invertedNow(state);
+  const seatRank = (id: string) => order.findIndex((i) => state.players[i].id === id);
+  const { boards, units } = judgeUnits(state);
+  const board = boards[0].cards;
   const entries: ShowdownEntry[] = [];
-  const contenders = new Map<string, Contender>();
+  // 보드별 각 플레이어의 족보
+  const contenders = boards.map(() => new Map<string, Contender>());
   for (const i of order) {
     const p = state.players[i];
     if (!live(p)) continue;
     p.shown = true;
     const ev = handEvalFor(state, p, board);
-    entries.push({ id: p.id, cards: [...p.hole], handName: ev.value.name, bestCards: ev.value.cards, score: ev.value.score, applied: ev.applied, tiebreak: [] });
-    contenders.set(p.id, contenderFor(state, p, ev));
+    const entry: ShowdownEntry = { id: p.id, cards: [...p.hole], handName: ev.value.name, bestCards: ev.value.cards, score: ev.value.score, applied: ev.applied, tiebreak: [] };
+    contenders[0].set(p.id, contenderFor(state, p, ev));
+    boards.slice(1).forEach((b, k) => {
+      const ev2 = handEvalFor(state, p, b.cards);
+      contenders[k + 1].set(p.id, contenderFor(state, p, ev2));
+      (entry.alt ??= []).push({ label: b.label, handName: ev2.value.name });
+    });
+    entries.push(entry);
   }
   const table = tableEffectNotes(state);
   addLog(state, `쇼다운${table.length ? ` — ${table.join(', ')}` : ''}`);
-  if (state.effects.fogSeers.length || state.effects.blindDarted.length) addLog(state, `보드 공개: ${cardsText(state.board.slice(0, state.boardRevealed))}`);
+  if (state.effects.fogSeers.length || state.effects.blindDarted.length || state.effects.glasses.length) addLog(state, `보드 공개: ${cardsText(state.board.slice(0, state.boardRevealed))}`);
+  if (state.board2) addLog(state, `두 번째 보드: ${cardsText(state.board2.slice(0, state.boardRevealed))}`);
   for (const e of entries) {
     const p = playerById(state, e.id)!;
     const variants = e.applied.map((v) => VARIANT_LABEL[v]);
-    addLog(state, `${p.name}: ${cardsText(e.cards)} — ${e.handName}${variants.length ? ` (${variants.join(', ')})` : ''}`);
+    addLog(state, `${p.name}: ${cardsText(e.cards)} — ${e.handName}${variants.length ? ` (${variants.join(', ')})` : ''}${e.alt?.length ? ` / ${e.alt.map((a) => `${a.label} ${a.handName}`).join(', ')}` : ''}`);
     for (const v of e.applied) {
       const aug = findAug(p, VARIANT_AUG[v]);
       if (aug) {
@@ -1765,15 +1813,18 @@ function showdown(state: GameState): void {
     state.players.filter((p) => p.inHand).map((p) => ({ id: p.id, contributed: p.contributed, folded: p.folded })),
     state.deadMoney,
   );
-  const decisions = pots.map((pot) => decidePot(pot.eligible.map((id) => contenders.get(id)!).filter(Boolean), { inverted, board }));
+  // 팟마다 판정 단위별 승자
+  const decisions = pots.map((pot) =>
+    units.map((u) => decidePot(pot.eligible.map((id) => contenders[u.boardIdx].get(id)!).filter(Boolean), { inverted: u.inverted, board: boards[u.boardIdx].cards })),
+  );
   const extras: string[] = [];
   // 내기할래?: 쇼다운까지 가서 졌는데 우승 족보 예측이 맞으면 낸 칩의 50%를 팟에서 환급
-  const mainWinner = entries.find((e) => decisions[0]?.winners.includes(e.id));
+  const mainWinner = entries.find((e) => decisions[0]?.[0]?.winners.includes(e.id));
   if (mainWinner) {
     const cat = betCategory(mainWinner.score);
     for (const e of entries) {
       const p = playerById(state, e.id)!;
-      if (p.betPrediction === null || decisions.some((d) => d.winners.includes(p.id))) continue;
+      if (p.betPrediction === null || decisions.some((d) => d.some((u) => u.winners.includes(p.id)))) continue;
       if (p.betPrediction !== cat) continue;
       let refund = Math.floor(p.contributed * 0.5);
       let got = 0;
@@ -1792,13 +1843,21 @@ function showdown(state: GameState): void {
     }
   }
   const won: Record<string, number> = {};
-  const potResults = pots.map((pot, k) => {
-    const decision = decisions[k];
-    for (const [id, tags] of Object.entries(decision.decidedBy)) {
-      const entry = entries.find((x) => x.id === id)!;
-      const p = playerById(state, id)!;
-      for (const t of tags) {
-        if (!entry.tiebreak.includes(t)) {
+  const give = (id: string, amt: number) => {
+    if (amt <= 0) return;
+    won[id] = (won[id] ?? 0) + amt;
+    playerById(state, id)!.chips += amt;
+  };
+  const potResults: PotResult[] = pots.map((pot, k) => {
+    const label = pots.length > 1 ? (k === 0 ? '메인팟' : `사이드팟 ${k}`) : '팟';
+    const unitDecisions = decisions[k];
+    // 동점 처리 증강 표시
+    unitDecisions.forEach((decision) => {
+      for (const [id, tags] of Object.entries(decision.decidedBy)) {
+        const entry = entries.find((x) => x.id === id)!;
+        const p = playerById(state, id)!;
+        for (const t of tags) {
+          if (entry.tiebreak.includes(t)) continue;
           entry.tiebreak.push(t);
           const aug = findAug(p, t);
           if (aug) {
@@ -1807,27 +1866,105 @@ function showdown(state: GameState): void {
           }
         }
       }
+    });
+    // 판정 단위로 나누고, 나누어떨어지지 않는 칩은 딜러 왼쪽에 가장 가까운 승자에게
+    const n = unitDecisions.length;
+    const base = Math.floor(pot.amount / n);
+    const unitResults: PotUnit[] = unitDecisions.map((decision, u) => {
+      const ordered = order.map((i) => state.players[i].id).filter((id) => decision.winners.includes(id));
+      const shares = teamShares(state, pot, ordered, base);
+      for (const [id, amt] of shares) give(id, amt);
+      return { label: units[u].label || label, amount: base, winners: [...shares.keys()].filter((id) => (shares.get(id) ?? 0) > 0) };
+    });
+    const rem = pot.amount - base * n;
+    const allWinners = [...new Set(unitResults.flatMap((u) => u.winners))].sort((a, b) => seatRank(a) - seatRank(b));
+    if (rem > 0 && allWinners.length) {
+      give(allWinners[0], rem);
+      const first = unitResults.find((u) => u.winners.includes(allWinners[0]))!;
+      first.amount += rem;
     }
-    const ordered = order.map((i) => state.players[i].id).filter((id) => decision.winners.includes(id));
-    for (const [id, amt] of splitPot(pot.amount, ordered)) {
-      won[id] = (won[id] ?? 0) + amt;
-      playerById(state, id)!.chips += amt;
+    for (const u of unitResults) {
+      addLog(state, `${u.winners.map((id) => playerById(state, id)!.name).join(', ')} ${n > 1 ? `${label} ${u.label}` : label} ${u.amount}칩 획득${u.winners.length > 1 ? ' (분할)' : ''}`);
     }
-    const label = pots.length > 1 ? (k === 0 ? '메인팟' : `사이드팟 ${k}`) : '팟';
-    addLog(state, `${ordered.map((id) => playerById(state, id)!.name).join(', ')} ${label} ${pot.amount}칩 획득${ordered.length > 1 ? ' (분할)' : ''}`);
-    return { amount: pot.amount, eligible: pot.eligible, winners: ordered };
+    return { amount: pot.amount, eligible: pot.eligible, winners: allWinners, ...(n > 1 ? { units: unitResults } : {}) };
   });
+  // 무승부로 하지 않을래?: 나를 이긴 승자의 족보 종류가 내 족보 종류와 같으면 결과 직후 나에게만 선택 창
+  if (units.length === 1) offerDraws(state, entries, potResults);
   finishHand(state, {
     hand: state.handNumber,
     showdown: true,
-    board: [...state.board],
+    board: state.board.slice(0, state.boardRevealed),
     sealed: [...state.effects.sealed],
+    ...(state.board2 ? { board2: state.board2.slice(0, state.boardRevealed) } : {}),
     entries,
     pots: potResults,
     won,
     table,
     extras,
   });
+}
+
+/** 판정 단위 하나의 칩을 승자에게 나눈다 (운명 공동체면 팀원과 반씩 — 5단계에서 확장) */
+function teamShares(_state: GameState, _pot: { eligible: string[] }, winnersInOrder: string[], amount: number): Map<string, number> {
+  return winnersInOrder.length ? splitPot(amount, winnersInOrder) : new Map();
+}
+
+const TIEBREAK_AUGS: AugmentId[] = ['kickerMaster', 'absoluteKicker', 'pureBlood', 'drawOffer'];
+
+function offerDraws(state: GameState, entries: ShowdownEntry[], pots: PotResult[]): void {
+  for (const e of entries) {
+    const me = playerById(state, e.id)!;
+    const da = findAug(me, 'drawOffer');
+    if (!da || (da.usesLeft ?? 0) <= 0 || !active(me)) continue;
+    const myCat = betCategory(e.score);
+    for (const [k, pot] of pots.entries()) {
+      if (!pot.eligible.includes(me.id) || pot.winners.includes(me.id)) continue;
+      const w = pot.winners.find((id) => {
+        const we = entries.find((x) => x.id === id);
+        const wp = playerById(state, id)!;
+        return we && betCategory(we.score) === myCat && !TIEBREAK_AUGS.some((t) => findAug(wp, t));
+      });
+      if (!w) continue;
+      if (me.drawPrompt && me.drawPrompt.winnerId !== w) continue;
+      me.drawPrompt = { winnerId: w, pots: [...(me.drawPrompt?.pots ?? []), k] };
+    }
+    if (me.drawPrompt) addLog(state, `무승부로 하지 않을래?: ${playerById(state, me.drawPrompt.winnerId)!.name}에게 무승부를 제안할 수 있습니다`, { to: [me.id] });
+  }
+}
+
+/** 무승부로 하지 않을래? 응답: 그 승자와 나 둘이서 그 팟(승자 몫)을 반씩 */
+function applyDraw(state: GameState, p: PlayerState, accept: boolean): string | null {
+  const dp = p.drawPrompt;
+  if (state.phase !== 'handEnd' || !dp) return '지금은 무승부를 제안할 수 없습니다.';
+  p.drawPrompt = null;
+  if (!accept) return null;
+  const da = findAug(p, 'drawOffer');
+  const w = playerById(state, dp.winnerId);
+  const r = state.result;
+  if (!da || (da.usesLeft ?? 0) <= 0 || !w || !r) return null;
+  da.usesLeft = (da.usesLeft ?? 0) - 1;
+  countUse(state, 'drawOffer');
+  const order = seatOrderFromDealer(state).map((i) => state.players[i].id);
+  let moved = 0;
+  for (const k of dp.pots) {
+    const pot = r.pots[k];
+    const share = Math.floor(pot.amount / pot.winners.length) + (pot.winners[0] === w.id ? pot.amount % pot.winners.length : 0);
+    // 반으로 나누고 남는 1칩은 딜러 왼쪽에 가까운 쪽에게
+    const half = Math.floor(share / 2);
+    const odd = share - half * 2;
+    const toMe = half + (odd && order.indexOf(p.id) < order.indexOf(w.id) ? 1 : 0);
+    const amt = Math.min(toMe, w.chips);
+    w.chips -= amt;
+    p.chips += amt;
+    moved += amt;
+  }
+  r.won[p.id] = (r.won[p.id] ?? 0) + moved;
+  r.won[w.id] = (r.won[w.id] ?? 0) - moved;
+  const text = `${p.name}: 무승부로 하지 않을래? — ${w.name}와(과) 팟을 반씩 나눠 ${moved}칩을 받음`;
+  r.extras.push(text);
+  announceNamed(state, p, da, '발동', `— ${w.name}와(과) 무승부`);
+  addLog(state, text);
+  return null;
 }
 
 function endHandUncontested(state: GameState, winner: PlayerState): void {
@@ -1860,7 +1997,8 @@ function finishHand(state: GameState, result: HandResult): void {
   state.declareQueue = [];
   runHandEndHooks(state, result);
   state.result = result;
-  if (bustSweep(state)) return;
+  // 쇼다운 직후 선택(무승부 제안)이 남아 있으면 탈락 판정은 다음 핸드 시작 전에
+  if (!state.players.some((p) => p.drawPrompt) && bustSweep(state)) return;
   state.phase = 'handEnd';
   state.decisionSeq++;
 }
@@ -1961,6 +2099,7 @@ export function startNextHand(state: GameState): ActionResult {
     if (p.attachPending) applyAttach(state, p, p.hole.indexOf(best));
     if (p.lockerPending) applyLocker(state, p, p.hole.indexOf(best));
     p.showPending = false;
+    p.drawPrompt = null;
   }
   // 핸드가 끝난 뒤 칩이 바뀌었을 수 있다 (쇼맨십 등)
   if (bustSweep(state)) return { ok: true };
@@ -2102,6 +2241,13 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
     case 'immunity':
       err = applyImmunity(state, p);
       break;
+    case 'draw':
+      err = applyDraw(state, p, action.accept === true);
+      break;
+    case 'turnRiver':
+      err = !p.turnRiver || p.turnRiver.swap !== null ? '정할 순서가 없습니다.' : null;
+      if (!err) p.turnRiver!.swap = action.swap === true;
+      break;
     case 'useAugment':
       err = applyUseAugment(state, p, action);
       break;
@@ -2125,7 +2271,7 @@ export function getPending(state: GameState): Pending {
     case 'reaction':
       return { seq, kind: 'reaction', playerIds: [] };
     case 'handEnd':
-      return { seq, kind: 'handEnd', playerIds: state.players.filter((p) => p.attachPending || p.lockerPending || p.showPending).map((p) => p.id) };
+      return { seq, kind: 'handEnd', playerIds: state.players.filter((p) => p.attachPending || p.lockerPending || p.showPending || p.drawPrompt).map((p) => p.id) };
     default:
       return { seq, kind: 'none', playerIds: [] };
   }
@@ -2141,7 +2287,7 @@ export function defaultActionFor(state: GameState, playerId: string): GameAction
       return { type: 'pick', augment: pickOne(p.pickOptions!, state.rng) };
     case 'turn':
       if (owed(state, p) === 0) return { type: 'check' };
-      return p.forcedCall ? { type: 'call' } : { type: 'fold' };
+      return p.forcedCall || noFold(state, p) ? { type: 'call' } : { type: 'fold' };
     case 'discard':
       return { type: 'discard', cardIndex: state.rng.int(3) };
     case 'declare':
@@ -2150,6 +2296,7 @@ export function defaultActionFor(state: GameState, playerId: string): GameAction
       const best = Math.max(0, p.hole.indexOf([...p.hole].sort((a, b) => rankOf(b) - rankOf(a))[0]));
       if (p.attachPending) return { type: 'attach', cardIndex: best };
       if (p.lockerPending) return { type: 'locker', cardIndex: best };
+      if (p.drawPrompt) return { type: 'draw', accept: false };
       return { type: 'show', reveal: false };
     }
     default:
@@ -2204,7 +2351,7 @@ export function legalActions(state: GameState, playerId: string): LegalActions |
   const fr = findAug(p, 'freeRide');
   const freeRide = !!fr && (fr.usesLeft ?? 0) > 0 && !ACTIVE.freeRide!.check(ctxFor(state, p, fr), {}, false) && !taxError(state, p);
   return {
-    fold: !p.forcedCall,
+    fold: !p.forcedCall && !noFold(state, p),
     check: toCall === 0,
     call: toCall > 0,
     callAmount: Math.min(toCall, p.chips),

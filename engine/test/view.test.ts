@@ -157,6 +157,15 @@ function allowedCards(s: GameState, viewerId: string): Set<Card> {
   if (me.augments.some((a) => a.id === 'counting')) s.used.forEach((u) => ok.add(u.card));
   s.used.filter((u) => u.kind === 'rewind' || u.kind === 'shown').forEach((u) => ok.add(u.card));
   s.result?.board.forEach((c) => ok.add(c));
+  s.result?.board2?.forEach((c) => ok.add(c));
+  // 공개 예약 카드(미리 온 결말·동결), 두 번째 보드의 공개된 칸
+  if (!(s.effects.blindDarted.includes(viewerId) && !s.effects.fogLifted)) {
+    s.reservedPublic.forEach((r) => ok.add(r.card));
+    s.board2?.slice(0, s.boardRevealed).forEach((c, i) => {
+      if (!fogHides(s, viewerId, i)) ok.add(c);
+    });
+  }
+  if (s.nextHand.freezeCard) ok.add(s.nextHand.freezeCard);
   s.result?.entries.forEach((e) => e.cards.forEach((c) => ok.add(c)));
   return ok;
 }

@@ -724,6 +724,8 @@ export class Room {
       case 'handEnd':
         this.accountAbsence();
         base = this.opts.handEndDelayMs + (this.game?.result?.showdown ? 2000 : 0);
+        // 쇼다운 직후 선택(무승부 제안 등)이 남아 있으면 10초는 기다린다
+        if (getPending(this.game!).playerIds.length) base = Math.max(base, 10_000);
         break;
       default:
         return;

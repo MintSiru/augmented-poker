@@ -236,7 +236,11 @@ describe('2차 카드 조작형', () => {
       augs: { p1: ['destinyDraw'] },
       before: (st) => {
         st.players[1].keptCard = 'Kh';
-        expect(tryUse(st, 'p1', 'destinyDraw', { card: 'Kh' }).ok).toBe(false);
+        // 남이 가져온 카드는 반응 대기 후 적용할 때 거절되고 횟수는 돌아온다 (미리 알려 주지 않음)
+        use(st, 'p1', 'destinyDraw', { card: 'Kh' });
+        applyTimeouts(st);
+        expect(st.players[0].destinyCard).toBeNull();
+        expect(st.players[0].augments[0].usesLeft).toBe(1);
         use(st, 'p1', 'destinyDraw', { card: 'As' });
         // 이름은 공개, 고른 카드는 비공개
         expect(getPlayerView(st, 'p2').log.some((e) => e.text.includes('데스티니 드로우'))).toBe(true);
