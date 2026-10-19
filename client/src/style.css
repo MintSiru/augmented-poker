@@ -536,3 +536,11 @@ body.blurred #g-center .board { filter: blur(1.2px) saturate(.6); }
 .note { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; font-size: 13px; padding: 5px 0; border-bottom: 1px dashed rgba(255, 255, 255, 0.06); }
 .note-title { font-size: 11px; padding: 1px 7px; border-radius: 9px; background: #3a2d63; color: #d9c6ff; font-weight: 600; }
 .note-cards { display: inline-flex; gap: 3px; }
+/* 재충전 카드 */
+.pick-card.recharge { border-style: dashed; background: linear-gradient(160deg, #1f3a36, #172a28); }
+.pick-card.recharge.on { outline: 2px solid #6fe0c8; }
+.pick-card.recharge .big-stars { color: #6fe0c8; }
+.pick-card[disabled] { opacity: 0.45; cursor: not-allowed; }
+.recharge-pick { margin-top: 12px; text-align: center; }
+.recharge-pick .choose-row { flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.reroll-row { margin-top: 12px; text-align: center; }

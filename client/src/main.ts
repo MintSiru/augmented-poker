@@ -454,7 +454,7 @@ function settingsSummary(s: RoomSettings, bots: number | null): string {
     <li>상승: ${s.levelMode === 'auto' ? '자동 (남은 인원 × 2핸드)' : `${s.levelHands}핸드마다`} · ${s.blindSchedule === 'x1.5' ? '1.5배씩' : '기본 표'}</li>
     <li class="muted">${blindPreview(s)}</li>
     <li>중도 참여 ${s.midJoin ? '허용' : '끔'} · 연결 끊긴 플레이어 자동 추방 ${KICK_LABEL[s.autoKickMinutes] ?? `${s.autoKickMinutes}분`}</li>
-    <li>재충전 선택 ${s.recharge ? '켜짐' : '꺼짐'}</li>
+    <li>재충전 선택 ${s.recharge ? '켜짐' : '꺼짐'} · 증강 리롤 ${s.rerolls ? `1인당 ${s.rerolls}회` : '없음'}</li>
   </ul>`;
 }
 
@@ -489,8 +489,9 @@ function settingsForm(s: RoomSettings, room: { name: string; isPublic: boolean }
     <label class="check"><input type="checkbox" data-setting="midJoin" ${s.midJoin ? 'checked' : ''}/> 중도 참여 허용</label>
     ${
       inGame
-        ? `<div class="locked-row">재충전 선택 ${s.recharge ? '켜짐' : '꺼짐'} <span class="muted">(잠김)</span></div>`
-        : `<label class="check" title="증강 선택 화면에 재충전 카드: 새 증강 대신 내 액티브 증강 1개의 횟수를 처음으로 되돌림"><input type="checkbox" data-setting="recharge" ${s.recharge ? 'checked' : ''}/> 재충전 선택 허용</label>`
+        ? `<div class="locked-row">재충전 선택 ${s.recharge ? '켜짐' : '꺼짐'} · 증강 리롤 ${s.rerolls}회 <span class="muted">(잠김)</span></div>`
+        : `<label class="check" title="증강 선택 화면에 재충전 카드: 새 증강 대신 내 액티브 증강 1개의 횟수를 처음으로 되돌림"><input type="checkbox" data-setting="recharge" ${s.recharge ? 'checked' : ''}/> 재충전 선택 허용</label>
+    <label title="증강 선택 화면에서 선택지 3개를 새로 뽑는 횟수 (게임 전체, 1인당)">증강 리롤 <select data-setting="rerolls">${opt([0, 1, 2, 3], s.rerolls, (v) => (Number(v) ? `1인당 ${v}회` : '없음'))}</select></label>`
     }
     <label>연결 끊긴 플레이어 자동 추방 <select data-setting="autoKickMinutes">${opt([0, 3, 5, 10], s.autoKickMinutes, (v) => KICK_LABEL[Number(v)])}</select></label>`;
 }
@@ -811,18 +812,25 @@ function renderTable(v: PlayerView) {
           return `<div class="res-row ${e.won > 0 ? 'win' : ''}">
           <span class="nm">${esc(e.name)}</span>
           <span class="cards">${e.cards.map((c) => cardHtml(c, { size: 'sm', extra: e.bestCards.includes(c) ? '' : 'dim' })).join('')}</span>
-          <span class="hn">${esc(e.handName)} ${tags}</span>
+          <span class="hn">${esc(e.handName)}${e.alt.length ? ` <span class="muted">/ ${e.alt.map((a) => `${esc(a.label)} ${esc(a.handName)}`).join(', ')}</span>` : ''} ${tags}</span>
           <span class="won">${e.won > 0 ? `+${fmt(e.won)}` : ''}</span></div>`;
         })
         .join('')
     : `<div class="res-row win"><span>${esc(r.pots[0]?.winners.join(', '))}</span><span>나머지 모두 폴드</span><span class="won">+${fmt(r.pots[0]?.amount ?? 0)}</span></div>`;
-  const pots = r.pots.map((p) => `<span>${esc(p.label)} ${fmt(p.amount)} → ${esc(p.winners.join(', '))}</span>`).join(' · ');
+  const pots = r.pots
+    .map((p) =>
+      p.units
+        ? `<span>${esc(p.label)} ${fmt(p.amount)}: ${p.units.map((u) => `${esc(u.label)} ${fmt(u.amount)} → ${esc(u.winners.join(', ') || '-')}`).join(' / ')}</span>`
+        : `<span>${esc(p.label)} ${fmt(p.amount)} → ${esc(p.winners.join(', '))}</span>`,
+    )
+    .join(' · ');
   patch(
     $('#g-result'),
     `<div class="result">
       <h4>핸드 #${r.hand} ${r.showdown ? '쇼다운' : '결과'}</h4>
       ${r.table.length ? `<div class="res-table">${r.table.map((t) => `<span>${richText(t)}</span>`).join('')}</div>` : ''}
       ${r.board.length ? `<div class="res-board">${r.board.map((c, i) => cardHtml(c, { size: 'sm', extra: r.sealed.includes(i) ? 'sealed' : '' })).join('')}</div>` : ''}
+      ${r.board2 ? `<div class="res-board"><span class="muted">두 번째 보드</span> ${r.board2.map((c) => cardHtml(c, { size: 'sm' })).join('')}</div>` : ''}
       ${entries}
       <div class="pots">${pots}</div>
       ${r.extras.map((x) => `<div class="extra">${richText(x)}</div>`).join('')}
@@ -992,6 +1000,36 @@ function augControl(v: PlayerView, a: MyAugmentView): string {
     return `<select data-rumor>${ids.map((id) => `<option value="${id}" ${id === app.rumor ? 'selected' : ''}>${esc(AUGMENTS[id].name)}</option>`).join('')}</select>${useBtn(v, a, '소문 내기')}`;
   }
   if (a.id === 'parity') return `<span class="muted">${a.parity === 'even' ? '짝수 동맹' : '홀수 동맹'} · 자동 발동</span>`;
+  const dis = a.usableNow ? '' : 'disabled';
+  const tip = `title="${esc(a.hint)}"`;
+  if (a.id === 'truthGame') {
+    return `<span class="muted">내 패는 … 이상:</span> ${BET_NAMES.map((n, i) => `<button class="small" data-a="use" data-aug="truthGame" data-choice="${i}" ${dis} ${tip}>${esc(n)}</button>`).join('')}`;
+  }
+  if (a.id === 'sealedContract') {
+    if (v.you.extra.contract !== null) return `<span class="muted">계약: ${v.you.extra.contract ? '한 명 이상 콜' : '전원 폴드'} (나만 보임)</span>`;
+    return `<button class="small primary" data-a="use" data-aug="sealedContract" data-choice="0" ${dis} ${tip}>전원 폴드</button><button class="small primary" data-a="use" data-aug="sealedContract" data-choice="1" ${dis} ${tip}>한 명 이상 콜</button>`;
+  }
+  if (a.id === 'magnet') {
+    return (['♠', '♥', '♦', '♣'] as const).map((s, i) => `<button class="small" data-a="use" data-aug="magnet" data-choice="${i}" ${dis} ${tip}>${s}</button>`).join('');
+  }
+  if (a.id === 'freeze') {
+    const board = v.result?.board ?? [];
+    if (!board.length || !a.usableNow) return useBtn(v, a, '동결할 카드 고르기');
+    return board.map((c, i) => `<button class="small" data-a="use" data-aug="freeze" data-board="${i}" ${tip}>${cardHtml(c, { size: 'sm', extra: 'inline' })} 동결</button>`).join('');
+  }
+  if (a.id === 'swapBoard') {
+    const holes = v.you.hole.map((c, i) => `<option value="${i}">${c.replace('T', '10')}</option>`).join('');
+    const boards = v.board.map((c, i) => (c ? `<option value="${i}">${c.replace('T', '10')}</option>` : '')).join('');
+    return `<select data-swap-hole>${holes}</select>↔<select data-swap-board>${boards}</select>${useBtn(v, a, '맞바꾸기')}`;
+  }
+  if (a.id === 'pickMe') {
+    const opts = a.targets;
+    if (!opts.includes(app.targets[a.id])) app.targets[a.id] = opts[0] ?? '';
+    const sel = opts.length
+      ? `<select data-target="pickMe">${opts.map((id) => `<option value="${esc(id)}" ${id === app.targets[a.id] ? 'selected' : ''}>${esc(nameOfId(id))}</option>`).join('')}</select>`
+      : '<span class="muted">대상 없음</span>';
+    return `${sel} ${v.you.hole.map((c, i) => `<button class="small" data-a="use" data-aug="pickMe" data-i="${i}" ${dis} ${tip}>${cardHtml(c, { size: 'sm', extra: 'inline' })} 보여 주기</button>`).join('')}`;
+  }
   if (a.target) {
     const opts = a.targets;
     if (!opts.includes(app.targets[a.id])) app.targets[a.id] = opts[0] ?? '';
@@ -1017,6 +1055,19 @@ function augControl(v: PlayerView, a: MyAugmentView): string {
     underdog: '언더독 선언',
     highCardDuel: '하이카드 선언',
     restart: '나 다시 돌아갈래',
+    glasses: '안경 없어서 잘 안보여 선언',
+    heaven: '메이드 인 헤븐 선언',
+    capitalism: '자본주의 선언',
+    reverseRiver: '다음 핸드 거꾸로 강을 거슬러',
+    doubleBoard: '더블 보드 선언',
+    prophecy: '다음 핸드 미리 온 결말',
+    highLow: '하이로우 선언',
+    lastStand: '배수진 선언',
+    sidePotBreaker: '사이드팟 30% 가져오기',
+    infoAuction: '정보 경매 열기',
+    cardAuction: '카드 경매 열기',
+    augShuffle: '증강 셔플 선언',
+    loan: '은행에서 20BB 빌리기',
   };
   return useBtn(v, a, labels[a.id] ?? '사용');
 }
@@ -1162,7 +1213,8 @@ function renderModal(env: GameEnvelope, v: PlayerView) {
           <div class="pc-cat">${esc(a.category)}</div>
           <div class="pc-desc">${esc(a.description)}</div></button>`,
         )
-        .join('')}</div></div></div>`;
+        .join('')}${rechargeCardHtml(v)}</div>${rechargeTargetsHtml(v)}
+      ${you.rerolls > 0 && !you.recharge?.pending ? `<div class="reroll-row"><button data-a="reroll" title="지금 선택지를 새로 뽑습니다 (다른 사람에게는 보이지 않음)">🎲 리롤 <span class="muted">(남은 ${you.rerolls}회)</span></button></div>` : ''}</div></div>`;
   } else if (app.showSettings) {
     html = `<div class="modal-bg"><div class="modal settings-modal">
       <h3>${env.youAreHost ? '방 설정' : '방 설정 (읽기 전용)'}</h3>
@@ -1188,12 +1240,13 @@ function renderModal(env: GameEnvelope, v: PlayerView) {
     const fork = opts.find((o) => o.id === 'lastFork');
     const tax = you.tax ? ` <span class="taxtag">세금 ${fmt(you.tax)}</span>` : '';
     html = `<div class="modal-bg"><div class="modal">
-      <h3>선언 기회 (${v.street === 'turn' ? '턴' : '리버'} 공개 직후) <span class="timer-text" data-timer></span></h3>
+      <h3>선언 기회 <span class="timer-text" data-timer></span></h3>
       <p class="muted">내 카드 ${you.hole.length ? you.hole.map((c) => cardHtml(c, { size: 'sm', extra: 'inline' })).join('') : '(암전)'} · 선언하면 3초 반응 대기 후 적용됩니다.</p>
       ${opts
-        .filter((o) => o.id !== 'seal' && o.id !== 'lastFork')
+        .filter((o) => !CUSTOM_DECL.includes(o.id))
         .map((o) => `<div class="decl-row"><button class="primary" data-a="declare" data-aug="${o.id}">${esc(o.name)} 선언${tax}</button> <span class="muted">${esc(o.description)}</span></div>`)
         .join('')}
+      ${declareCustomHtml(v, tax)}
       ${
         seal
           ? `<div class="decl-row"><b>봉인</b> <span class="muted">족보 계산에서 뺄 보드 카드를 고르세요 (모든 플레이어에게 적용)</span></div>
@@ -1229,6 +1282,21 @@ function renderModal(env: GameEnvelope, v: PlayerView) {
       <div class="choose-row">${you.extra.lockerChoose
         .map((c, i) => `<button class="card-btn" data-a="locker" data-i="${i}">${cardHtml(c, { size: 'lg' })}<span>보관</span></button>`)
         .join('')}</div></div></div>`;
+  } else if (you.extra.drawPrompt) {
+    html = `<div class="modal-bg"><div class="modal">
+      <h3>무승부를 제안할까요? <span class="timer-text" data-timer></span></h3>
+      <p>${esc(you.extra.drawPrompt.winnerName)}이(가) 같은 족보 종류로 이겼습니다. 발동하면 그 팟을 둘이서 반씩 나눕니다 (무승부로 하지 않을래?).</p>
+      <p class="muted small-note">응답하지 않으면 발동하지 않습니다.</p>
+      <div class="lobby-actions"><button class="primary" data-a="draw" data-accept="1">예, 무승부 제안</button><button data-a="draw" data-accept="0">아니오</button></div></div></div>`;
+  } else if (you.extra.turnRiver && you.extra.turnRiver.swap === null) {
+    const [tc, rc] = you.extra.turnRiver.cards;
+    html = `<div class="modal-bg"><div class="modal">
+      <h3>턴과 리버 사이: 공개 순서</h3>
+      <p class="muted">나만 미리 본 두 카드입니다. 턴이 공개되기 전까지 고르지 않으면 그대로 갑니다.</p>
+      <div class="choose-row">
+        <button class="card-btn" data-a="turnRiver" data-swap="0">${cardHtml(tc, { size: 'lg' })}${cardHtml(rc, { size: 'lg' })}<span>그대로 (턴 → 리버)</span></button>
+        <button class="card-btn" data-a="turnRiver" data-swap="1">${cardHtml(rc, { size: 'lg' })}${cardHtml(tc, { size: 'lg' })}<span>순서 바꾸기</span></button>
+      </div></div></div>`;
   } else if (you.extra.showChoose) {
     html = `<div class="modal-bg"><div class="modal">
       <h3>쇼맨십: 홀카드를 공개할까요? <span class="timer-text" data-timer></span></h3>
@@ -1283,6 +1351,70 @@ function renderModal(env: GameEnvelope, v: PlayerView) {
   if (typingIn(el?.querySelector('.settings-modal'))) return;
   if (html.includes('respond-modal') && typingIn(el?.querySelector('.respond-modal'))) return;
   patch(el, html);
+}
+
+/** 대상·카드를 골라야 하는 선언 (공동 환승·기생·명추리·연금술) */
+const CUSTOM_DECL = ['seal', 'lastFork', 'jointTransfer', 'parasite', 'nameIt', 'alchemy'];
+
+function declareCustomHtml(v: PlayerView, tax: string): string {
+  const d = v.you.declare!;
+  const ids = d.options.map((o) => o.id);
+  const sel = (id: string) =>
+    `<select data-dtarget="${id}">${(d.targets[id as AugmentId] ?? []).map((t) => `<option value="${esc(t)}">${esc(nameOf(v, t))}</option>`).join('')}</select>`;
+  const desc = (id: string) => esc(d.options.find((o) => o.id === id)!.description);
+  let html = '';
+  for (const id of ['jointTransfer', 'parasite'] as const) {
+    if (!ids.includes(id)) continue;
+    html += `<div class="decl-row">${sel(id)} <button class="primary" data-a="declare" data-aug="${id}">${esc(AUGMENTS[id].name)} 선언${tax}</button> <span class="muted">${desc(id)}</span></div>`;
+  }
+  if (ids.includes('alchemy')) {
+    html += `<div class="decl-row"><b>연금술</b> <span class="muted">${desc('alchemy')}</span></div><div class="choose-row">${d.alchemy
+      .map(
+        (x) =>
+          `<button class="small primary" data-a="declare" data-aug="alchemy" data-i="${x.cardIndex}" data-choice="${x.choice}">${v.you.hole[x.cardIndex] ? cardHtml(v.you.hole[x.cardIndex], { size: 'sm', extra: 'inline' }) : `${x.cardIndex + 1}번`} ${x.choice ? '올리기 ▲' : '내리기 ▼'}${tax}</button>`,
+      )
+      .join('')}</div>`;
+  }
+  if (ids.includes('nameIt')) {
+    // 이미 아는 카드(내 홀카드·보드·공개 카드)는 회색: 맞혀도 실패로 처리된다
+    const known = new Set<string>([...v.you.hole, ...(v.board.filter(Boolean) as string[]), ...v.players.flatMap((p) => [...(p.shownCards ?? []), ...p.shepherdShown])]);
+    const grid = ['s', 'h', 'd', 'c']
+      .map(
+        (su) =>
+          `<div class="dd-row">${'AKQJT98765432'
+            .split('')
+            .map((r) => {
+              const c = r + su;
+              return known.has(c)
+                ? `<span class="dd-card off" title="이미 아는 카드">${cardHtml(c, { size: 'sm' })}</span>`
+                : `<button class="dd-card" data-a="declare" data-aug="nameIt" data-card="${c}">${cardHtml(c, { size: 'sm' })}</button>`;
+            })
+            .join('')}</div>`,
+      )
+      .join('');
+    html += `<div class="decl-row">${sel('nameIt')} <b>명추리</b> <span class="muted">대상을 고르고 그 상대의 홀카드 1장을 부르세요. 맞히면 쇼다운 없이 팟, 틀리면 폴드하고 2BB</span></div><div class="dd-grid">${grid}</div>`;
+  }
+  return html;
+}
+
+/** 재충전 카드: 증강 선택 화면의 네 번째 카드 (재충전 여부는 나만 앎) */
+function rechargeCardHtml(v: PlayerView): string {
+  const r = v.you.recharge;
+  if (!r) return '';
+  return `<button class="pick-card recharge ${r.pending ? 'on' : ''}" data-a="recharge" ${r.enabled ? '' : 'disabled'} title="${esc(r.reason ?? '새 증강 대신 내 액티브 증강 1개의 사용 횟수를 처음으로 되돌립니다')}">
+      <div class="big-stars">♻</div>
+      <div class="pc-name">재충전</div>
+      <div class="pc-cat">새 증강 대신</div>
+      <div class="pc-desc">${r.enabled ? '사용 횟수가 줄어든 내 액티브 증강 1개를 처음 횟수로 되돌립니다. 좌석의 증강 수는 그대로입니다.' : esc(r.reason ?? '')}</div></button>`;
+}
+
+function rechargeTargetsHtml(v: PlayerView): string {
+  const r = v.you.recharge;
+  if (!r?.pending) return '';
+  return `<div class="recharge-pick"><b>되돌릴 증강</b> <span class="muted">(시간이 지나면 가장 많이 줄어든 증강)</span>
+      <div class="choose-row">${r.targets
+        .map((x) => `<button class="small primary" data-a="recharge" data-aug="${x.id}">${esc(x.name)} ${stars(x.stars)} <span class="muted">${x.usesLeft}/${x.maxUses} → ${x.maxUses}</span></button>`)
+        .join('')}</div></div>`;
 }
 
 /** 게임 중 방장 넘기기: 접속 중인 다른 사람 목록 */
@@ -1613,10 +1745,21 @@ document.addEventListener('click', async (ev) => {
     case 'declare': {
       const aug = t.dataset.aug || null;
       const i = t.dataset.i !== undefined ? Number(t.dataset.i) : undefined;
-      return act({ type: 'declare', augment: aug, boardIndex: i });
+      const target = aug ? ($(`[data-dtarget="${aug}"]`) as HTMLSelectElement | null)?.value : undefined;
+      if (aug === 'alchemy') return act({ type: 'declare', augment: aug, cardIndex: i, choice: Number(t.dataset.choice) });
+      return act({ type: 'declare', augment: aug, boardIndex: i, targetId: target, card: t.dataset.card });
     }
     case 'attach':
       return act({ type: 'attach', cardIndex: Number(t.dataset.i) });
+    case 'recharge':
+      return act({ type: 'recharge', augment: t.dataset.aug || undefined });
+    case 'reroll':
+      play('deal');
+      return act({ type: 'reroll' });
+    case 'draw':
+      return act({ type: 'draw', accept: t.dataset.accept === '1' });
+    case 'turnRiver':
+      return act({ type: 'turnRiver', swap: t.dataset.swap === '1' });
     case 'closeReveal':
       app.reveal = null;
       if (app.env) renderGame();
@@ -1634,6 +1777,12 @@ document.addEventListener('click', async (ev) => {
       if (t.dataset.i !== undefined) payload.cardIndex = Number(t.dataset.i);
       if (id === 'radar') payload.boardIndex = Number((($('[data-radar]') as HTMLSelectElement | null)?.value ?? app.radarIdx));
       if (id === 'rumor') payload.rumor = ($('[data-rumor]') as HTMLSelectElement | null)?.value ?? app.rumor;
+      if (t.dataset.choice !== undefined) payload.choice = Number(t.dataset.choice);
+      if (t.dataset.board !== undefined) payload.boardIndex = Number(t.dataset.board);
+      if (id === 'swapBoard') {
+        payload.cardIndex = Number(($('[data-swap-hole]') as HTMLSelectElement | null)?.value ?? 0);
+        payload.boardIndex = Number(($('[data-swap-board]') as HTMLSelectElement | null)?.value ?? 0);
+      }
       return act(payload);
     }
     case 'shepherdFake': {

@@ -20,6 +20,7 @@ import {
   counterCandidates,
   immunityCandidates,
   stealCandidates,
+  AUGMENTS,
   REACTION_MS,
   createGame,
   cryptoRng,
@@ -79,6 +80,7 @@ export const DEFAULT_SETTINGS: RoomSettings = {
   midJoin: true,
   autoKickMinutes: 5,
   recharge: false,
+  rerolls: 2,
 };
 
 export const ROOM_NAME_MAX = 20;
@@ -438,7 +440,7 @@ export class Room {
     const keys = Object.keys(patch);
     if (this.game) {
       const locked = keys.filter((k) => k !== 'isPublic' && k !== 'name' && !IN_GAME_SETTINGS.includes(k as keyof RoomSettings));
-      if (locked.length) return '게임이 시작된 뒤에는 칩·블라인드·재충전 설정을 바꿀 수 없습니다.';
+      if (locked.length) return '게임이 시작된 뒤에는 칩·블라인드·재충전·리롤 설정을 바꿀 수 없습니다.';
     }
     let name = this.name;
     let isPublic = this.isPublic;
@@ -497,6 +499,11 @@ export class Room {
     if (patch.midJoin !== undefined) {
       if (typeof patch.midJoin !== 'boolean') return '잘못된 값입니다.';
       s.midJoin = patch.midJoin;
+    }
+    if (patch.rerolls !== undefined) {
+      const v = int(patch.rerolls, 0, 3);
+      if (v === null) return '증강 리롤은 0~3회입니다.';
+      s.rerolls = v;
     }
     if (patch.recharge !== undefined) {
       if (typeof patch.recharge !== 'boolean') return '잘못된 값입니다.';
@@ -567,6 +574,7 @@ export class Room {
         levelMode: s.levelMode,
         fixedLevelHands: s.levelHands,
         recharge: s.recharge,
+        rerolls: s.rerolls,
       },
     );
     for (const m of this.humans()) if (!m.connected) m.absentStreak = 0;
@@ -722,11 +730,18 @@ export class Room {
     const rows = ids
       .map((id) => ({ 증강: id, 선택: st.picks[id] ?? 0, 사용: st.uses[id] ?? 0 }))
       .sort((a, b) => b.선택 - a.선택);
+    const star3 = ids.filter((id) => AUGMENTS[id]?.stars === 3).reduce((sum, id) => sum + (st.uses[id] ?? 0), 0);
     console.log(
-      `\n[게임 종료 통계] 방 ${this.code} · 총 핸드 ${g.handNumber}` +
-        ` · 은행에서 생성된 칩 ${st.bankChips + st.joinChips} (하이리스크 ${st.bankChips}, 중도 참여 지급 ${st.joinChips})` +
-        ` · 은행으로 빠진 칩 ${st.bankTaxed + st.bankPaid} (세금 ${st.bankTaxed}, 나 다시 돌아갈래 ${st.bankPaid}) · 추방으로 사라진 칩 ${st.kickedChips}`,
+      `\n[게임 종료 통계] 방 ${this.code} · 총 핸드 ${g.handNumber} · 재충전 ${g.options.recharge ? '켜짐' : '꺼짐'}` +
+        ` · 은행에서 생성된 칩 ${st.bankChips + st.joinChips} (증강 보너스·대출 ${st.bankChips}, 중도 참여 지급 ${st.joinChips})` +
+        ` · 은행으로 빠진 칩 ${st.bankTaxed + st.bankPaid} (세금 ${st.bankTaxed}, 상환·수수료 등 ${st.bankPaid}) · 추방으로 사라진 칩 ${st.kickedChips}` +
+        ` · ★★★ 증강 사용 ${star3}회 · 메이드 인 헤븐 시간 초과 폴드 ${st.heavenFolds}회`,
     );
+    const rc = Object.entries(st.recharges);
+    if (rc.length) {
+      console.log('[재충전]');
+      for (const [id, list] of rc) console.log(`  ${g.players.find((p) => p.id === id)?.name ?? id}: ${list.length}회 (${list.map((a) => AUGMENTS[a].name).join(', ')})`);
+    }
     console.table(rows);
   }
 

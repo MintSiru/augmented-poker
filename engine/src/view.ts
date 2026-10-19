@@ -316,6 +316,8 @@ export interface PlayerView {
     pickDone: boolean;
     /** 폭주기관차: 이번 선택에서 더 가져갈 수 있는 개수 */
     pickExtra: number;
+    /** 증강 리롤: 남은 횟수 (본인에게만) */
+    rerolls: number;
     /** 재충전 카드 (재충전 선택이 켜진 방, 증강 선택 중일 때만. 재충전 여부는 본인에게만) */
     recharge: {
       enabled: boolean;
@@ -725,6 +727,7 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
       pick: me.pickOptions ? me.pickOptions.map(info) : null,
       pickDone: seated && state.phase === 'augmentSelect' && !me.pickOptions,
       pickExtra: me.pickOptions ? me.pickExtra : 0,
+      rerolls: me.rerolls,
       recharge:
         seated && me.pickOptions && state.options.recharge && state.phase === 'augmentSelect'
           ? {

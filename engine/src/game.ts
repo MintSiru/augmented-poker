@@ -93,6 +93,8 @@ export interface CreateGameOptions {
   dealerSeat?: number;
   /** 증강 선택에 재충전 카드 (기본 끄기) */
   recharge?: boolean;
+  /** 플레이어당 증강 리롤 횟수 (기본 0) */
+  rerolls?: number;
   /** 테스트 편의: 지정하면 고정 주기 N핸드 */
   handsPerLevel?: number;
   /** false 면 첫 증강 선택 없이 '핸드 종료' 상태로 만들어 두고, 호출 측이 startNextHand 로 첫 핸드를 시작한다 */
@@ -170,6 +172,7 @@ function newPlayer(np: NewPlayer, seat: number, chips: number): PlayerState {
     alchemy: null,
     vpipHand: false,
     aggressed: false,
+    rerolls: 0,
     rechargePending: false,
     rechargeDone: false,
   };
@@ -238,6 +241,7 @@ export function createGame(players: NewPlayer[], opts: CreateGameOptions = {}): 
       fixedLevelHands: Math.max(1, fixed ?? 10),
       debug: !!opts.debug,
       recharge: !!opts.recharge,
+      rerolls: Math.max(0, Math.floor(opts.rerolls ?? 0)),
     },
     rng,
     players: players.map((np, seat) => newPlayer(np, seat, startingChips)),
@@ -306,6 +310,7 @@ export function createGame(players: NewPlayer[], opts: CreateGameOptions = {}): 
     stats: { picks: {}, uses: {}, bankChips: 0, bankTaxed: 0, bankPaid: 0, joinChips: 0, kickedChips: 0, heavenFolds: 0, recharges: {} },
   };
   state.levelHands = levelHandsFor(state);
+  for (const p of state.players) p.rerolls = state.options.rerolls;
   const { sb, bb } = currentBlinds(state);
   const cycle = state.options.levelMode === 'auto' ? `자동: 남은 인원 × 2핸드, 지금 ${state.levelHands}핸드` : `${state.levelHands}핸드마다`;
   const how = state.options.blindSchedule === 'x1.5' ? '1.5배씩' : '기본 표';
@@ -426,7 +431,7 @@ export function grantAugment(state: GameState, p: PlayerState, id: AugmentId, wi
 function rollJoinerOffer(state: GameState, j: Joiner): void {
   j.player.pickOptions = null;
   while (j.picksLeft > 0) {
-    const offer = rollAugmentOffer(state.levelIndex + 1, j.player.augments.map((a) => a.id), state.rng);
+    const offer = rollAugmentOffer(state.levelIndex + 1, j.player.augments.map((a) => a.id), state.rng, undefined, takenByOthers(state, j.player));
     if (offer.length) {
       j.player.pickOptions = offer;
       j.pickSeq++;
@@ -451,6 +456,7 @@ export function addJoiner(state: GameState, np: NewPlayer): ActionResult {
   }
   const p = newPlayer(np, -1, 0);
   p.logFrom = state.logSeq + 1;
+  p.rerolls = state.options.rerolls;
   const j: Joiner = { player: p, picksLeft: state.pickRounds, picksTotal: state.pickRounds, pickSeq: 0 };
   state.joiners.push(j);
   addLog(state, `${p.name}님이 참여했습니다 (다음 핸드부터)`);
@@ -657,6 +663,20 @@ function applyPick(state: GameState, p: PlayerState, augment: AugmentId, parity?
     else p.pickExtra = 0;
   }
   if (!state.players.some((x) => x.pickOptions)) beginHand(state);
+  return null;
+}
+
+/** 증강 리롤: 지금 선택지를 같은 레벨 확률로 새로 뽑는다 (지금 보이는 증강은 빼고, 리롤 여부는 본인에게만) */
+function applyReroll(state: GameState, p: PlayerState): string | null {
+  if (!p.pickOptions) return '지금은 증강을 고르는 중이 아닙니다.';
+  if (p.rerolls <= 0) return '남은 리롤이 없습니다.';
+  if (p.rechargePending) return '재충전할 증강을 고르는 중입니다.';
+  const owned = p.augments.map((a) => a.id);
+  const offer = rollAugmentOffer(state.levelIndex + 1, owned, state.rng, undefined, [...takenByOthers(state, p), ...p.pickOptions]);
+  if (!offer.length) return '새로 뽑을 수 있는 증강이 없습니다.';
+  p.rerolls--;
+  p.pickOptions = offer;
+  addLog(state, `증강 리롤: 선택지를 새로 뽑았습니다 (남은 리롤 ${p.rerolls}회)`, { to: [p.id] });
   return null;
 }
 
@@ -2572,7 +2592,11 @@ export function canUseNow(state: GameState, p: PlayerState, aug: OwnedAugment, p
 export function applyAction(state: GameState, playerId: string, action: GameAction): ActionResult {
   const joiner = getJoiner(state, playerId);
   if (joiner) {
-    // 자리에 앉기 전에는 증강 선택만 할 수 있다
+    // 자리에 앉기 전에는 증강 선택(과 리롤)만 할 수 있다
+    if (action && typeof action === 'object' && action.type === 'reroll') {
+      const e = applyReroll(state, joiner.player);
+      return e ? { ok: false, error: e } : { ok: true };
+    }
     if (!action || typeof action !== 'object' || action.type !== 'pick') return { ok: false, error: '다음 핸드부터 참여합니다.' };
     const err = isAugmentId(action.augment) ? applyJoinerPick(state, joiner, action.augment, parityArg(action.parity)) : '알 수 없는 증강입니다.';
     return err ? { ok: false, error: err } : { ok: true };
@@ -2626,6 +2650,9 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       break;
     case 'draw':
       err = applyDraw(state, p, action.accept === true);
+      break;
+    case 'reroll':
+      err = state.phase === 'augmentSelect' ? applyReroll(state, p) : '지금은 증강 선택 단계가 아닙니다.';
       break;
     case 'recharge':
       err = action.augment === undefined || isAugmentId(action.augment) ? applyRecharge(state, p, action.augment) : '알 수 없는 증강입니다.';

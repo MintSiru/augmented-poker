@@ -195,6 +195,8 @@ export function chooseBotAction(view: PlayerView, rng: Rng): GameAction | null {
     const spent = rc.targets.find((t) => t.stars === 3 && t.usesLeft === 0);
     if (spent) return { type: 'recharge', augment: spent.id };
   }
+  // 리롤: 레벨 3 이후 선택지가 모두 ★이면
+  if (you.pick?.length && you.rerolls > 0 && view.level >= 3 && you.pick.every((a) => a.stars === 1)) return { type: 'reroll' };
   if (you.pick && you.pick.length) return { type: 'pick', augment: pickOne(you.pick, rng).id };
 
   // 애착: 높은 카드를 가져간다

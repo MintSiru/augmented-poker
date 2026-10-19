@@ -203,6 +203,8 @@ export interface PlayerState {
   promoted: boolean;
   /** 연금술: 이번 핸드 족보 계산에서 바꾼 홀카드 (공개) */
   alchemy: { index: number; from: Card; to: Card } | null;
+  /** 증강 리롤: 남은 횟수 (게임 전체) */
+  rerolls: number;
   /** 재충전: 되돌릴 증강을 고르는 중 / 이번 선택 라운드에서 이미 재충전했는가 */
   rechargePending: boolean;
   rechargeDone: boolean;
@@ -302,6 +304,8 @@ export interface GameOptions {
   debug: boolean;
   /** 증강 선택에 "재충전" 카드를 보여 준다 */
   recharge: boolean;
+  /** 플레이어당 게임 전체 증강 리롤 횟수 */
+  rerolls: number;
 }
 
 /** 사용된 카드 (카운팅 보유자에게만 보임) */
@@ -559,6 +563,8 @@ export type GameAction =
   | { type: 'draw'; accept: boolean }
   /** 탈취: 반응 대기 중인 선언을 빼앗고 대상·카드를 다시 고른다 */
   | { type: 'steal'; targetId?: string; boardIndex?: number; cardIndex?: number; choice?: number }
+  /** 증강 리롤: 지금 선택지를 새로 뽑는다 */
+  | { type: 'reroll' }
   /** 재충전: augment 없이 보내면 재충전 카드를 고른 상태(대상 고르기), augment 를 주면 그 증강을 처음 횟수로 */
   | { type: 'recharge'; augment?: AugmentId }
   /** 잠복: 숨길 증강 고르기 */

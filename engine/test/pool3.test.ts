@@ -1064,6 +1064,31 @@ describe('7. 재충전 선택', () => {
   });
 });
 
+describe('증강 리롤', () => {
+  it('선택지를 새로 뽑는다 (지금 보이던 증강 제외, 게임 전체 횟수 제한, 본인에게만), 중도 참여자도 가능', () => {
+    const s = createGame(makePlayers(3).map((p) => ({ ...p, isBot: false })), { rng: seededRng(5), rerolls: 2 });
+    const p1 = s.players[0];
+    const first = [...p1.pickOptions!];
+    expect(view(s, 'p1').you.rerolls).toBe(2);
+    act(s, 'p1', { type: 'reroll' });
+    expect(p1.pickOptions!.some((id) => first.includes(id))).toBe(false);
+    expect(p1.rerolls).toBe(1);
+    expect(JSON.stringify(view(s, 'p2'))).not.toContain('리롤');
+    act(s, 'p1', { type: 'reroll' });
+    expect(applyAction(s, 'p1', { type: 'reroll' }).ok).toBe(false);
+    act(s, 'p1', { type: 'pick', augment: p1.pickOptions![0] });
+    expect(applyAction(s, 'p1', { type: 'reroll' }).ok).toBe(false);
+    ok(addJoiner(s, { id: 'j1', name: 'J1', isBot: false }));
+    const j = s.joiners[0].player;
+    const before = [...j.pickOptions!];
+    act(s, 'j1', { type: 'reroll' });
+    expect(j.pickOptions).not.toEqual(before);
+    // 기본값(0회)이면 리롤 없음
+    const t = createGame(makePlayers(2), { rng: seededRng(6) });
+    expect(applyAction(t, 'p1', { type: 'reroll' }).ok).toBe(false);
+  });
+});
+
 // ───────────────────────── 전체 게임 ─────────────────────────
 
 describe('3차 풀 포함 봇 게임', () => {

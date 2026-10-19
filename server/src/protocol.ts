@@ -28,6 +28,8 @@ export interface RoomSettings {
   autoKickMinutes: number;
   /** 증강 선택에 재충전 카드 (기본 끄기, 시작 후 변경 불가) */
   recharge: boolean;
+  /** 플레이어당 게임 전체 증강 리롤 횟수 (0~3, 기본 2, 시작 후 변경 불가) */
+  rerolls: number;
 }
 
 /** 게임이 시작된 뒤에도 바꿀 수 있는 설정 (+ 공개 여부). 상승 주기는 다음 레벨부터 적용 */
