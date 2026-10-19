@@ -28,6 +28,7 @@ export {
   cardsNeeded,
   counterCandidates,
   immunityCandidates,
+  stealCandidates,
   freshEffects,
   betCategory,
   BET_CATEGORY_NAMES,
@@ -40,5 +41,7 @@ export type { NewPlayer, CreateGameOptions, LegalActions } from './game.js';
 export * from './view.js';
 export * from './debug.js';
 export { standingOf, contenderFor, handEvalFor } from './standing.js';
+export { maskFor, turnSecondsFor, turnCutFor, boardInfoHidden } from './core.js';
+export type { MaskRules } from './core.js';
 export type { CountingView } from './counting.js';
 export { chooseBotAction, chooseBotOpportunistic, estimateEquity } from './bot.js';

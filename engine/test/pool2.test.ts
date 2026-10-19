@@ -105,7 +105,8 @@ describe('보유 규칙 (배타적 풀 5종, 카운터형 8종)', () => {
     expect(canHold(['parity'], 'traceback')).toBe(true);
     expect(variant.every((id) => AUGMENTS[id].group === 'variant')).toBe(true);
     expect(counter.every((id) => AUGMENTS[id].group === 'counter')).toBe(true);
-    expect(ALL_AUGMENT_IDS.filter((id) => AUGMENTS[id].group === 'counter').sort()).toEqual([...counter].sort());
+    // 3차 풀에서 탈취·공개 청문회가 더해져 10종
+    expect(ALL_AUGMENT_IDS.filter((id) => AUGMENTS[id].group === 'counter').sort()).toEqual([...counter, 'steal', 'publicHearing'].sort());
   });
 
   it('보유할 수 없는 증강은 선택지에서 빠진다', () => {
@@ -235,7 +236,11 @@ describe('2차 카드 조작형', () => {
       augs: { p1: ['destinyDraw'] },
       before: (st) => {
         st.players[1].keptCard = 'Kh';
-        expect(tryUse(st, 'p1', 'destinyDraw', { card: 'Kh' }).ok).toBe(false);
+        // 남이 가져온 카드는 반응 대기 후 적용할 때 거절되고 횟수는 돌아온다 (미리 알려 주지 않음)
+        use(st, 'p1', 'destinyDraw', { card: 'Kh' });
+        applyTimeouts(st);
+        expect(st.players[0].destinyCard).toBeNull();
+        expect(st.players[0].augments[0].usesLeft).toBe(1);
         use(st, 'p1', 'destinyDraw', { card: 'As' });
         // 이름은 공개, 고른 카드는 비공개
         expect(getPlayerView(st, 'p2').log.some((e) => e.text.includes('데스티니 드로우'))).toBe(true);

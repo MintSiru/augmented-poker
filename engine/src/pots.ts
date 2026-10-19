@@ -54,17 +54,14 @@ function sameSet(a: string[], b: string[]): boolean {
 }
 
 /**
- * 팟 하나를 승자들에게 나눈다. 나누어떨어지지 않는 칩은 딜러 왼쪽에 가까운 승자부터 1칩씩.
+ * 팟 하나를 승자들에게 나눈다. 나누어떨어지지 않는 칩은 딜러 왼쪽에 가장 가까운 승자에게 모두 준다.
  * @param winnersInOrder 딜러 왼쪽부터의 좌석 순서로 정렬된 승자 id
  */
 export function splitPot(amount: number, winnersInOrder: string[]): Map<string, number> {
   const out = new Map<string, number>();
   const n = winnersInOrder.length;
   const share = Math.floor(amount / n);
-  let rem = amount - share * n;
-  for (const id of winnersInOrder) {
-    out.set(id, share + (rem > 0 ? 1 : 0));
-    if (rem > 0) rem--;
-  }
+  const rem = amount - share * n;
+  winnersInOrder.forEach((id, i) => out.set(id, share + (i === 0 ? rem : 0)));
   return out;
 }

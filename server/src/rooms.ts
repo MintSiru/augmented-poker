@@ -14,10 +14,13 @@ import {
   kickPlayer,
   removeJoiner,
   setLevelPlan,
+  turnSecondsFor,
   chooseBotAction,
   chooseBotOpportunistic,
   counterCandidates,
   immunityCandidates,
+  stealCandidates,
+  AUGMENTS,
   REACTION_MS,
   createGame,
   cryptoRng,
@@ -38,6 +41,8 @@ export interface ServerOptions {
   debug: boolean;
   /** 핸드 종료 후 결과를 보여 주는 시간 */
   handEndDelayMs: number;
+  /** 제안·입찰 응답 제한 시간 (초) */
+  respondSeconds: number;
   botDelayMs: [number, number];
   pickSeconds: number;
   /** 자리 비움 플레이어 자동 행동까지의 지연 */
@@ -53,6 +58,7 @@ export interface ServerOptions {
 export const DEFAULT_OPTIONS: ServerOptions = {
   debug: false,
   handEndDelayMs: 5000,
+  respondSeconds: 15,
   botDelayMs: [1000, 2000],
   pickSeconds: 30,
   sitOutDelayMs: 500,
@@ -73,6 +79,8 @@ export const DEFAULT_SETTINGS: RoomSettings = {
   blindSchedule: 'standard',
   midJoin: true,
   autoKickMinutes: 5,
+  recharge: false,
+  rerolls: 2,
 };
 
 export const ROOM_NAME_MAX = 20;
@@ -139,6 +147,8 @@ export class Room {
   private deadline: number | null = null;
   private deadlineKind: PendingKind | null = null;
   private decisionTimer: NodeJS.Timeout | null = null;
+  /** 제안·입찰로 멈춘 턴: 그 사람의 남은 시간 (응답이 끝나 같은 사람 차례로 돌아오면 이어서) */
+  private pausedTurn: { id: string; ms: number; viaRespond: boolean } | null = null;
   private autoTimers = new Map<string, NodeJS.Timeout>();
   private deleteTimer: NodeJS.Timeout | null = null;
   private kickTimers = new Map<string, NodeJS.Timeout>();
@@ -326,6 +336,28 @@ export class Room {
     return null;
   }
 
+  /** 방장 이전: 방장이 접속 중인 다른 사람에게 직접 넘긴다 (대기실·게임 중 모두) */
+  giveHost(by: Member, targetId: unknown): string | null {
+    if (by.id !== this.hostId) return '방장만 넘길 수 있습니다.';
+    const t = typeof targetId === 'string' ? this.member(targetId) : undefined;
+    if (!t || t.isBot || t.left || t.kicked) return '방장을 넘길 사람을 찾을 수 없습니다.';
+    if (t.id === by.id) return '이미 방장입니다.';
+    if (!t.connected) return '접속 중인 사람에게만 넘길 수 있습니다.';
+    this.hostId = t.id;
+    this.systemChat(`${by.name}님이 ${t.name}님에게 방장을 넘겼습니다`);
+    return null;
+  }
+
+  /** 모두에게 보이는 알림 메시지 (채팅창) */
+  private systemChat(text: string): void {
+    const msg: ChatMessage = { id: ++this.chatSeq, fromId: '', name: '알림', text, ts: Date.now() };
+    this.chat.push(msg);
+    if (this.chat.length > CHAT_HISTORY) this.chat.splice(0, this.chat.length - CHAT_HISTORY);
+    for (const x of this.members) {
+      if (x.socketId) this.io.sockets.sockets.get(x.socketId)?.emit('chat', msg);
+    }
+  }
+
   /** 방장이 나가면 다음 순서의 (접속 중인) 플레이어에게 */
   private transferHost(from: Member): void {
     const humans = this.humans();
@@ -365,6 +397,11 @@ export class Room {
   }
 
   private checkEmpty(): void {
+    // 남은 사람이 0명(모두 나감)이면 바로 삭제. 연결만 끊긴 사람이 있으면 재접속을 기다린다
+    if (!this.humans().some((m) => !m.left)) {
+      queueMicrotask(() => this.destroy());
+      return;
+    }
     if (this.humans().some((m) => m.connected)) return;
     if (this.deleteTimer) return;
     this.deleteTimer = setTimeout(() => this.destroy(), this.ms(this.opts.emptyRoomTtlMs));
@@ -403,7 +440,7 @@ export class Room {
     const keys = Object.keys(patch);
     if (this.game) {
       const locked = keys.filter((k) => k !== 'isPublic' && k !== 'name' && !IN_GAME_SETTINGS.includes(k as keyof RoomSettings));
-      if (locked.length) return '게임이 시작된 뒤에는 칩과 블라인드 설정을 바꿀 수 없습니다.';
+      if (locked.length) return '게임이 시작된 뒤에는 칩·블라인드·재충전·리롤 설정을 바꿀 수 없습니다.';
     }
     let name = this.name;
     let isPublic = this.isPublic;
@@ -462,6 +499,15 @@ export class Room {
     if (patch.midJoin !== undefined) {
       if (typeof patch.midJoin !== 'boolean') return '잘못된 값입니다.';
       s.midJoin = patch.midJoin;
+    }
+    if (patch.rerolls !== undefined) {
+      const v = int(patch.rerolls, 0, 3);
+      if (v === null) return '증강 리롤은 0~3회입니다.';
+      s.rerolls = v;
+    }
+    if (patch.recharge !== undefined) {
+      if (typeof patch.recharge !== 'boolean') return '잘못된 값입니다.';
+      s.recharge = patch.recharge;
     }
     if (patch.autoKickMinutes !== undefined) {
       if (!(AUTO_KICK_CHOICES as readonly unknown[]).includes(patch.autoKickMinutes)) return '자동 추방은 끄기/3분/5분/10분 중에서 고르세요.';
@@ -527,6 +573,8 @@ export class Room {
         blindSchedule: s.blindSchedule,
         levelMode: s.levelMode,
         fixedLevelHands: s.levelHands,
+        recharge: s.recharge,
+        rerolls: s.rerolls,
       },
     );
     for (const m of this.humans()) if (!m.connected) m.absentStreak = 0;
@@ -653,12 +701,12 @@ export class Room {
       );
     };
     if (kind === 'reaction') {
-      for (const id of new Set([...counterCandidates(g), ...immunityCandidates(g)])) {
+      for (const id of new Set([...counterCandidates(g), ...immunityCandidates(g), ...stealCandidates(g)])) {
         if (!bots.some((b) => b.id === id)) continue;
         schedule(`counter:${seq}:${id}`, 300 + Math.random() * 1500, () => {
           if (getPending(g).seq !== seq) return;
           const a = chooseBotAction(getPlayerView(g, id), cryptoRng);
-          if ((a?.type === 'counter' || a?.type === 'immunity') && applyAction(g, id, a).ok) this.sync();
+          if ((a?.type === 'counter' || a?.type === 'immunity' || a?.type === 'steal') && applyAction(g, id, a).ok) this.sync();
         });
       }
       return;
@@ -682,22 +730,52 @@ export class Room {
     const rows = ids
       .map((id) => ({ 증강: id, 선택: st.picks[id] ?? 0, 사용: st.uses[id] ?? 0 }))
       .sort((a, b) => b.선택 - a.선택);
+    const star3 = ids.filter((id) => AUGMENTS[id]?.stars === 3).reduce((sum, id) => sum + (st.uses[id] ?? 0), 0);
     console.log(
-      `\n[게임 종료 통계] 방 ${this.code} · 총 핸드 ${g.handNumber}` +
-        ` · 은행에서 생성된 칩 ${st.bankChips + st.joinChips} (하이리스크 ${st.bankChips}, 중도 참여 지급 ${st.joinChips})` +
-        ` · 은행으로 빠진 칩 ${st.bankTaxed + st.bankPaid} (세금 ${st.bankTaxed}, 나 다시 돌아갈래 ${st.bankPaid}) · 추방으로 사라진 칩 ${st.kickedChips}`,
+      `\n[게임 종료 통계] 방 ${this.code} · 총 핸드 ${g.handNumber} · 재충전 ${g.options.recharge ? '켜짐' : '꺼짐'}` +
+        ` · 은행에서 생성된 칩 ${st.bankChips + st.joinChips} (증강 보너스·대출 ${st.bankChips}, 중도 참여 지급 ${st.joinChips})` +
+        ` · 은행으로 빠진 칩 ${st.bankTaxed + st.bankPaid} (세금 ${st.bankTaxed}, 상환·수수료 등 ${st.bankPaid}) · 추방으로 사라진 칩 ${st.kickedChips}` +
+        ` · ★★★ 증강 사용 ${star3}회 · 메이드 인 헤븐 시간 초과 폴드 ${st.heavenFolds}회`,
     );
+    const rc = Object.entries(st.recharges);
+    if (rc.length) {
+      console.log('[재충전]');
+      for (const [id, list] of rc) console.log(`  ${g.players.find((p) => p.id === id)?.name ?? id}: ${list.length}회 (${list.map((a) => AUGMENTS[a].name).join(', ')})`);
+    }
     console.table(rows);
   }
 
   private onNewDecision(kind: PendingKind, seq: number): void {
     if (this.decisionTimer) clearTimeout(this.decisionTimer);
     this.decisionTimer = null;
+    const g0 = this.game!;
+    // 턴이 반응 대기·제안으로 멈추면 남은 시간을 기억해 둔다
+    if (this.deadlineKind === 'turn' && this.deadline && g0.toAct !== null && (kind === 'reaction' || kind === 'respond')) {
+      this.pausedTurn = { id: g0.players[g0.toAct].id, ms: Math.max(0, this.deadline - Date.now()), viaRespond: kind === 'respond' };
+    } else if (this.pausedTurn && kind === 'respond') {
+      this.pausedTurn.viaRespond = true;
+    } else if (kind !== 'reaction' && kind !== 'respond' && kind !== 'turn') {
+      this.pausedTurn = null;
+    }
     this.deadline = null;
     this.deadlineKind = null;
     let base: number;
     switch (kind) {
-      case 'turn':
+      case 'turn': {
+        // 플레이어별 행동 제한 시간 (메이드 인 헤븐 등으로 줄어들 수 있음, 최소 5초)
+        const g = this.game!;
+        const id = g.toAct !== null ? g.players[g.toAct]?.id : undefined;
+        base = (id ? turnSecondsFor(g, id, this.settings.turnSeconds) : this.settings.turnSeconds) * 1000;
+        // 제안·입찰 응답이 끝나 같은 사람 차례로 돌아오면 멈췄던 시간부터 이어 간다 (최소 5초)
+        const pt = this.pausedTurn;
+        this.pausedTurn = null;
+        if (pt && pt.viaRespond && pt.id === id) base = Math.min(base, Math.max(5000, pt.ms));
+        break;
+      }
+      case 'respond':
+        // 제안·입찰·비공개 선언: 15초 (응답하지 않으면 기본 응답)
+        base = this.opts.respondSeconds * 1000;
+        break;
       case 'discard':
       case 'declare':
         base = this.settings.turnSeconds * 1000;
@@ -712,6 +790,8 @@ export class Room {
       case 'handEnd':
         this.accountAbsence();
         base = this.opts.handEndDelayMs + (this.game?.result?.showdown ? 2000 : 0);
+        // 쇼다운 직후 선택(무승부 제안 등)이 남아 있으면 10초는 기다린다
+        if (getPending(this.game!).playerIds.length) base = Math.max(base, 10_000);
         break;
       default:
         return;
@@ -946,7 +1026,8 @@ export class RoomManager {
   publicList(): RoomListItem[] {
     const order = (x: RoomListItem) => (x.status === 'waiting' ? 0 : 1) * 2 + (x.joinable ? 0 : 1);
     return [...this.rooms.values()]
-      .filter((r) => r.isPublic && !r.deleted)
+      // 접속 중인 사람이 없는 방(0명)은 목록에 보이지 않는다
+      .filter((r) => r.isPublic && !r.deleted && r.humans().some((m) => m.connected))
       .map((r) => r.listItem())
       .sort((a, b) => order(a) - order(b) || a.name.localeCompare(b.name, 'ko'));
   }

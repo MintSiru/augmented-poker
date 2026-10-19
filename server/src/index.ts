@@ -152,6 +152,13 @@ export async function createAppServer(port = 0, overrides: Partial<ServerOptions
       reply(ack, err ? { ok: false, error: err } : { ok: true });
     });
 
+    socket.on('room:host', (payload: unknown, ack: unknown) => {
+      if (!current) return reply(ack, { ok: false, error: '방에 들어가 있지 않습니다.' });
+      const err = current.room.giveHost(current.member, isObj(payload) ? payload.playerId : null);
+      current.room.sync();
+      reply(ack, err ? { ok: false, error: err } : { ok: true });
+    });
+
     socket.on('room:start', (_payload: unknown, ack: unknown) => {
       if (!current) return reply(ack, { ok: false, error: '방에 들어가 있지 않습니다.' });
       const err = current.room.start(current.member);

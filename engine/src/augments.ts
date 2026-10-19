@@ -86,7 +86,53 @@ export type AugmentId =
   | 'getOut'
   | 'highCardDuel'
   | 'underdog'
-  | 'restart';
+  | 'restart'
+  // ───── 3차 풀 ─────
+  // 시야·시간
+  | 'glasses'
+  | 'heaven'
+  // 보드·팟 구조
+  | 'plusOne'
+  | 'capitalism'
+  | 'reverseRiver'
+  | 'doubleBoard'
+  | 'twoFates'
+  | 'prophecy'
+  | 'turnRiver'
+  | 'highLow'
+  | 'freeze'
+  | 'magnet'
+  | 'swapBoard'
+  | 'lastStand'
+  | 'sidePotBreaker'
+  | 'drawOffer'
+  // 제안·응답
+  | 'pickMe'
+  | 'jointTransfer'
+  | 'loanShark'
+  | 'infoAuction'
+  | 'cardAuction'
+  | 'truthGame'
+  | 'staredown'
+  | 'sealedContract'
+  | 'nameIt'
+  // 좌석·증강 흐름
+  | 'comeBack'
+  | 'runaway'
+  | 'augShuffle'
+  | 'lurk'
+  | 'hunter'
+  | 'loan'
+  // 판정 공유·팀·탈취
+  | 'destinyTeam'
+  | 'parasite'
+  | 'steal'
+  | 'promotion'
+  | 'alchemy'
+  | 'publicHearing'
+  // 확률·통계
+  | 'recorder'
+  | 'fateThread';
 
 export type Stars = 1 | 2 | 3;
 
@@ -99,9 +145,10 @@ export type AugmentCategory = '정보형' | '카드 조작형' | '족보 변형�
  * - toggle: 켜 두면 조건이 될 때 자동 사용 (면제권) / 미리 준비 (위장)
  * - window: 정해진 선언 기회(플랍·턴·리버 공개 직후)에만
  * - call: 콜할 때 함께 선언 (무임승차)
- * - reaction: 다른 증강의 반응 대기 시간 중에만 (카운터 스펠, 면역)
+ * - reaction: 다른 증강의 반응 대기 시간 중에만 (카운터 스펠, 면역, 탈취)
+ * - prompt: 조건이 되면 나에게만 "발동할까요?" 선택이 뜬다 (무승부로 하지 않을래?)
  */
-export type Trigger = 'passive' | 'button' | 'toggle' | 'window' | 'call' | 'reaction';
+export type Trigger = 'passive' | 'button' | 'toggle' | 'window' | 'call' | 'reaction' | 'prompt';
 
 /**
  * 공개 방식
@@ -130,10 +177,16 @@ export interface AugmentDef {
   /** 사용 가능 시점 안내 (버튼 툴팁) */
   timing: string;
   target?: TargetKind;
-  /** 같은 그룹은 한 사람이 1개만 보유 (variant: 4장 플러시·징검다리·4장 스트레이트·짝수/홀수 동맹·보폭 두 배) */
-  group?: 'variant' | 'counter';
-  /** 1차 / 2차 풀 */
-  pool?: 1 | 2;
+  /** 같은 그룹은 한 사람이 1개만 보유 (variant: 4장 플러시·징검다리·4장 스트레이트·짝수/홀수 동맹·보폭 두 배, revival: 불사의 토템·3일 안에 오리라) */
+  group?: 'variant' | 'counter' | 'revival';
+  /** 게임 전체에서 한 명만 가질 수 있는 유일 증강 */
+  unique?: boolean;
+  /** 탈취로 선언자를 바꿀 수 있는 증강 (다른 플레이어나 보드 카드를 지정) */
+  stealable?: boolean;
+  /** 지목형 (철벽으로 막을 수 있음) */
+  targeted?: boolean;
+  /** 1차 / 2차 / 3차 풀 */
+  pool?: 1 | 2 | 3;
   /** 면역으로 피할 수 없는 공개형 (판 전체 규칙을 바꾸는 것) */
   tableWide?: boolean;
 }
@@ -201,7 +254,7 @@ export const AUGMENTS: Record<AugmentId, AugmentDef> = {
     timing: '쇼다운에서 이긴 뒤 자동 (가져갈 카드 선택)',
   }),
   seal: D({
-    id: 'seal', name: '봉인', stars: 3, category: '카드 조작형', trigger: 'window', disclosure: 'named',
+    id: 'seal', name: '봉인', stars: 3, category: '카드 조작형', trigger: 'window', disclosure: 'named', stealable: true,
     uses: { count: 1, per: 'game' },
     description: '게임 1회. 리버 공개 후 보드 카드 1장을 지정해, 이번 핸드에서 모든 플레이어의 족보 계산에서 제외한다.',
     timing: '리버 공개 직후 선언 기회에',
@@ -266,7 +319,7 @@ export const AUGMENTS: Record<AugmentId, AugmentDef> = {
   }),
   enforcement: D({
     id: 'enforcement', name: '강제 집행', stars: 3, category: '경제/베팅형', trigger: 'button', disclosure: 'named',
-    uses: { count: 1, per: 'game' }, target: 'richerOpponent',
+    uses: { count: 1, per: 'game' }, target: 'richerOpponent', targeted: true, stealable: true,
     description: '게임 1회. 리버 베팅 라운드에서 내가 올인했을 때 선언. 나보다 칩이 많은 상대 1명을 지목하면 그 상대는 폴드할 수 없고 콜해야 한다.',
     timing: '리버에서 내가 올인한 뒤, 지목할 상대가 아직 응답하기 전',
   }),
@@ -350,7 +403,7 @@ export const AUGMENTS: Record<AugmentId, AugmentDef> = {
     timing: '리버 공개 직후 선언 기회에',
   }),
   heavyFog: D({
-    id: 'heavyFog', name: '짙은 안개', stars: 3, category: '공개형', trigger: 'button', disclosure: 'named', public: true,
+    id: 'heavyFog', name: '짙은 안개', stars: 3, category: '공개형', trigger: 'button', disclosure: 'named', public: true, stealable: true,
     uses: { count: 1, per: 'game' },
     description: '플랍이 깔리기 전 선언. 플랍 3장은 선언자만 보고, 다른 플레이어에게는 쇼다운 때 공개. 족보 판정에는 정상 반영.',
     timing: '프리플랍 (플랍이 깔리기 전)',
@@ -409,7 +462,7 @@ export const AUGMENTS: Record<AugmentId, AugmentDef> = {
     timing: '턴 공개 이후 베팅 라운드, 내가 핸드에 참여하고 있을 때',
   }),
   eitherOr: D({
-    id: 'eitherOr', name: '양자택일', stars: 3, category: '카드 조작형', trigger: 'window', disclosure: 'named', pool: 2,
+    id: 'eitherOr', name: '양자택일', stars: 3, category: '카드 조작형', trigger: 'window', disclosure: 'named', pool: 2, stealable: true,
     uses: { count: 1, per: 'game' },
     description: '게임 1회. 플랍 공개 직후 턴 카드 후보 2장을 나만 보고 하나를 고른다. 고른 카드가 턴에 공개되고 나머지는 버린다. 사용 사실은 모두에게 표시.',
     timing: '플랍 공개 직후 선언 기회에',
@@ -481,7 +534,7 @@ export const AUGMENTS: Record<AugmentId, AugmentDef> = {
     timing: '자동',
   }),
   totem: D({
-    id: 'totem', name: '불사의 토템', stars: 2, category: '경제/베팅형', trigger: 'passive', disclosure: 'onEffect', pool: 2,
+    id: 'totem', name: '불사의 토템', stars: 2, category: '경제/베팅형', trigger: 'passive', disclosure: 'onEffect', pool: 2, group: 'revival',
     uses: { count: 1, per: 'game' },
     description: '게임 1회, 자동. 쇼다운에서 올인으로 칩을 모두 잃으면 탈락하지 않고, 승자의 몫에서 10BB를 남겨 받은 채 계속한다.',
     timing: '자동',
@@ -516,7 +569,7 @@ export const AUGMENTS: Record<AugmentId, AugmentDef> = {
   immunity: D({
     id: 'immunity', name: '면역', stars: 2, category: '방어/카운터형', trigger: 'reaction', disclosure: 'named', pool: 2,
     uses: { count: 1, per: 'game' }, group: 'counter',
-    description: '게임 1회. 공개형 증강의 반응 대기 중에 사용하면 나만 그 효과에서 빠진다 (암전·유리 테이블·러시안 룰렛·짙은 안개·실명 다트·너 나가·죽음과 세금). 폭탄 팟·하이카드·언더독·밥상 뒤집기·나 다시 돌아갈래에는 쓸 수 없다.',
+    description: '게임 1회. 공개형 증강의 반응 대기 중에 사용하면 나만 그 효과에서 빠진다 (암전·유리 테이블·러시안 룰렛·짙은 안개·실명 다트·너 나가·죽음과 세금·배수진·증강 셔플·운명 공동체·메이드 인 헤븐·안경 없어서 잘 안보여). 판 전체 규칙이나 보드·팟 구조를 바꾸는 공개형과 경매에는 쓸 수 없다.',
     timing: '다른 사람의 공개형 증강 반응 대기(3초) 중',
   }),
   padlock: D({
@@ -535,13 +588,13 @@ export const AUGMENTS: Record<AugmentId, AugmentDef> = {
   }),
   blindDart: D({
     id: 'blindDart', name: '실명 다트', stars: 2, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 2,
-    uses: { count: 1, per: 'game' }, target: 'opponentInHand',
+    uses: { count: 1, per: 'game' }, target: 'opponentInHand', targeted: true, stealable: true,
     description: '플랍 전 프리플랍 베팅 중 내 차례에 선언. 상대 1명을 지목하면 그 상대는 이번 핸드 동안 보드를 볼 수 없고 자기 홀카드만 보며 플레이한다 (쇼다운 때 공개). 지목형.',
     timing: '프리플랍 베팅 중 내 차례',
   }),
   getOut: D({
     id: 'getOut', name: '너 나가', stars: 2, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 2,
-    uses: { count: 1, per: 'game' }, target: 'opponentInHand',
+    uses: { count: 1, per: 'game' }, target: 'opponentInHand', targeted: true, stealable: true,
     description: '플랍 전 프리플랍 베팅 중 내 차례에 선언 (핸드에 3명 이상일 때). 상대 1명을 지목하면 이번 핸드에서 강제로 폴드한다 (낸 칩은 팟에). 지목형, 강제 폴드.',
     timing: '프리플랍 베팅 중 내 차례 (핸드에 3명 이상)',
   }),
@@ -563,6 +616,250 @@ export const AUGMENTS: Record<AugmentId, AugmentDef> = {
     description: '쇼다운 전 내 차례에 선언. 블라인드를 뺀 이번 핸드의 베팅을 모두 돌려주고 같은 버튼·블라인드로 새 덱을 섞어 프리플랍부터 다시 시작한다. 선언자는 돌려받을 칩의 50%를 은행에 낸다. 다시 시작한 핸드에서는 누구도 이 증강을 쓸 수 없다.',
     timing: '쇼다운 전, 베팅 중 내 차례',
   }),
+
+  // ═════════════════════════ 3차 풀 ═════════════════════════
+
+  // ───────── 시야·시간 제어 ─────────
+  glasses: D({
+    id: 'glasses', name: '안경 없어서 잘 안보여', stars: 2, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 3,
+    uses: { count: 1, per: 'game' },
+    description: '게임 1회. 프리플랍 베팅 전에 선언. 이번 핸드 동안 선언자를 뺀 모두에게 보드 카드의 무늬를 숨기고 숫자만 보이며, 다른 사람의 칩·베팅 금액은 대략값(BB 단위)으로 보인다. 현재 족보 표시와 카운팅도 숨긴다. 쇼다운 결과는 또렷하게 공개.',
+    timing: '프리플랍, 아무도 행동하기 전',
+  }),
+  heaven: D({
+    id: 'heaven', name: '메이드 인 헤븐', stars: 2, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 3,
+    uses: { count: 1, per: 'game' },
+    description: '게임 1회. 선언한 다음 핸드부터 선언자를 뺀 모두의 행동 제한 시간이 매 핸드 5초씩 줄어든다 (최소 5초). 다음 블라인드 레벨이 시작되면 원래 시간으로. 두 명이 선언하면 감소량이 합쳐지고 각자 자기 효과에서만 빠진다.',
+    timing: '게임 중 언제든',
+  }),
+
+  // ───────── 보드·팟 구조 ─────────
+  plusOne: D({
+    id: 'plusOne', name: '플러스 원', stars: 2, category: '카드 조작형', trigger: 'window', disclosure: 'named', pool: 3,
+    uses: { count: 1, per: 'game' },
+    description: '게임 1회. 리버 공개 후 베팅 전에 선언. 6번째 보드 카드를 1장 더 공개하고, 모두 보드 6장과 홀카드 중 최선의 5장으로 판정한다.',
+    timing: '리버 공개 직후 선언 기회에',
+  }),
+  capitalism: D({
+    id: 'capitalism', name: '자본주의', stars: 2, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 3,
+    uses: { count: 1, per: 'game' }, tableWide: true,
+    description: '플랍 공개 후 선언. 이번 핸드의 플랍·턴 베팅 라운드가 끝날 때마다 그 라운드에서 가장 크게 베팅·레이즈한 사람이 보드 카드를 1장 더 깔지 정한다 (보드 최대 7장, 추가 카드는 다음 카드보다 먼저 공개).',
+    timing: '플랍 베팅 라운드 중',
+  }),
+  reverseRiver: D({
+    id: 'reverseRiver', name: '거꾸로 강을 거슬러', stars: 1, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 3,
+    uses: { count: 1, per: 'game' }, tableWide: true,
+    description: '카드를 나누기 전 선언. 다음 핸드의 보드가 1장 → 1장 → 3장 순서로 공개된다. 베팅 라운드 수는 같다.',
+    timing: '핸드 사이 (다음 핸드 배분 전)',
+  }),
+  doubleBoard: D({
+    id: 'doubleBoard', name: '더블 보드', stars: 1, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 3,
+    uses: { count: 1, per: 'game' }, tableWide: true,
+    description: '플랍이 깔리기 전 선언. 보드를 2세트 깔고, 각 보드의 승자가 팟을 절반씩 나눈다.',
+    timing: '프리플랍 (플랍이 깔리기 전)',
+  }),
+  twoFates: D({
+    id: 'twoFates', name: '두 번의 운명', stars: 1, category: '공개형', trigger: 'window', disclosure: 'named', public: true, pool: 3,
+    uses: { count: 1, per: 'game' }, tableWide: true,
+    description: '턴까지 남은 플레이어가 모두 올인해 추가 베팅이 불가능할 때 선언. 리버를 두 번 따로 뽑아 각 결과에 팟의 절반을 배정한다.',
+    timing: '턴 공개 직후, 더 베팅할 수 없을 때',
+  }),
+  prophecy: D({
+    id: 'prophecy', name: '미리 온 결말', stars: 1, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 3,
+    uses: { count: 1, per: 'game' }, tableWide: true,
+    description: '카드를 나누기 전 선언. 다음 핸드 시작 때 덱에서 1장을 공개해 그 핸드의 리버로 예약한다.',
+    timing: '핸드 사이 (다음 핸드 배분 전)',
+  }),
+  turnRiver: D({
+    id: 'turnRiver', name: '턴과 리버 사이', stars: 3, category: '카드 조작형', trigger: 'window', disclosure: 'named', pool: 3,
+    uses: { count: 1, per: 'game' }, stealable: true,
+    description: '게임 1회. 플랍 직후 턴·리버로 나올 두 카드를 나만 미리 보고 공개 순서를 정한다. 두 카드는 그대로 확정. 사용 사실은 공개, 본 카드는 비공개.',
+    timing: '플랍 공개 직후 선언 기회에',
+  }),
+  highLow: D({
+    id: 'highLow', name: '하이로우', stars: 2, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 3,
+    uses: { count: 1, per: 'game' }, tableWide: true,
+    description: '플랍 전 선언. 이번 팟을 가장 높은 패와 가장 낮은 패(역전 순위)가 반씩 나눈다. 한 사람이 양쪽을 모두 가져갈 수 있다.',
+    timing: '프리플랍 (플랍이 깔리기 전)',
+  }),
+  freeze: D({
+    id: 'freeze', name: '동결', stars: 1, category: '카드 조작형', trigger: 'button', disclosure: 'named', pool: 3,
+    uses: { count: 1, per: 'game' }, stealable: true,
+    description: '게임 1회. 핸드가 끝날 때 이번 보드 카드 1장을 지정하면 다음 핸드 플랍에 그 카드가 반드시 포함된다. 지정 카드는 모두에게 공개.',
+    timing: '핸드 결과 화면 (공개된 보드 카드 지정)',
+  }),
+  magnet: D({
+    id: 'magnet', name: '자석', stars: 2, category: '카드 조작형', trigger: 'button', disclosure: 'named', pool: 3,
+    uses: { count: 1, per: 'game' },
+    description: '게임 1회. 플랍 후 무늬 하나를 공개 지정한다. 턴과 리버 중 그 무늬가 아닌 카드가 처음 나오면 버리고 다시 1장을 뽑는다 (다시 뽑은 카드는 확정).',
+    timing: '플랍 베팅 라운드 중',
+  }),
+  swapBoard: D({
+    id: 'swapBoard', name: '맞바꾸기', stars: 3, category: '카드 조작형', trigger: 'button', disclosure: 'named', pool: 3,
+    uses: { count: 1, per: 'game' },
+    description: '게임 1회. 턴 공개 후 내 홀카드 1장과 보드 카드 1장을 바꾼다. 교체 내용은 모두에게 공개.',
+    timing: '턴 공개 이후 베팅 라운드',
+  }),
+  lastStand: D({
+    id: 'lastStand', name: '배수진', stars: 3, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 3,
+    uses: { count: 1, per: 'game' },
+    description: '프리플랍 내 행동 전 선언. 이번 핸드 동안 모두 폴드할 수 없고 레이즈도 금지 (체크·콜만 가능).',
+    timing: '프리플랍, 내 첫 행동 전',
+  }),
+  sidePotBreaker: D({
+    id: 'sidePotBreaker', name: '사이드 팟 브레이커', stars: 2, category: '경제/베팅형', trigger: 'button', disclosure: 'named', pool: 3,
+    uses: { count: 1, per: 'game' },
+    description: '게임 1회. 내 올인으로 사이드팟이 생긴 핸드에서 메인 팟을 이겼을 때 선언. 다른 플레이어들끼리 쌓은 사이드팟의 30%를 가져온다.',
+    timing: '핸드 결과 화면 (올인해서 메인 팟을 이겼을 때)',
+  }),
+  drawOffer: D({
+    id: 'drawOffer', name: '무승부로 하지 않을래?', stars: 2, category: '경제/베팅형', trigger: 'prompt', disclosure: 'named', pool: 3,
+    uses: { count: 3, per: 'game' },
+    description: '게임 3회. 쇼다운에서 나를 이긴 승자의 족보 종류가 내 족보 종류와 같으면 결과 직후 "무승부를 제안할까요?"가 나에게만 뜬다. 발동하면 그 승자와 나 둘이서 그 팟을 반씩 나눈다. 승자가 동점 처리 증강을 가졌다면 상쇄되어 발동할 수 없다.',
+    timing: '쇼다운 결과 직후 (조건이 되면 선택 창)',
+  }),
+
+  // ───────── 제안·응답 ─────────
+  pickMe: D({
+    id: 'pickMe', name: '골라 봐', stars: 1, category: '심리전형', trigger: 'button', disclosure: 'named', pool: 3,
+    uses: { count: 1, per: 'game' }, target: 'opponentInHand',
+    description: '게임 1회. 플랍 또는 턴의 내 행동 직전 상대 1명에게 제안한다. 수락하면 그 상대가 나에게 3BB를 내고, 내가 고른 홀카드 1장을 그 상대만 본다.',
+    timing: '플랍·턴 베팅 라운드의 내 차례 (행동 전)',
+  }),
+  jointTransfer: D({
+    id: 'jointTransfer', name: '공동 환승', stars: 1, category: '카드 조작형', trigger: 'window', disclosure: 'named', pool: 3,
+    uses: { count: 1, per: 'game' }, target: 'opponentInHand',
+    description: '게임 1회. 플랍 직후 상대 1명에게 교환을 제안한다. 수락하면 각자 홀카드 1장을 비공개로 골라 동시에 맞바꾼다 (두 사람에게만 보임).',
+    timing: '플랍 공개 직후 선언 기회에',
+  }),
+  loanShark: D({
+    id: 'loanShark', name: '사채업자', stars: 1, category: '경제/베팅형', trigger: 'button', disclosure: 'named', pool: 3,
+    uses: { count: 1, per: 'game' }, target: 'opponent',
+    description: '게임 1회. 상대 1명에게 5BB를 빌려주겠다고 제안한다. 수락하면 2핸드 뒤 7BB를 자동으로 돌려받는다 (모자라면 있는 만큼). 상대가 그전에 탈락·추방되면 빌려준 칩은 사라진다.',
+    timing: '게임 중 언제든',
+  }),
+  infoAuction: D({
+    id: 'infoAuction', name: '정보 경매', stars: 2, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 3,
+    uses: { count: 1, per: 'game' }, tableWide: true,
+    description: '플랍 후 선언. 턴 카드를 미리 볼 권리를 남은 플레이어 전원이 비공개로 입찰한다 (0 = 참여 안 함, 최소 1BB). 최고 입찰자만 턴 카드를 보고 낙찰금은 팟에. 낙찰자와 낙찰금만 공개.',
+    timing: '플랍 베팅 라운드 중',
+  }),
+  cardAuction: D({
+    id: 'cardAuction', name: '카드 경매', stars: 2, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 3,
+    uses: { count: 1, per: 'game' }, tableWide: true,
+    description: '플랍 후 선언. 덱에서 1장을 공개하고 남은 플레이어 전원이 비공개로 입찰한다 (최소 1BB). 최고 입찰자가 그 카드를 홀카드 1장과 바꾸고 (버린 카드는 비공개) 낙찰금은 팟에.',
+    timing: '플랍 베팅 라운드 중',
+  }),
+  truthGame: D({
+    id: 'truthGame', name: '진실 게임', stars: 1, category: '심리전형', trigger: 'button', disclosure: 'named', pool: 3,
+    uses: { count: 1, per: 'game' },
+    description: '게임 1회. 리버 내 차례에 "내 패는 [족보 종류] 이상"이라고 공개 선언한다. 콜한 상대와 쇼다운에 가면, 진실이면 그 상대 각각에게서 3BB를 받고 거짓이면 각각에게 3BB를 준다.',
+    timing: '리버 베팅 라운드의 내 차례',
+  }),
+  staredown: D({
+    id: 'staredown', name: '눈싸움', stars: 1, category: '심리전형', trigger: 'button', disclosure: 'named', pool: 3,
+    uses: { count: 1, per: 'game' }, target: 'opponentInHand', targeted: true,
+    description: '게임 1회. 리버에서 상대 1명을 지목해 둘이 동시에 상대보다 "강함/약함"을 비공개로 선언한다. 둘 다 쇼다운에 가면 공개하고, 한 명만 정직했다면 정직한 쪽이 상대에게서 2BB를 받는다.',
+    timing: '리버 베팅 라운드',
+  }),
+  sealedContract: D({
+    id: 'sealedContract', name: '밀봉 계약', stars: 1, category: '심리전형', trigger: 'button', disclosure: 'named', pool: 3,
+    uses: { count: 1, per: 'game' },
+    description: '게임 1회. 리버에서 베팅·레이즈하기 직전 "전원 폴드" 또는 "한 명 이상 콜"을 비공개로 고른다. 계약 사실만 공개되고, 핸드 종료 후 맞히면 은행에서 3BB를 받는다.',
+    timing: '리버 베팅 라운드의 내 차례',
+  }),
+  nameIt: D({
+    id: 'nameIt', name: '명추리', stars: 2, category: '심리전형', trigger: 'window', disclosure: 'named', pool: 3,
+    uses: { count: 1, per: 'hand' }, target: 'opponentInHand', targeted: true,
+    description: '매 핸드 1회. 리버 베팅이 끝난 뒤 카드 공개 전에 쇼다운 상대 1명을 지목하고 카드 1장을 부른다. 그 상대의 홀카드와 일치하면 쇼다운 없이 내가 참여할 수 있는 팟을 모두 가져가고, 틀리면 폴드하고 그 상대에게 2BB를 낸다.',
+    timing: '리버 베팅이 끝난 뒤 쇼다운 직전 선언 기회에',
+  }),
+
+  // ───────── 좌석·증강 흐름 ─────────
+  comeBack: D({
+    id: 'comeBack', name: '3일 안에 오리라', stars: 1, category: '경제/베팅형', trigger: 'passive', disclosure: 'onEffect', pool: 3,
+    uses: { count: 1, per: 'game' }, group: 'revival',
+    description: '게임 1회. 어떤 이유로든 탈락하면 부활 대기 상태가 되고, 3핸드가 지난 뒤 원래 자리로 돌아온다. 돌아올 때의 10BB는 남은 플레이어가 똑같이 나눠 낸다. 불사의 토템과 동시 보유 불가.',
+    timing: '탈락하면 자동',
+  }),
+  runaway: D({
+    id: 'runaway', name: '폭주기관차', stars: 2, category: '경제/베팅형', trigger: 'passive', disclosure: 'onEffect', uses: null, pool: 3,
+    description: '패시브. 연속한 핸드에서 5BB 이상인 팟을 이기면 연승. 3연승이면 다음 증강 선택에서 3개 중 2개, 5연승이면 3개 모두를 가져간다. 연승 수는 모두에게 표시. 보상을 받으면 연승이 처음부터.',
+    timing: '자동',
+  }),
+  augShuffle: D({
+    id: 'augShuffle', name: '증강 셔플', stars: 2, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 3,
+    uses: { count: 1, per: 'game' }, unique: true,
+    description: '핸드 사이에 선언. 전원이 보유 증강 중 무작위 1개를 왼쪽 사람에게 넘긴다 (남은 횟수 그대로, 받은 증강은 받은 사람만 앎). 게임 전체에서 한 명만 가질 수 있는 유일 증강.',
+    timing: '핸드 사이',
+  }),
+  lurk: D({
+    id: 'lurk', name: '잠복', stars: 1, category: '심리전형', trigger: 'passive', disclosure: 'never', uses: null, pool: 3,
+    description: '얻는 순간 내 다른 증강 1개를 골라 숨긴다 (없으면 다음에 얻는 증강). 숨긴 증강은 좌석의 보유 증강 수와 탐문 결과에서 빠지고, 처음 쓰는 순간 드러난다.',
+    timing: '획득 시',
+  }),
+  hunter: D({
+    id: 'hunter', name: '사냥꾼', stars: 2, category: '경제/베팅형', trigger: 'passive', disclosure: 'onEffect', uses: null, pool: 3,
+    description: '패시브. 내가 참여한 팟에서 다른 플레이어를 탈락시키면, 다 쓴 내 ★·★★ 액티브 증강 중 무작위 1개를 1회 충전한다 (토템·부활로 살아나도 탈락시킨 것으로 침).',
+    timing: '자동',
+  }),
+  loan: D({
+    id: 'loan', name: '대출', stars: 2, category: '경제/베팅형', trigger: 'button', disclosure: 'named', pool: 3,
+    uses: { count: 1, per: 'game' },
+    description: '게임 1회. 은행에서 20BB를 빌리고 5핸드 뒤 25BB를 자동 상환한다. 모자라면 있는 만큼 내고 보유 증강 1개가 무작위로 몰수된다. 상환 전에 탈락·추방되면 대출은 사라진다.',
+    timing: '게임 중 언제든',
+  }),
+
+  // ───────── 판정 공유·팀·탈취 ─────────
+  destinyTeam: D({
+    id: 'destinyTeam', name: '운명 공동체', stars: 3, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 3,
+    uses: { count: 1, per: 'game' }, target: 'opponent', stealable: true,
+    description: '4명 이상 남았을 때 카드를 나누기 전 선언. 짝을 지정하고 나머지는 무작위로 2명씩 짝지어 다음 핸드를 팀전으로 진행한다. 쇼다운에서 팀원이 이기면 그 팟을 팀원과 반씩 나눈다 (각자 낸 칩 한도 안에서). 팀원끼리도 홀카드는 볼 수 없다.',
+    timing: '핸드 사이, 4명 이상',
+  }),
+  parasite: D({
+    id: 'parasite', name: '기생', stars: 3, category: '족보 변형형', trigger: 'window', disclosure: 'named', pool: 3,
+    uses: { count: 1, per: 'game' }, target: 'opponentInHand', targeted: true,
+    description: '게임 1회. 쇼다운 직전 상대 1명을 지목한다. 내 홀카드 1장과 그 상대의 홀카드 중 높은 1장으로도 족보를 만들 수 있고, 더 좋은 쪽으로 판정한다 (카드를 빼앗지는 않음).',
+    timing: '리버 베팅이 끝난 뒤 쇼다운 직전 선언 기회에',
+  }),
+  steal: D({
+    id: 'steal', name: '탈취', stars: 3, category: '방어/카운터형', trigger: 'reaction', disclosure: 'named', pool: 3,
+    uses: { count: 1, per: 'game' }, group: 'counter',
+    description: '게임 1회. 반응 대기 중, 다른 사람이나 보드 카드를 지정하는 증강(짙은 안개·봉인·실명 다트·너 나가·강제 집행·양자택일·턴과 리버 사이·동결·운명 공동체)이 선언된 직후 사용. 내가 선언한 것으로 바꿔 대상과 카드를 내가 정한다.',
+    timing: '탈취할 수 있는 증강의 반응 대기(3초) 중',
+  }),
+  promotion: D({
+    id: 'promotion', name: '승격', stars: 3, category: '족보 변형형', trigger: 'window', disclosure: 'named', pool: 3,
+    uses: { count: 1, per: 'game' },
+    description: '게임 1회. 리버 공개 후 베팅 전에 선언. 이번 핸드 내 족보를 한 단계 올려 판정한다 (원페어 → 투페어 등, 최대 풀하우스).',
+    timing: '리버 공개 직후 선언 기회에',
+  }),
+  alchemy: D({
+    id: 'alchemy', name: '연금술', stars: 3, category: '족보 변형형', trigger: 'window', disclosure: 'named', pool: 3,
+    uses: { count: 1, per: 'game' },
+    description: '게임 1회. 리버 공개 후 베팅 전에 선언. 이번 핸드 족보 계산에서 내 홀카드 1장의 숫자를 한 단계 올리거나 내린다 (무늬 유지, A와 2는 이어지지 않음, 공개된 카드와 같아지는 변경 금지). 바꾼 카드는 공개.',
+    timing: '리버 공개 직후 선언 기회에',
+  }),
+  publicHearing: D({
+    id: 'publicHearing', name: '공개 청문회', stars: 2, category: '방어/카운터형', trigger: 'passive', disclosure: 'onEffect', pool: 3,
+    uses: { count: 1, per: 'game' }, group: 'counter',
+    description: '게임 1회, 자동. 상대가 정보형 증강으로 내 비공개 정보를 확인할 때 발동. 확인은 허용하되, 사용자의 같은 종류 정보(투시라면 사용자의 홀카드 무작위 1장)를 테이블 전원에게 공개한다.',
+    timing: '자동',
+  }),
+
+  // ───────── 확률·통계 ─────────
+  recorder: D({
+    id: 'recorder', name: '기록관', stars: 1, category: '정보형', trigger: 'passive', disclosure: 'never', uses: null, pool: 3,
+    description: '패시브. 상대별 프리플랍 참여율과 쇼다운에서 드러난 블러프 횟수를 좌석 옆에 나에게만 보여 준다.',
+    timing: '항상 자동',
+  }),
+  fateThread: D({
+    id: 'fateThread', name: '운명의 실', stars: 3, category: '정보형', trigger: 'button', disclosure: 'anonymous', pool: 3,
+    uses: { count: 1, per: 'game' }, target: 'opponentInHand',
+    description: '게임 1회. 플랍 공개 직후 상대 1명을 비공개로 지목해, 리버까지 나와 그 상대만 맞붙는다고 가정한 현재 승률(%)을 나만 확인한다 (증강 효과 반영).',
+    timing: '플랍 베팅 라운드, 내가 핸드에 참여하고 있을 때',
+  }),
 };
 
 export const ALL_AUGMENT_IDS = Object.keys(AUGMENTS) as AugmentId[];
@@ -571,9 +868,14 @@ export function isAugmentId(v: unknown): v is AugmentId {
   return typeof v === 'string' && Object.prototype.hasOwnProperty.call(AUGMENTS, v);
 }
 
-/** 플레이어가 직접 쓰는(액티브) 증강인가 — 공포탄 사용 조건 */
+/** 플레이어가 직접 쓰는(액티브) 증강인가 — 공포탄 사용 조건, 재충전·사냥꾼 대상 */
 export function isActiveAugment(id: AugmentId): boolean {
   return AUGMENTS[id].trigger !== 'passive';
+}
+
+/** 게임 전체에서 다른 사람이 가진 유일 증강 (선택지에서 뺀다) */
+export function uniqueTaken(ownedByOthers: readonly AugmentId[]): AugmentId[] {
+  return ownedByOthers.filter((id) => AUGMENTS[id].unique);
 }
 
 /** 보유 규칙: 중복 불가, 4장 플러시/징검다리 중 1개, 방어/카운터형 1개 */
@@ -614,11 +916,12 @@ export function rollTier(level: number, rng: Rng): Stars {
  * 선택지 생성: 별 개수를 레벨 확률로 뽑고, 그 별에서 보유 가능한 증강을 최대 3개 고른다.
  * 3개 미만이면 한 단계 낮은 별에서 채운다(그래도 모자라면 그 아래 별에서).
  */
-export function rollAugmentOffer(level: number, owned: AugmentId[], rng: Rng, tier?: Stars): AugmentId[] {
+export function rollAugmentOffer(level: number, owned: AugmentId[], rng: Rng, tier?: Stars, taken: readonly AugmentId[] = []): AugmentId[] {
   const t = tier ?? rollTier(level, rng);
   const offer: AugmentId[] = [];
   for (let s = t; s >= 1 && offer.length < 3; s--) {
-    const avail = ALL_AUGMENT_IDS.filter((id) => AUGMENTS[id].stars === s && canHold(owned, id) && !offer.includes(id));
+    // taken: 다른 사람이 이미 가진 유일 증강
+    const avail = ALL_AUGMENT_IDS.filter((id) => AUGMENTS[id].stars === s && canHold(owned, id) && !taken.includes(id) && !offer.includes(id));
     offer.push(...sample(avail, 3 - offer.length, rng));
   }
   return offer;

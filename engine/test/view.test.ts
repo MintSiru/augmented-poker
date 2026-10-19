@@ -126,7 +126,16 @@ function perturb(s: GameState, viewerId: string, rng: Rng): GameState {
     q.lockerPending = rng.int(2) === 0;
     q.blindsPaid = rng.int(4);
     if (q.eitherOr) q.eitherOr.pick = rng.int(2) ? rng.int(2) : null;
+    if (q.contract !== null) q.contract = rng.int(2);
   }
+  // 제안·입찰: 다른 사람의 응답(입찰가·비공개 선언)과 다른 사람이 제안한 내용
+  if (c.respond) {
+    for (const id of Object.keys(c.respond.answers)) {
+      if (id !== viewerId) c.respond.answers[id] = { accept: rng.int(2) === 0, bid: rng.int(500), choice: rng.int(2), cardIndex: rng.int(2) };
+    }
+    if (c.respond.ownerId !== viewerId && c.respond.params.card) c.respond.params.card = '2c';
+  }
+  if (c.staredown) for (const id of Object.keys(c.staredown.claims)) if (id !== viewerId) c.staredown.claims[id] = rng.int(2);
   // 반응 대기 중인 남의 선언: 이름 숨김 선언의 실제 증강·대상
   for (const d of c.reaction?.queue ?? []) {
     if (d.ownerId === viewerId) continue;
@@ -152,11 +161,23 @@ function allowedCards(s: GameState, viewerId: string): Set<Card> {
   for (const p of s.players) {
     if (p.inHand && (p.shown || glassShows(s, p))) p.hole.forEach((c) => ok.add(c));
     p.shepherdShown.forEach((c) => ok.add(c));
+    if (p.alchemy) [p.alchemy.from, p.alchemy.to].forEach((c) => ok.add(c));
   }
   for (const n of me.notes) if (n.hand === s.handNumber) n.cards?.forEach((c) => ok.add(c));
   if (me.augments.some((a) => a.id === 'counting')) s.used.forEach((u) => ok.add(u.card));
-  s.used.filter((u) => u.kind === 'rewind' || u.kind === 'shown').forEach((u) => ok.add(u.card));
+  s.used.filter((u) => u.kind === 'rewind' || u.kind === 'shown' || u.kind === 'called').forEach((u) => ok.add(u.card));
   s.result?.board.forEach((c) => ok.add(c));
+  s.result?.board2?.forEach((c) => ok.add(c));
+  // 공개 예약 카드(미리 온 결말·동결), 두 번째 보드의 공개된 칸
+  if (!(s.effects.blindDarted.includes(viewerId) && !s.effects.fogLifted)) {
+    s.reservedPublic.forEach((r) => ok.add(r.card));
+    s.board2?.slice(0, s.boardRevealed).forEach((c, i) => {
+      if (!fogHides(s, viewerId, i)) ok.add(c);
+    });
+  }
+  if (s.nextHand.freezeCard) ok.add(s.nextHand.freezeCard);
+  // 카드 경매로 공개된 카드 (실명 다트 대상 제외)
+  if (s.auctionCard && !(s.effects.blindDarted.includes(viewerId) && !s.effects.fogLifted)) ok.add(s.auctionCard);
   s.result?.entries.forEach((e) => e.cards.forEach((c) => ok.add(c)));
   return ok;
 }
@@ -184,7 +205,7 @@ function checkAllViews(s: GameState, rng: Rng) {
     }
     for (const pv of view.players) {
       const real = s.players.find((x) => x.id === pv.id)!;
-      expect(pv.augmentCount).toBe(real.augments.length);
+      expect(pv.augmentCount).toBe(real.augments.filter((a) => pv.id === p.id || !a.hidden).length);
       expect(pv.revealedAugments.length).toBe(real.augments.filter((a) => a.revealed).length);
     }
   }

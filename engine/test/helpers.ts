@@ -9,6 +9,7 @@ import {
   chooseBotOpportunistic,
   counterCandidates,
   immunityCandidates,
+  stealCandidates,
   getPlayerView,
   seededRng,
   type GameState,
@@ -44,7 +45,7 @@ export function stepBots(state: GameState, rng: Rng, strict = true): boolean {
   const pending = getPending(state);
   if (pending.kind === 'none') return false;
   if (pending.kind === 'reaction') {
-    for (const id of new Set([...counterCandidates(state), ...immunityCandidates(state)])) {
+    for (const id of new Set([...counterCandidates(state), ...immunityCandidates(state), ...stealCandidates(state)])) {
       const a = chooseBotAction(getPlayerView(state, id), rng);
       if (a) act(state, id, a, strict);
     }

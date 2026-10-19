@@ -2,18 +2,41 @@
 // 족보 변형(core.rulesFor) → 블랙잭(발동했을 때) → 순혈 조건 → 동점 처리 증강 순으로 Contender 를 만든다.
 
 import type { Card } from './cards.js';
-import { applyBlackjack, evaluatePlayerHand, type PlayerHandEval } from './evaluator.js';
+import { rankOf } from './cards.js';
+import { applyBlackjack, Category, CATEGORY_NAMES, compareScores, evaluatePlayerHand, type PlayerHandEval } from './evaluator.js';
 import { evalBoard, findAug, invertedNow, live, rulesFor } from './core.js';
 import { compareContenders, type Contender } from './showdown.js';
 import type { GameState, PlayerState } from './types.js';
 
 export function handEvalFor(state: GameState, p: PlayerState, board: Card[] = evalBoard(state)): PlayerHandEval {
-  const ev = evaluatePlayerHand(p.hole, board, rulesFor(p));
-  return p.blackjackOn ? applyBlackjack(ev, [...p.hole, ...board]) : ev;
+  // 연금술: 바꾼 홀카드로 계산
+  const hole = p.alchemy ? p.hole.map((c, i) => (i === p.alchemy!.index ? p.alchemy!.to : c)) : p.hole;
+  const one = (h: Card[]) => {
+    const ev = evaluatePlayerHand(h, board, rulesFor(p));
+    return p.blackjackOn ? applyBlackjack(ev, [...h, ...board]) : ev;
+  };
+  let ev = one(hole);
+  // 기생: 내 홀카드 1장 + 대상의 높은 홀카드 1장으로도 만들어 보고 더 좋은 쪽
+  const host = p.parasite ? state.players.find((x) => x.id === p.parasite) : undefined;
+  if (host && host.hole.length) {
+    const high = [...host.hole].sort((a, b) => rankOf(b) - rankOf(a))[0];
+    const sign = invertedNow(state) ? -1 : 1;
+    for (const c of hole) {
+      const alt = one([c, high]);
+      if (sign * compareScores(alt.value.score, ev.value.score) > 0) ev = alt;
+    }
+  }
+  // 승격: 족보를 한 단계 위로 (최대 풀하우스)
+  if (p.promoted && ev.value.category < Category.FullHouse) {
+    const cat = ev.value.category + 1;
+    ev = { ...ev, value: { ...ev.value, category: cat, score: [cat, ...ev.value.score.slice(1)], name: `${ev.value.name} → ${CATEGORY_NAMES[cat]} (승격)` } };
+  }
+  return ev;
 }
 
 export function contenderFor(state: GameState, p: PlayerState, ev: PlayerHandEval = handEvalFor(state, p)): Contender {
-  const holeUsed = p.hole.filter((c) => ev.value.cards.includes(c)).length;
+  const hole = p.alchemy ? p.hole.map((c, i) => (i === p.alchemy!.index ? p.alchemy!.to : c)) : p.hole;
+  const holeUsed = hole.filter((c) => ev.value.cards.includes(c)).length;
   return {
     id: p.id,
     score: ev.value.score,
