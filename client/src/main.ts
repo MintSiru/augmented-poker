@@ -636,6 +636,8 @@ function seatHtml(v: PlayerView, p: PublicPlayerView, k: number, n: number): str
   else if (p.hasCards) cards = cardBack('sm') + cardBack('sm');
   const status = p.kicked
     ? '추방됨'
+    : p.dormant !== null
+    ? `부활 대기 (${p.dormant}핸드 뒤)`
     : p.out
     ? `탈락${p.place ? ` (${p.place}위)` : ''}`
     : p.sittingOut
@@ -665,7 +667,7 @@ function seatHtml(v: PlayerView, p: PublicPlayerView, k: number, n: number): str
       <div class="seat-status">${esc(status)}${!p.connected && !p.out && !p.kicked ? ' ⚠' : ''}</div>
       ${canKick(p) ? `<button class="small kick" data-a="kick" data-id="${esc(p.id)}" data-name="${esc(p.name)}">추방</button>` : ''}
       ${shep}
-      <div class="seat-augs"><span class="cnt" title="보유 증강 수">증강 ${p.augmentCount}</span>${revealed}</div>
+      <div class="seat-augs"><span class="cnt" title="보유 증강 수">증강 ${p.augmentCount}</span>${p.streak ? `<span class="streak" title="폭주기관차 연승">🔥${p.streak}연승</span>` : ''}${revealed}</div>
     </div>
     ${p.streetBet > 0 ? `<div class="bet" style="left:${bx}%;top:${by}%">${fmt(p.streetBet)}</div>` : ''}`;
 }
@@ -777,6 +779,9 @@ function renderHand(v: PlayerView) {
     html = `<div class="hand-info joining"><b>다음 핸드부터 참여합니다</b>
       <div>증강 선택 ${j.picksDone}/${j.picksTotal}${j.picksDone < j.picksTotal ? ' 진행 중' : ' 완료 — 다음 핸드 시작 때 자리에 앉습니다'}</div>
       <div class="muted small-note">지금은 테이블의 공개 정보만 볼 수 있습니다.</div></div>`;
+  } else if (v.you.dormant !== null) {
+    html = `<div class="hand-info joining"><b>부활 대기 중</b><div>핸드 #${v.you.dormant}에 원래 자리로 돌아옵니다 (3일 안에 오리라).</div>
+      <div class="muted small-note">대기 중에는 테이블의 공개 정보만 볼 수 있습니다.</div></div>`;
   } else if (v.you.out || !me) {
     html = `<div class="hand-info">탈락했습니다${me?.place ? ` (${me.place}위)` : ''}. 게임은 계속 볼 수 있습니다.</div>`;
   } else {
@@ -969,7 +974,10 @@ function renderAugments(v: PlayerView) {
           const pub = a.revealed
             ? `<span class="tag pubtag">공개됨${a.publicName && a.publicName !== a.name ? ` · 상대에게는 ${esc(a.publicName)}` : ''}</span>`
             : '<span class="tag">비공개</span>';
-          const kind = a.public ? '<span class="tag pubkind">공개형</span>' : a.disclosure === 'anonymous' ? '<span class="tag">익명 알림</span>' : '';
+          const kind =
+            (a.public ? '<span class="tag pubkind">공개형</span>' : a.disclosure === 'anonymous' ? '<span class="tag">익명 알림</span>' : '') +
+            (a.hidden ? '<span class="tag" title="잠복: 상대의 보유 수·탐문에서 빠짐, 처음 쓰면 드러남">숨김</span>' : '') +
+            (v.you.extra.lurkChoose && a.id !== 'lurk' && !a.hidden ? ` <button class="small" data-a="lurk" data-aug="${a.id}" title="잠복: 이 증강을 대신 숨김 (다음 핸드 시작 전까지)">숨기기</button>` : '');
           return `<div class="aug s${a.stars}" title="${esc(a.hint)}">
             <div class="aug-head"><span class="st">${stars(a.stars)}</span><span class="cat">${esc(a.category)}</span></div>
             <div class="aug-name">${esc(a.name)}${a.wildRank ? ` <span class="wild">와일드 ${esc(a.wildRank)}</span>` : ''}</div>
@@ -1073,7 +1081,7 @@ function renderModal(env: GameEnvelope, v: PlayerView) {
   if (you.pick && you.pick.length) {
     html = `<div class="modal-bg"><div class="modal pick">
       <h3>증강 선택 <span class="timer-text" data-timer></span></h3>
-      <p class="muted">레벨 ${v.level} · 하나를 고르세요. 시간이 지나면 무작위로 선택됩니다.${you.joining ? ` <b>중도 참여 선택 ${you.joining.picksDone + 1}/${you.joining.picksTotal}</b>` : ''}</p>
+      <p class="muted">레벨 ${v.level} · 하나를 고르세요. 시간이 지나면 무작위로 선택됩니다.${you.joining ? ` <b>중도 참여 선택 ${you.joining.picksDone + 1}/${you.joining.picksTotal}</b>` : ''}${you.pickExtra ? ` <b class="streak">폭주기관차: 이 선택지에서 ${you.pickExtra + 1}개를 가져갑니다</b>` : ''}</p>
       <div class="pick-row">${you.pick
         .map((a) =>
           a.id === 'parity'
@@ -1507,6 +1515,8 @@ document.addEventListener('click', async (ev) => {
       return act({ type: 'useAugment', augment: 'bet', choice: Number(t.dataset.choice) });
     case 'discard':
       return act({ type: 'discard', cardIndex: Number(t.dataset.i) });
+    case 'lurk':
+      return act({ type: 'lurk', augment: t.dataset.aug });
     case 'respond': {
       const bidNow = () => Number(($('#bid-num') as HTMLInputElement | null)?.value ?? 0);
       if (t.dataset.accept !== undefined) return act({ type: 'respond', accept: t.dataset.accept === '1' });

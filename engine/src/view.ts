@@ -70,6 +70,8 @@ export interface MyAugmentView extends AugmentInfo {
   parity: 'even' | 'odd' | null;
   /** 1차 / 2차 / 3차 풀 */
   pool: 1 | 2 | 3;
+  /** 잠복으로 숨긴 증강 */
+  hidden: boolean;
   /** 지금 버튼으로 쓸 수 있는가 (최종 검증은 서버) */
   usableNow: boolean;
   /** 못 쓰는 이유 또는 쓸 수 있는 시점 (툴팁) */
@@ -113,6 +115,10 @@ export interface PublicPlayerView {
   shepherdShown: Card[];
   connected: boolean;
   isHost: boolean;
+  /** 부활 대기: 돌아오기까지 남은 핸드 수 */
+  dormant: number | null;
+  /** 폭주기관차 연승 수 (보유자, 0이면 null) */
+  streak: number | null;
 }
 
 export interface NoteView {
@@ -301,6 +307,10 @@ export interface PlayerView {
     legal: LegalActions | null;
     pick: AugmentInfo[] | null;
     pickDone: boolean;
+    /** 폭주기관차: 이번 선택에서 더 가져갈 수 있는 개수 */
+    pickExtra: number;
+    /** 부활 대기: 돌아올 핸드 번호 */
+    dormant: number | null;
     discard: { pending: boolean; chosen: number | null } | null;
     /** 선언 기회 (되감기·봉인·밥상 뒤집기) */
     declare: { options: AugmentInfo[]; targets: Partial<Record<AugmentId, string[]>> } | null;
@@ -338,6 +348,8 @@ export interface PlayerView {
       drawPrompt: { winnerName: string } | null;
       /** 밀봉 계약: 내 예측 (0 = 전원 폴드, 1 = 한 명 이상 콜) */
       contract: number | null;
+      /** 잠복: 숨길 증강을 고를 수 있는가 */
+      lurkChoose: boolean;
     };
   };
   result: HandResultView | null;
@@ -425,7 +437,8 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
   const me = seatedMe ?? joiner?.player ?? state.retired.find((p) => p.id === viewerId);
   if (!me) throw new Error('unknown player');
   // 자리에 앉지 않은 사람(중도 참여 대기자 등)은 테이블의 공개 정보만 본다
-  const seated = !!seatedMe;
+  // 부활 대기 중인 사람은 관전자와 같은 공개 정보만 본다
+  const seated = !!seatedMe && seatedMe.dormant === null;
   const { sb, bb } = currentBlinds(state);
   const hpl = state.levelHands;
   const mask = maskFor(state, me);
@@ -461,7 +474,8 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     isBB: state.bbIdx === i && p.inHand,
     isTurn: state.phase === 'betting' && state.toAct === i,
     lastAction: p === me ? p.lastAction : approxText(p.lastAction),
-    augmentCount: p.augments.length,
+    // 잠복으로 숨긴 증강은 다른 사람에게 세지 않는다
+    augmentCount: p === me ? p.augments.length : p.augments.filter((a) => !a.hidden).length,
     revealedAugments: p.augments
       .filter((a) => a.revealed && a.publicId)
       .map((a) => {
@@ -473,6 +487,8 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     shepherdShown: [...p.shepherdShown],
     connected: true,
     isHost: false,
+    dormant: p.dormant !== null ? Math.max(0, p.dormant - state.handNumber) : null,
+    streak: p.streak > 0 && findAug(p, 'runaway') ? p.streak : null,
   }));
 
   // 결과 화면
@@ -583,6 +599,7 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
       fakeUsed: a.fakeUsed ?? null,
       parity: a.parity ?? null,
       pool: d.pool ?? 1,
+      hidden: !!a.hidden,
       usableNow: seated && d.trigger === 'button' && !why,
       hint: why ?? d.timing,
     };
@@ -679,11 +696,13 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
       hand,
       augments: myAugments,
       notes: me.notes
-        .filter((n) => n.hand === state.handNumber || n.kind === 'inquiry')
+        .filter((n) => n.hand === state.handNumber || n.kind === 'inquiry' || n.kind === 'augment')
         .map((n) => ({ hand: n.hand, kind: n.kind, text: n.text, cards: n.cards ? [...n.cards] : null, targetId: n.targetId ?? null })),
       legal: seated ? legalActions(state, me.id) : null,
       pick: me.pickOptions ? me.pickOptions.map(info) : null,
       pickDone: seated && state.phase === 'augmentSelect' && !me.pickOptions,
+      pickExtra: me.pickOptions ? me.pickExtra : 0,
+      dormant: me.dormant,
       discard:
         seated && state.phase === 'discard' && live(me) && me.hole.length === 3
           ? { pending: me.pendingDiscard === null, chosen: me.pendingDiscard }
@@ -708,6 +727,7 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
         turnRiver: me.turnRiver ? { cards: [...me.turnRiver.cards], swap: me.turnRiver.swap } : null,
         drawPrompt: me.drawPrompt && state.phase === 'handEnd' ? { winnerName: nameById(me.drawPrompt.winnerId) } : null,
         contract: me.contract,
+        lurkChoose: me.lurkChoose,
       },
     },
     result,
@@ -830,6 +850,8 @@ function tableNotes(state: GameState): string[] {
   for (const t of state.tasks) {
     const who = state.players.find((p) => p.id === t.playerId)?.name ?? '?';
     if (t.kind === 'sharkRepay') out.push(`사채: ${who} → ${state.players.find((p) => p.id === t.otherId)?.name ?? '?'} 핸드 #${t.dueHand} 전 상환`);
+    if (t.kind === 'loanRepay') out.push(`대출: ${who} 핸드 #${t.dueHand} 전 상환`);
+    if (t.kind === 'revive') out.push(`부활 대기: ${who} 핸드 #${t.dueHand}에 복귀`);
   }
   return out;
 }

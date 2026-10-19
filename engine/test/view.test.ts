@@ -204,7 +204,7 @@ function checkAllViews(s: GameState, rng: Rng) {
     }
     for (const pv of view.players) {
       const real = s.players.find((x) => x.id === pv.id)!;
-      expect(pv.augmentCount).toBe(real.augments.length);
+      expect(pv.augmentCount).toBe(real.augments.filter((a) => pv.id === p.id || !a.hidden).length);
       expect(pv.revealedAugments.length).toBe(real.augments.filter((a) => a.revealed).length);
     }
   }

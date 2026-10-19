@@ -502,3 +502,4 @@ body.blurred #g-center .board { filter: blur(1.2px) saturate(.6); }
 .respond-modal p { margin: 6px 0; }
 .bid-row { display: flex; gap: 10px; align-items: center; justify-content: center; margin: 10px 0; }
 .bid-row input { width: 120px; }
+.streak { color: #ffb347; font-weight: 600; margin-left: 4px; }

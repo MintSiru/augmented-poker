@@ -5,7 +5,7 @@
 // 새 증강은 augments.ts 에 정의를 추가하고 여기에 효과를 등록하면 된다.
 
 import { Card, cardToken, fullDeck, isCard, rankOf, rankName, suitOf } from './cards.js';
-import { AUGMENTS, AugmentId, isActiveAugment, isAugmentId } from './augments.js';
+import { AUGMENTS, AugmentId, canHold, isActiveAugment, isAugmentId } from './augments.js';
 import { blackjackCards, isMadeHand, Category, CATEGORY_NAMES } from './evaluator.js';
 import { pickOne } from './rng.js';
 import { compareContenders } from './showdown.js';
@@ -102,6 +102,12 @@ export interface PassiveEffect {
   onInfoExposed?(ctx: Ctx, looker: PlayerState, kind: InfoKind): 'fake' | void;
   /** 다른 사람 증강의 강제 폴드를 막으면 true */
   blockForcedFold?(ctx: Ctx): boolean;
+  /** 칩이 0이 되어 탈락할 때. true 면 탈락하지 않는다 (부활 대기 등) */
+  onBust?(ctx: Ctx): boolean;
+  /** 증강 선택 라운드가 시작될 때 (선택지를 받은 뒤) */
+  onPickRound?(ctx: Ctx): void;
+  /** 내가 증강을 얻었을 때 (얻은 증강 자신 포함) */
+  onAcquire?(ctx: Ctx, got: OwnedAugment): void;
 }
 
 // ───────────────────────── 공통 검사 ─────────────────────────
@@ -201,6 +207,58 @@ function turnRiverIdx(state: GameState): number[] {
 
 function realMade(state: GameState, p: PlayerState): boolean {
   return isMadeHand(p.hole, evalBoard(state), rulesFor(p));
+}
+
+// ───────────────────────── 증강 이동 (증강 셔플·대출 몰수·사냥꾼) ─────────────────────────
+
+/** 증강 하나를 다른 사람에게 넘긴다 (남은 횟수 그대로, 받은 사람만 앎) */
+export function moveAugment(from: PlayerState, to: PlayerState, aug: OwnedAugment): void {
+  from.augments = from.augments.filter((a) => a !== aug);
+  aug.revealed = false;
+  aug.publicId = null;
+  aug.hidden = false;
+  aug.armed = aug.id === 'exemption' ? false : aug.armed;
+  to.augments.push(aug);
+}
+
+/** 증강 셔플: ring 의 각자가 무작위 증강 1개를 왼쪽(다음 자리) 사람에게. 보유 규칙에 맞는 조합을 고른다 */
+function shuffleAugments(state: GameState, ring: PlayerState[]): boolean {
+  if (ring.length < 2) return false;
+  const next = (i: number) => ring[(i + 1) % ring.length];
+  let best: (OwnedAugment | null)[] = [];
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const out = ring.map((p) => (p.augments.length ? pickOne(p.augments, state.rng) : null));
+    // 받는 사람이 (자기가 넘긴 것을 뺀) 보유 증강과 함께 가질 수 있는가
+    const okFor = (i: number) => {
+      const g = out[i];
+      if (!g) return true;
+      const r = next(i);
+      const ri = (i + 1) % ring.length;
+      const keeps = r.augments.filter((a) => a !== out[ri]).map((a) => a.id);
+      return canHold(keeps, g.id);
+    };
+    const valid = out.map((g, i) => (okFor(i) ? g : null));
+    if (valid.filter(Boolean).length > best.filter(Boolean).length) best = valid;
+    if (out.every((_, i) => okFor(i))) break;
+  }
+  if (!best.some(Boolean)) return false;
+  best.forEach((g, i) => {
+    if (!g) return;
+    const from = ring[i];
+    const to = next(i);
+    moveAugment(from, to, g);
+    note(state, from, 'augment', `증강 셔플: ${AUGMENTS[g.id].name}을(를) ${to.name}에게 넘겼습니다`);
+    note(state, to, 'augment', `증강 셔플: ${from.name}에게서 ${AUGMENTS[g.id].name}을(를) 받았습니다 (남은 횟수 ${g.usesLeft ?? '-'})`);
+  });
+  return true;
+}
+
+/** 다 쓴 ★·★★ 액티브 증강 중 무작위 1개를 1회 충전 (사냥꾼·재충전) */
+export function rechargeable(p: PlayerState, maxStars: number): OwnedAugment[] {
+  return p.augments.filter((a) => {
+    const d = AUGMENTS[a.id];
+    return isActiveAugment(a.id) && d.stars <= maxStars && d.uses?.per === 'game' && (a.usesLeft ?? 0) <= 0;
+  });
 }
 
 // ───────────────────────── 제안·응답 공통 ─────────────────────────
@@ -376,7 +434,8 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
     detail: (ctx, p) => `— 대상: ${nameOf(ctx.state, p.targetId ?? '')}`,
     resolve(ctx, params) {
       const t = targetOf(ctx, params)!;
-      const stars = t.augments.map((x) => AUGMENTS[x.id].stars).sort((x, y) => y - x);
+      // 잠복으로 숨긴 증강은 빠진다
+      const stars = t.augments.filter((x) => !x.hidden).map((x) => AUGMENTS[x.id].stars).sort((x, y) => y - x);
       const text = stars.length ? stars.map((s) => '★'.repeat(s)).join(', ') : '증강 없음';
       note(ctx.state, ctx.owner, 'inquiry', `탐문: ${t.name}의 증강 별 개수 — ${text}`, undefined, t.id);
     },
@@ -1517,6 +1576,36 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
     },
   },
 
+  // ═════════════════════════ 3차 풀: 좌석·증강 흐름 ═════════════════════════
+
+  augShuffle: {
+    check: (ctx) => betweenHandsCheck(ctx) ?? (ctx.state.players.filter(active).length < 2 ? '넘길 사람이 없습니다.' : null),
+    resolve(ctx, _params, decl) {
+      const { state } = ctx;
+      // 면역으로 빠진 사람은 주고받지 않는다
+      const ring = state.players.filter((p) => active(p) && !decl.immune.includes(p.id));
+      const moved = shuffleAugments(state, ring);
+      addLog(state, `증강 셔플: ${moved ? '모두 보유 증강 1개씩을 왼쪽 사람에게 넘겼습니다' : '넘길 수 있는 증강이 없습니다'}${immuneText(state, decl.immune, '주고받지 않음')}`);
+    },
+  },
+
+  loan: {
+    check(ctx) {
+      const { state, owner } = ctx;
+      if (state.phase === 'gameOver' || !active(owner)) return '게임에 참여하고 있지 않습니다.';
+      return null;
+    },
+    resolve(ctx) {
+      const { state, owner } = ctx;
+      const bb = bbOf(state);
+      owner.chips += 20 * bb;
+      state.stats.bankChips += 20 * bb;
+      const due = state.handNumber + (handInProgress(state) ? 5 : 6);
+      state.tasks.push({ kind: 'loanRepay', playerId: owner.id, dueHand: due, amount: 25 * bb });
+      addLog(state, `대출: ${owner.name}이(가) 은행에서 ${20 * bb}칩을 빌렸습니다 (핸드 #${due} 시작 전에 ${25 * bb}칩 상환)`);
+    },
+  },
+
   // 면제권: 블라인드 차례에 엔진이 자동으로 선언한다
   exemption: {
     check: (ctx) => (ctx.owner.inHand ? null : '핸드에 참여하지 않았습니다.'),
@@ -1788,6 +1877,80 @@ export const PASSIVE: Partial<Record<AugmentId, PassiveEffect>> = {
     },
   },
 
+  comeBack: {
+    onBust(ctx) {
+      const { state, owner, aug } = ctx;
+      if ((aug.usesLeft ?? 0) <= 0) return false;
+      aug.usesLeft = 0;
+      owner.out = true;
+      owner.outAtHand = state.handNumber;
+      owner.sittingOut = false;
+      // 3핸드가 지난 뒤 원래 자리로
+      owner.dormant = state.handNumber + 4;
+      state.tasks.push({ kind: 'revive', playerId: owner.id, dueHand: owner.dormant, amount: 10 * bbOf(state) });
+      revealPassive(ctx, `— 탈락 대신 부활 대기 (핸드 #${owner.dormant}에 돌아옴)`);
+      return true;
+    },
+  },
+
+  runaway: {
+    onHandEnd(ctx, result) {
+      const { state, owner } = ctx;
+      if (!active(owner)) return;
+      const total = result.pots.reduce((s, p) => s + p.amount, 0);
+      const won = (result.won[owner.id] ?? 0) > 0 && total >= 5 * bbOf(state);
+      owner.streak = won ? owner.streak + 1 : 0;
+      if (won && owner.streak >= 3) addLog(state, `폭주기관차: ${owner.name} ${owner.streak}연승`);
+    },
+    onPickRound(ctx) {
+      const { state, owner } = ctx;
+      if (owner.streak < 3 || !owner.pickOptions) return;
+      owner.pickExtra = owner.streak >= 5 ? 2 : 1;
+      revealPassive(ctx, `— ${owner.streak}연승: 이번 증강 선택에서 ${owner.pickExtra + 1}개를 가져갑니다`);
+      owner.streak = 0;
+    },
+  },
+
+  lurk: {
+    onAcquire(ctx, got) {
+      const { state, owner } = ctx;
+      if (got.id === 'lurk') {
+        const others = owner.augments.filter((a) => a.id !== 'lurk');
+        if (!others.length) {
+          owner.lurkWaiting = true;
+          addLog(state, '잠복: 숨길 증강이 없어 다음에 얻는 증강을 숨깁니다', { to: [owner.id] });
+          return;
+        }
+        const pick = pickOne(others, state.rng);
+        pick.hidden = true;
+        owner.lurkChoose = true;
+        addLog(state, `잠복: ${AUGMENTS[pick.id].name}을(를) 숨겼습니다 (다음 핸드 시작 전까지 바꿀 수 있음)`, { to: [owner.id] });
+        return;
+      }
+      if (owner.lurkWaiting) {
+        owner.lurkWaiting = false;
+        got.hidden = true;
+        addLog(state, `잠복: ${AUGMENTS[got.id].name}을(를) 숨겼습니다`, { to: [owner.id] });
+      }
+    },
+  },
+
+  hunter: {
+    onHandEnd(ctx, result) {
+      const { state, owner } = ctx;
+      if (!active(owner) || (result.won[owner.id] ?? 0) <= 0) return;
+      const victims = (result.busted ?? []).filter((id) => id !== owner.id);
+      for (const v of victims) {
+        const list = rechargeable(owner, 2);
+        if (!list.length) return;
+        const a = pickOne(list, state.rng);
+        a.usesLeft = 1;
+        revealPassive(ctx, `— ${nameOf(state, v)}을(를) 탈락시킴`);
+        addLog(state, `사냥꾼: ${AUGMENTS[a.id].name}을(를) 1회 충전했습니다`, { to: [owner.id] });
+      }
+    },
+  },
+
   vest: {
     blockForcedFold(ctx) {
       if ((ctx.aug.usesLeft ?? 0) <= 0) return false;
@@ -1818,8 +1981,35 @@ export const TASKS: Record<ScheduledTask['kind'], (state: GameState, t: Schedule
     countUse(state, 'loanShark');
     addLog(state, `사채업자: ${borrower.name}이(가) ${lender.name}에게 ${paid}칩을 갚았습니다${paid < t.amount ? ' (모자라 있는 만큼)' : ''}`);
   },
-  loanRepay() {},
-  revive() {},
+  loanRepay(state, t) {
+    const p = playerById(state, t.playerId);
+    if (!p || !active(p)) return;
+    const paid = transfer(state, p, null, t.amount);
+    countUse(state, 'loan');
+    if (paid >= t.amount) {
+      addLog(state, `대출: ${p.name}이(가) 은행에 ${paid}칩을 갚았습니다`);
+      return;
+    }
+    // 모자라면 있는 만큼 내고 보유 증강 1개 몰수
+    const lost = p.augments.length ? pickOne(p.augments, state.rng) : null;
+    if (lost) p.augments = p.augments.filter((a) => a !== lost);
+    addLog(state, `대출: ${p.name}이(가) ${paid}칩만 갚아${lost ? ' 보유 증강 1개를 몰수당했습니다' : ''}`);
+    if (lost) note(state, p, 'augment', `대출: ${AUGMENTS[lost.id].name}을(를) 몰수당했습니다`);
+  },
+  revive(state, t) {
+    const p = playerById(state, t.playerId);
+    if (!p || p.dormant === null || p.kicked) return;
+    // 돌아올 때의 10BB는 남은 플레이어가 똑같이 나눠 낸다
+    const payers = state.players.filter((x) => active(x) && x !== p);
+    const share = payers.length ? Math.floor(t.amount / payers.length) : 0;
+    let got = 0;
+    for (const x of payers) got += transfer(state, x, p, share);
+    p.out = false;
+    p.dormant = null;
+    p.outAtHand = null;
+    p.place = null;
+    addLog(state, `3일 안에 오리라: ${p.name}이(가) 원래 자리로 돌아왔습니다 (${got}칩, 남은 플레이어가 ${share}칩씩)`);
+  },
 };
 
 /** 선언 기회 판단용 대상 후보 (지목형 창 증강: 공동 환승·명추리·기생) */

@@ -71,6 +71,8 @@ export interface OwnedAugment {
   fakeUsed?: boolean;
   /** 짝수/홀수 동맹: 고른 쪽 */
   parity?: 'even' | 'odd';
+  /** 잠복으로 숨긴 증강 (처음 쓰는 순간 드러남) */
+  hidden?: boolean;
   acquiredHand: number;
 }
 
@@ -92,7 +94,9 @@ export type NoteKind =
   | 'leaderboard'
   | 'traceback'
   | 'bet'
-  | 'info';
+  | 'info'
+  /** 증강을 주고받은 기록 (핸드가 바뀌어도 남김) */
+  | 'augment';
 
 /** 해당 플레이어만 아는 정보 */
 export interface PrivateNote {
@@ -183,6 +187,16 @@ export interface PlayerState {
   truthClaim: number | null;
   /** 밀봉 계약: 0 = 전원 폴드, 1 = 한 명 이상 콜 (비공개) */
   contract: number | null;
+  /** 3일 안에 오리라: 부활 대기 중이면 돌아올 핸드 번호 (out 은 true) */
+  dormant: number | null;
+  /** 폭주기관차: 연승 수 (공개) */
+  streak: number;
+  /** 폭주기관차: 이번 증강 선택에서 더 가져갈 수 있는 개수 */
+  pickExtra: number;
+  /** 잠복: 숨길 증강을 고를 수 있는 동안 (다음 핸드 시작 전까지) */
+  lurkChoose: boolean;
+  /** 잠복: 숨길 증강이 없어 다음에 얻는 증강을 숨긴다 */
+  lurkWaiting: boolean;
   /** 이 플레이어에게 보여 줄 로그의 시작 번호 (중도 참여자는 참여 이후 로그만 본다) */
   logFrom: number;
 }
@@ -247,6 +261,8 @@ export interface HandResult {
   table: string[];
   /** 부가 효과 (하이리스크 보너스, 양치기 소년 벌금 등) */
   extras: string[];
+  /** 이 핸드로 칩이 0이 된 사람 (토템·부활로 살아나도 포함, 사냥꾼 판정용) */
+  busted?: string[];
 }
 
 export interface DebugDeal {
@@ -517,6 +533,8 @@ export type GameAction =
   | { type: 'turnRiver'; swap: boolean }
   /** 무승부로 하지 않을래?: 쇼다운 직후 제안 여부 */
   | { type: 'draw'; accept: boolean }
+  /** 잠복: 숨길 증강 고르기 */
+  | { type: 'lurk'; augment: AugmentId }
   /** 제안·입찰·비공개 선언에 대한 응답 */
   | { type: 'respond'; accept?: boolean; bid?: number; choice?: number; cardIndex?: number }
   | {

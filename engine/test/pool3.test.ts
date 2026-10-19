@@ -637,3 +637,164 @@ describe('3. 제안·응답', () => {
     expect(t.result!.entries.map((e) => e.id).sort()).toEqual(['p1', 'p2']);
   });
 });
+
+// ───────────────────────── 4. 좌석·증강 흐름 ─────────────────────────
+
+describe('4. 좌석·증강 흐름', () => {
+  it('3일 안에 오리라: 탈락하면 부활 대기, 3핸드 뒤 원래 자리로 10BB (남은 사람이 나눠 냄), 대기 중에는 관전자 뷰', () => {
+    expect(canHold(['totem'], 'comeBack')).toBe(false);
+    const s = setup(3, { augs: { p2: ['comeBack'] }, chips: [1000, 100, 1000], deal: { board: cards(BOARD), hands: { p1: cards('Ac Ah'), p2: cards('9c 8d'), p3: cards('Qc Jd') } } });
+    act(s, 'p1', { type: 'raise', amount: 200 });
+    act(s, 'p2', { type: 'allin' });
+    act(s, 'p3', { type: 'fold' });
+    toShowdown(s);
+    const p2 = P(s, 'p2');
+    expect(p2.out).toBe(true);
+    expect(p2.dormant).toBe(5);
+    expect(p2.place).toBeNull();
+    expect(view(s, 'p1').players.find((p) => p.id === 'p2')!.dormant).toBe(4);
+    const v2 = view(s, 'p2');
+    expect(v2.you.seated).toBe(false);
+    expect(v2.you.hole).toEqual([]);
+    for (let h = 2; h <= 4; h++) {
+      ok(startNextHand(s));
+      expect(P(s, 'p2').inHand).toBe(false);
+      toShowdown(s);
+    }
+    const before = { p1: P(s, 'p1').chips, p3: P(s, 'p3').chips };
+    ok(startNextHand(s));
+    expect(s.handNumber).toBe(5);
+    expect(P(s, 'p2').out).toBe(false);
+    expect(P(s, 'p2').inHand).toBe(true);
+    expect(P(s, 'p2').chips + P(s, 'p2').contributed).toBe(200);
+    expect(P(s, 'p1').chips + P(s, 'p1').contributed).toBe(before.p1 - 100);
+    expect(P(s, 'p3').chips + P(s, 'p3').contributed).toBe(before.p3 - 100);
+  });
+
+  it('3일 안에 오리라: 부활 대기 중 추방되면 부활이 취소된다, 남은 사람이 1명이면 대기자는 2위', () => {
+    const s = setup(3, { augs: { p2: ['comeBack'] } });
+    P(s, 'p2').chips = 0;
+    toShowdown(s);
+    ok(startNextHand(s));
+    expect(P(s, 'p2').dormant).not.toBeNull();
+    ok(kickPlayer(s, 'p2'));
+    expect(s.tasks.some((t) => t.kind === 'revive')).toBe(false);
+    const t = setup(2, { augs: { p2: ['comeBack'] }, chips: [1000, 20], deal: { board: cards(BOARD), hands: { p1: cards('Ac Ah'), p2: cards('9c 8d') } } });
+    toShowdown(t);
+    expect(P(t, 'p2').chips).toBe(0);
+    expect(t.phase).toBe('gameOver');
+    expect(P(t, 'p2').place).toBe(2);
+  });
+
+  it('폭주기관차: 5BB 이상 팟을 연속으로 이기면 연승, 3연승이면 다음 선택에서 2개, 보상 뒤 처음부터', () => {
+    const s = setup(3, { augs: { p1: ['runaway'] }, deal: { board: cards(BOARD), hands: { p1: cards('Ac Ah'), p2: cards('Qc Jd'), p3: cards('8c 6d') } } });
+    act(s, 'p1', { type: 'raise', amount: 60 });
+    act(s, 'p2', { type: 'call' });
+    act(s, 'p3', { type: 'call' });
+    toShowdown(s);
+    expect(P(s, 'p1').streak).toBe(1);
+    expect(view(s, 'p2').players.find((p) => p.id === 'p1')!.streak).toBe(1);
+    P(s, 'p1').streak = 3;
+    s.forceLevelUp = true;
+    ok(startNextHand(s));
+    expect(s.phase).toBe('augmentSelect');
+    const p1 = P(s, 'p1');
+    expect(p1.pickExtra).toBe(1);
+    expect(p1.streak).toBe(0);
+    expect(view(s, 'p1').you.pickExtra).toBe(1);
+    const first = p1.pickOptions![0];
+    act(s, 'p1', { type: 'pick', augment: first });
+    expect(p1.pickOptions).not.toBeNull();
+    expect(p1.pickOptions).not.toContain(first);
+    // 시간 초과면 남은 선택도 모두 자동으로
+    applyTimeouts(s);
+    expect(p1.augments.length).toBe(3);
+    expect(s.phase).toBe('betting');
+  });
+
+  it('증강 셔플: 전원이 무작위 1개를 왼쪽 사람에게 (남은 횟수 그대로, 받은 사람만 앎), 면역이면 빠진다, 유일 증강', () => {
+    const s = setup(3, {
+      augs: { p1: ['augShuffle'], p2: ['thermal'], p3: ['immunity', 'observer'] },
+      before: (st) => {
+        st.players[1].augments[0].usesLeft = 2;
+        use(st, 'p1', 'augShuffle');
+        act(st, 'p3', { type: 'immunity' });
+      },
+    });
+    // p3 는 면역으로 빠지고 p1 ↔ p2 만 주고받는다
+    expect(P(s, 'p1').augments.map((a) => a.id)).toEqual(['thermal']);
+    expect(P(s, 'p1').augments[0].usesLeft).toBe(2);
+    expect(P(s, 'p2').augments.map((a) => a.id)).toEqual(['augShuffle']);
+    expect(P(s, 'p3').augments.map((a) => a.id).sort()).toEqual(['immunity', 'observer']);
+    expect(P(s, 'p1').augments[0].revealed).toBe(false);
+    expect(JSON.stringify(view(s, 'p3').log)).not.toContain('열화상');
+    expect(view(s, 'p1').you.notes.some((n) => n.text.includes('열화상 카메라'))).toBe(true);
+    // 유일 증강: 다른 사람이 가진 동안 선택지에 나오지 않는다
+    for (let i = 0; i < 30; i++) expect(rollAugmentOffer(5, [], seededRng(i), 2, ['augShuffle'])).not.toContain('augShuffle');
+  });
+
+  it('잠복: 다른 증강 1개를 숨기고 좌석 보유 수·탐문에서 빠지며, 처음 쓰면 드러난다', () => {
+    const s = setup(3, {
+      augs: { p1: ['thermal', 'lurk'], p2: ['inquiry'] },
+      deal: { hands: { p1: cards('Ac Ah'), p2: cards('Qc Jd'), p3: cards('8c 6d') } },
+    });
+    expect(P(s, 'p1').augments.find((a) => a.id === 'thermal')!.hidden).toBe(true);
+    expect(view(s, 'p2').players.find((p) => p.id === 'p1')!.augmentCount).toBe(1);
+    expect(view(s, 'p1').players.find((p) => p.id === 'p1')!.augmentCount).toBe(2);
+    use(s, 'p2', 'inquiry', { targetId: 'p1' });
+    resolveAll(s);
+    expect(lastNote(s, 'p2')).toBe('탐문: P1의 증강 별 개수 — ★');
+    act(s, 'p1', { type: 'call' });
+    use(s, 'p1', 'thermal', { targetId: 'p3' });
+    resolveAll(s);
+    expect(view(s, 'p2').players.find((p) => p.id === 'p1')!.augmentCount).toBe(2);
+
+    // 숨길 증강이 없으면 다음에 얻는 증강
+    const t = setup(3, { augs: { p1: ['lurk', 'thermal'] } });
+    expect(P(t, 'p1').augments.find((a) => a.id === 'thermal')!.hidden).toBe(true);
+    // 다음 핸드 시작 전까지 고를 수 있다
+    const u = createGame(makePlayers(3).map((p) => ({ ...p, isBot: false })), { rng: seededRng(3), debug: true, initialPick: false, handsPerLevel: 1000 });
+    ok(debugGiveAugment(u, 'p1', 'thermal'));
+    ok(debugGiveAugment(u, 'p1', 'observer'));
+    ok(debugGiveAugment(u, 'p1', 'lurk'));
+    act(u, 'p1', { type: 'lurk', augment: 'observer' });
+    expect(u.players[0].augments.filter((a) => a.hidden).map((a) => a.id)).toEqual(['observer']);
+    ok(startNextHand(u));
+    expect(applyAction(u, 'p1', { type: 'lurk', augment: 'thermal' }).ok).toBe(false);
+  });
+
+  it('사냥꾼: 내가 이긴 팟에서 다른 사람이 탈락하면 다 쓴 ★·★★ 액티브 증강 1개를 1회 충전', () => {
+    const s = setup(3, {
+      augs: { p1: ['hunter', 'thermal'] },
+      chips: [1000, 1000, 100],
+      deal: { board: cards(BOARD), hands: { p1: cards('Ac Ah'), p2: cards('Qc Jd'), p3: cards('8c 6d') } },
+      before: (st) => (st.players[0].augments[1].usesLeft = 0),
+    });
+    act(s, 'p1', { type: 'raise', amount: 100 });
+    act(s, 'p2', { type: 'fold' });
+    act(s, 'p3', { type: 'call' });
+    toShowdown(s);
+    expect(s.result!.busted).toEqual(['p3']);
+    expect(findThermal(s).usesLeft).toBe(1);
+  });
+
+  it('대출: 은행에서 20BB, 5핸드 뒤 25BB 자동 상환, 모자라면 있는 만큼 내고 증강 1개 몰수', () => {
+    const s = setup(3, { augs: { p1: ['loan', 'observer'] } });
+    use(s, 'p1', 'loan');
+    resolveAll(s);
+    expect(P(s, 'p1').chips).toBe(1000 + 400);
+    expect(s.tasks).toEqual([{ kind: 'loanRepay', playerId: 'p1', dueHand: 6, amount: 500 }]);
+    s.tasks[0].dueHand = 2;
+    toShowdown(s);
+    P(s, 'p1').chips = 300;
+    ok(startNextHand(s));
+    expect(s.stats.bankChips).toBe(400);
+    expect(s.stats.bankPaid).toBe(300);
+    expect(P(s, 'p1').augments).toHaveLength(1);
+    expect(s.tasks).toHaveLength(0);
+  });
+});
+
+function findThermal(s: GameState) {
+  return P(s, 'p1').augments.find((a) => a.id === 'thermal')!;
+}

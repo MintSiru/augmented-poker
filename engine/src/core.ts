@@ -146,6 +146,7 @@ export function handInProgress(state: GameState): boolean {
  * 반환값: 다른 사람에게 보이는 증강 id
  */
 export function revealAugment(state: GameState, p: PlayerState, aug: OwnedAugment): AugmentId {
+  aug.hidden = false;
   if (aug.revealed && aug.publicId) return aug.publicId;
   const disguise = findAug(p, 'disguise');
   if (disguise && aug.id !== 'disguise' && disguise.fakeId && (disguise.usesLeft ?? 0) > 0) {

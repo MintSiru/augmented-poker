@@ -124,6 +124,8 @@ export function chooseBotOpportunistic(view: PlayerView, rng: Rng): GameAction |
     return use('destinyDraw', { card: pickOne(aces, rng) });
   }
   if (usable(view, 'padlock') && chance(rng, 8)) return use('padlock');
+  if (usable(view, 'loan') && you.chips < view.blinds.bb * 10) return use('loan');
+  if (usable(view, 'augShuffle') && chance(rng, 8)) return use('augShuffle');
   const ls = usable(view, 'loanShark');
   if (ls && ls.targets.length && chance(rng, 5)) return use('loanShark', { targetId: pickOne(ls.targets, rng) });
   if (usable(view, 'rumor') && chance(rng, 4)) return use('rumor', { rumor: pickOne(ALL_AUGMENT_IDS, rng) });
