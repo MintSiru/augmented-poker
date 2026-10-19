@@ -32,6 +32,7 @@ import {
   VARIANT_AUG,
   boardBlindIds,
   invertedNow,
+  turnCutFor,
   lockError,
   ownCardsHidden,
   seatOrderFromDealer,
@@ -165,6 +166,9 @@ export function freshEffects(): TableEffects {
     blackoutImmune: [],
     glassImmune: [],
     restarted: false,
+    glasses: [],
+    glassesImmune: [],
+    glassesSeq: 0,
   };
 }
 
@@ -227,6 +231,7 @@ export function createGame(players: NewPlayer[], opts: CreateGameOptions = {}): 
     taxExempt: {},
     round: freshRound(null, 0),
     lastFolderId: null,
+    heaven: [],
     currentBet: 0,
     minRaise: 0,
     toAct: null,
@@ -245,7 +250,7 @@ export function createGame(players: NewPlayer[], opts: CreateGameOptions = {}): 
     nextDeal: null,
     forceLevelUp: false,
     taxers: [],
-    stats: { picks: {}, uses: {}, bankChips: 0, bankTaxed: 0, bankPaid: 0, joinChips: 0, kickedChips: 0 },
+    stats: { picks: {}, uses: {}, bankChips: 0, bankTaxed: 0, bankPaid: 0, joinChips: 0, kickedChips: 0, heavenFolds: 0 },
   };
   state.levelHands = levelHandsFor(state);
   const { sb, bb } = currentBlinds(state);
@@ -1814,6 +1819,9 @@ export function startNextHand(state: GameState): ActionResult {
     state.forceLevelUp = false;
     state.levelIndex++;
     state.levelStartHand = state.handNumber;
+    // 메이드 인 헤븐: 새 블라인드 레벨이 시작되면 모두 원래 시간으로
+    if (state.heaven.length) addLog(state, '메이드 인 헤븐: 블라인드 레벨이 바뀌어 모두 원래 행동 시간으로 돌아갑니다');
+    state.heaven = [];
     // 자동 주기는 이 레벨이 시작될 때 남은 인원(중도 참여자 포함)으로 다시 계산한다
     state.levelHands = levelHandsFor(state);
     const { sb, bb } = currentBlinds(state);
@@ -2009,6 +2017,7 @@ export function applyTimeouts(state: GameState): string[] {
     const act = defaultActionFor(state, id);
     if (!act) continue;
     if (pending.kind === 'turn') addLog(state, `${playerById(state, id)!.name}: 시간 초과`);
+    if (pending.kind === 'turn' && act.type === 'fold' && turnCutFor(state, id) > 0) state.stats.heavenFolds++;
     if (applyAction(state, id, act).ok) affected.push(id);
   }
   return affected;

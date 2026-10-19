@@ -263,6 +263,10 @@ export interface TableEffects {
   glassImmune: string[];
   /** 나 다시 돌아갈래로 다시 시작한 핸드 */
   restarted: boolean;
+  /** 안경 없어서 잘 안보여: 선언자(가림에서 빠짐), 면역으로 빠진 사람, 선언 시점 로그 번호 */
+  glasses: string[];
+  glassesImmune: string[];
+  glassesSeq: number;
 }
 
 /** 선언된 액티브·공개형 증강 (3초 반응 대기 후 적용) */
@@ -305,8 +309,10 @@ export interface GameStats {
   bankChips: number;
   /** 은행으로 사라진 칩 (죽음과 세금) */
   bankTaxed: number;
-  /** 그 밖에 은행에 낸 칩 (나 다시 돌아갈래) */
+  /** 그 밖에 은행에 낸 칩 (나 다시 돌아갈래, 대출 상환 등) */
   bankPaid: number;
+  /** 메이드 인 헤븐 적용 중 시간 초과로 자동 폴드된 횟수 */
+  heavenFolds: number;
   /** 중도 참여자에게 은행에서 새로 지급한 칩 */
   joinChips: number;
   /** 추방으로 사라진 칩 */
@@ -358,6 +364,8 @@ export interface GameState {
   round: RoundState;
   /** 마지막으로 폴드한 사람 (쇼맨십) */
   lastFolderId: string | null;
+  /** 메이드 인 헤븐: 선언자별 시작 핸드 (다음 핸드부터 매 핸드 5초씩 감소, 블라인드 레벨이 바뀌면 초기화) */
+  heaven: { by: string; startHand: number; immune: string[] }[];
   currentBet: number;
   minRaise: number;
   toAct: number | null;

@@ -196,14 +196,56 @@ export function invertedNow(state: GameState): boolean {
   return (state.effects.flips + (state.effects.underdog ? 1 : 0)) % 2 === 1;
 }
 
+/**
+ * 가림 규칙: 이 플레이어에게 무엇을 숨기는가 (서버가 뷰를 만들 때 적용하고, 가린 정보와 그 파생 정보는 보내지 않는다)
+ * - board: 보드 전체 (실명 다트)
+ * - suits: 보드 카드의 무늬 (안경 없어서 잘 안보여)
+ * - amounts: 다른 사람의 칩·베팅 금액을 대략값으로 (안경 없어서 잘 안보여)
+ * 쇼다운(또는 핸드 종료) 이후에는 모두 풀린다.
+ */
+export interface MaskRules {
+  board: boolean;
+  suits: boolean;
+  amounts: boolean;
+}
+
+export function maskFor(state: GameState, p: PlayerState): MaskRules {
+  const e = state.effects;
+  const live = !e.fogLifted && state.phase !== 'handEnd' && state.phase !== 'gameOver';
+  const glasses = live && e.glasses.length > 0 && !e.glasses.includes(p.id) && !e.glassesImmune.includes(p.id);
+  return { board: !e.fogLifted && e.blindDarted.includes(p.id), suits: glasses, amounts: glasses };
+}
+
+/** 보드로 계산되는 파생 정보(현재 족보·카운팅·승률 등)를 보낼 수 없는가 */
+export function boardInfoHidden(state: GameState, p: PlayerState): boolean {
+  const m = maskFor(state, p);
+  return m.board || m.suits;
+}
+
 /** 실명 다트 대상: 쇼다운 전까지 보드(와 보드로 계산되는 정보)를 볼 수 없다 */
 export function boardBlind(state: GameState, p: PlayerState): boolean {
-  return state.effects.blindDarted.includes(p.id) && !state.effects.fogLifted;
+  return maskFor(state, p).board;
 }
 
 /** 보드 카드가 담긴 로그를 받으면 안 되는 사람 (실명 다트 대상) */
 export function boardBlindIds(state: GameState): string[] {
-  return state.effects.fogLifted ? [] : [...state.effects.blindDarted];
+  return state.players.filter((p) => maskFor(state, p).board).map((p) => p.id);
+}
+
+/** 메이드 인 헤븐으로 줄어드는 이 플레이어의 행동 시간 (초) */
+export function turnCutFor(state: GameState, playerId: string): number {
+  let cut = 0;
+  for (const h of state.heaven) {
+    if (h.by === playerId || h.immune.includes(playerId)) continue;
+    cut += 5 * Math.max(0, state.handNumber - h.startHand);
+  }
+  return cut;
+}
+
+/** 플레이어별 행동 제한 시간 (방 설정 base 초에서 증강 효과를 뺌, 최소 5초) */
+export function turnSecondsFor(state: GameState, playerId: string, base: number): number {
+  const cut = turnCutFor(state, playerId);
+  return cut > 0 ? Math.max(5, base - cut) : base;
 }
 
 /** 암전 때문에 자기 카드를 못 보는가 (면역이면 봄, 유리 테이블이면 모두 봄) */

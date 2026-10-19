@@ -109,7 +109,7 @@ describe('보유 규칙과 선택지', () => {
   });
 
   it('같은 별에서 3개 미만이면 한 단계 낮은 별에서 채운다', () => {
-    const owned: AugmentId[] = ['foresight', 'seal', 'favoritism', 'enforcement', 'counterSpell', 'leaderboard', 'eitherOr', 'lastFork', 'pureBlood', 'blackjack', 'restart'];
+    const owned: AugmentId[] = ['foresight', 'seal', 'favoritism', 'enforcement', 'counterSpell', 'leaderboard', 'eitherOr', 'lastFork', 'pureBlood', 'blackjack', 'restart', 'turnRiver', 'swapBoard', 'lastStand', 'destinyTeam', 'parasite', 'promotion', 'alchemy', 'fateThread'];
     const offer = rollAugmentOffer(5, owned, seededRng(1), 3);
     expect(offer).toHaveLength(3);
     expect(offer.filter((id) => AUGMENTS[id].stars === 3).sort()).toEqual(['flipTable', 'heavyFog']);
@@ -137,12 +137,13 @@ describe('보유 규칙과 선택지', () => {
     close(count(5), [20, 50, 30]);
   });
 
-  it('1차 35개 + 2차 33개(죽음과 세금 포함), 총 68개가 정의되어 있다', () => {
-    expect(ALL_AUGMENT_IDS).toHaveLength(68);
+  it('1차 35개 + 2차 33개(죽음과 세금 포함) + 3차 39개, 총 107개가 정의되어 있다', () => {
+    expect(ALL_AUGMENT_IDS).toHaveLength(107);
     expect(ALL_AUGMENT_IDS.filter((id) => (AUGMENTS[id].pool ?? 1) === 1)).toHaveLength(35);
     expect(ALL_AUGMENT_IDS.filter((id) => AUGMENTS[id].pool === 2)).toHaveLength(33);
+    expect(ALL_AUGMENT_IDS.filter((id) => AUGMENTS[id].pool === 3)).toHaveLength(39);
     const byStars = [1, 2, 3].map((s) => ALL_AUGMENT_IDS.filter((id) => AUGMENTS[id].stars === s).length);
-    expect(byStars).toEqual([21, 34, 13]);
+    expect(byStars).toEqual([35, 50, 22]);
   });
 });
 

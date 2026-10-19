@@ -16,6 +16,7 @@ import {
   basePhase,
   boardBlind,
   boardBlindIds,
+  boardInfoHidden,
   invertedNow,
   ownCardsHidden,
   cardsText,
@@ -109,6 +110,11 @@ function opponentInHand(ctx: Ctx, params: ActiveParams): string | null {
 /** 보드로 계산되는 정보를 쓰는 증강: 실명 다트 대상은 쓸 수 없다 */
 function needSight(ctx: Ctx): string | null {
   return boardBlind(ctx.state, ctx.owner) ? '실명 다트: 이번 핸드에는 보드를 볼 수 없어 쓸 수 없습니다.' : null;
+}
+
+/** 보드의 무늬까지 알아야 계산되는 정보 (순위표·운명의 실·블랙잭 제외): 가림 규칙이 걸리면 쓸 수 없다 */
+function needClearSight(ctx: Ctx): string | null {
+  return needSight(ctx) ?? (boardInfoHidden(ctx.state, ctx.owner) ? '안경 없어서 잘 안보여: 이번 핸드에는 보드가 또렷하지 않아 쓸 수 없습니다.' : null);
 }
 
 /** 프리플랍 베팅 중 내 차례 (실명 다트·너 나가·하이카드) */
@@ -579,7 +585,7 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
 
   leaderboard: {
     check(ctx) {
-      const err = needLive(ctx) ?? needSight(ctx);
+      const err = needLive(ctx) ?? needClearSight(ctx);
       if (err) return err;
       if (ctx.state.boardRevealed < 4) return '턴이 공개된 뒤에만 쓸 수 있습니다.';
       return null;
@@ -834,6 +840,33 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
       return null;
     },
     resolve: (ctx) => ctx.ops.restartHand(ctx.owner),
+  },
+
+  // ═════════════════════════ 3차 풀: 시야·시간 ═════════════════════════
+
+  glasses: {
+    check(ctx) {
+      const { state } = ctx;
+      if (basePhase(state) !== 'betting' || state.street !== 'preflop' || state.round.actions > 0) return '프리플랍 베팅이 시작되기 전(아무도 행동하기 전)에만 선언할 수 있습니다.';
+      if (!live(ctx.owner)) return '핸드에 참여 중일 때만 쓸 수 있습니다.';
+      return null;
+    },
+    resolve(ctx, _params, decl) {
+      const e = ctx.state.effects;
+      if (!e.glasses.includes(ctx.owner.id)) e.glasses.push(ctx.owner.id);
+      for (const id of decl.immune) if (!e.glassesImmune.includes(id)) e.glassesImmune.push(id);
+      if (!e.glassesSeq) e.glassesSeq = ctx.state.logSeq + 1;
+      addLog(ctx.state, `안경 없어서 잘 안보여: 이번 핸드 동안 ${ctx.owner.name}을(를) 뺀 모두에게 보드 무늬가 안 보이고 금액은 대략값으로 보입니다${immuneText(ctx.state, decl.immune, '또렷하게 봄')}`);
+    },
+  },
+
+  heaven: {
+    check: (ctx) => (active(ctx.owner) ? null : '게임에 참여하고 있지 않습니다.'),
+    resolve(ctx, _params, decl) {
+      const { state, owner } = ctx;
+      state.heaven.push({ by: owner.id, startHand: state.handNumber, immune: [...decl.immune] });
+      addLog(state, `메이드 인 헤븐: 다음 핸드부터 ${owner.name}을(를) 뺀 모두의 행동 시간이 매 핸드 5초씩 줄어듭니다 (최소 5초, 다음 블라인드 레벨까지)${immuneText(state, decl.immune, '원래 시간 유지')}`);
+    },
   },
 
   // 면제권: 블라인드 차례에 엔진이 자동으로 선언한다

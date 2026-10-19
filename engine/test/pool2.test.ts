@@ -105,7 +105,8 @@ describe('보유 규칙 (배타적 풀 5종, 카운터형 8종)', () => {
     expect(canHold(['parity'], 'traceback')).toBe(true);
     expect(variant.every((id) => AUGMENTS[id].group === 'variant')).toBe(true);
     expect(counter.every((id) => AUGMENTS[id].group === 'counter')).toBe(true);
-    expect(ALL_AUGMENT_IDS.filter((id) => AUGMENTS[id].group === 'counter').sort()).toEqual([...counter].sort());
+    // 3차 풀에서 탈취·공개 청문회가 더해져 10종
+    expect(ALL_AUGMENT_IDS.filter((id) => AUGMENTS[id].group === 'counter').sort()).toEqual([...counter, 'steal', 'publicHearing'].sort());
   });
 
   it('보유할 수 없는 증강은 선택지에서 빠진다', () => {

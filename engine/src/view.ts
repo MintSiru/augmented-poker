@@ -16,7 +16,22 @@ import {
   LegalActions,
   playerRules,
 } from './game.js';
-import { boardBlind, glassShows, holeVisible, invertedNow, live, lockError, publicCards, taxFor, VARIANT_AUG, visibleBoard } from './core.js';
+import {
+  boardBlind,
+  boardInfoHidden,
+  glassShows,
+  holeVisible,
+  invertedNow,
+  live,
+  lockError,
+  maskFor,
+  publicCards,
+  taxFor,
+  turnCutFor,
+  VARIANT_AUG,
+  visibleBoard,
+  type MaskRules,
+} from './core.js';
 import { fullDeck } from './cards.js';
 import { immunityCandidates } from './game.js';
 import { countingInfo, CountingView } from './counting.js';
@@ -51,8 +66,8 @@ export interface MyAugmentView extends AugmentInfo {
   fakeUsed: boolean | null;
   /** 짝수/홀수 동맹: 고른 쪽 */
   parity: 'even' | 'odd' | null;
-  /** 1차 / 2차 풀 */
-  pool: 1 | 2;
+  /** 1차 / 2차 / 3차 풀 */
+  pool: 1 | 2 | 3;
   /** 지금 버튼으로 쓸 수 있는가 (최종 검증은 서버) */
   usableNow: boolean;
   /** 못 쓰는 이유 또는 쓸 수 있는 시점 (툴팁) */
@@ -81,6 +96,8 @@ export interface PublicPlayerView {
   sittingOut: boolean;
   /** 추방됨 (핸드가 끝나면 자리에서 사라짐) */
   kicked: boolean;
+  /** 칩·베팅 금액이 대략값(BB 단위 반올림)인가 (안경 없어서 잘 안보여) */
+  approx: boolean;
   isDealer: boolean;
   isSB: boolean;
   isBB: boolean;
@@ -206,8 +223,12 @@ export interface PlayerView {
   /** 중도 참여 대기자 (이름만) */
   joiners: { id: string; name: string }[];
   street: Street;
-  /** 공개된 보드 (짙은 안개로 가려진 카드는 null) */
+  /** 공개된 보드 (짙은 안개·실명 다트로 가려진 카드는 null, 무늬를 가리면 'A?' 처럼 숫자만) */
   board: (Card | null)[];
+  /** 나에게 걸린 가림 규칙 */
+  masks: MaskRules;
+  /** 팟·현재 베팅이 대략값인가 */
+  potApprox: boolean;
   sealed: number[];
   pot: number;
   currentBet: number;
@@ -247,6 +268,8 @@ export interface PlayerView {
     tax: number;
     /** 실명 다트로 보드를 못 보는 중 */
     boardBlind: boolean;
+    /** 메이드 인 헤븐으로 줄어든 내 행동 시간 (초) */
+    turnCut: number;
     /** 2차 증강의 본인 전용 정보 */
     extra: {
       /** 왕귀: 쇼다운에서 진 횟수 (보유 시) */
@@ -349,8 +372,15 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
   const seated = !!seatedMe;
   const { sb, bb } = currentBlinds(state);
   const hpl = state.levelHands;
-  const board = visibleBoard(state, me);
-  const pot = state.players.reduce((s, p) => s + p.contributed, 0) + state.deadMoney;
+  const mask = maskFor(state, me);
+  // 무늬 가림: 서버에서 숫자만 남긴 카드 코드('A?')로 바꿔 보낸다 (정확한 카드는 보내지 않음)
+  const blurCard = (c: Card) => (mask.suits ? `${c[0]}?` : c);
+  const board = visibleBoard(state, me).map((c) => (c ? blurCard(c) : c));
+  const realPot = state.players.reduce((s, p) => s + p.contributed, 0) + state.deadMoney;
+  // 금액 대략값: BB 단위로 반올림한 값만 보낸다
+  const approx = (n: number) => (mask.amounts ? Math.round(n / bb) * bb : n);
+  const approxText = (t: string | null) => (t && mask.amounts ? blurAmounts(t, bb) : t);
+  const pot = approx(realPot);
   const e = state.effects;
   const nameById = (id: string) => state.players.find((p) => p.id === id)?.name ?? '?';
 
@@ -359,8 +389,8 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     name: p.name,
     isBot: p.isBot,
     seat: p.seat,
-    chips: p.chips,
-    streetBet: p.streetBet,
+    chips: p === me ? p.chips : approx(p.chips),
+    streetBet: p === me ? p.streetBet : approx(p.streetBet),
     inHand: p.inHand,
     hasCards: p.inHand && !p.folded && p.hole.length > 0,
     folded: p.folded,
@@ -369,11 +399,12 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     place: p.place,
     sittingOut: p.sittingOut,
     kicked: p.kicked,
+    approx: mask.amounts && p !== me,
     isDealer: state.dealerIdx === i && p.inHand,
     isSB: state.sbIdx === i && p.inHand,
     isBB: state.bbIdx === i && p.inHand,
     isTurn: state.phase === 'betting' && state.toAct === i,
-    lastAction: p.lastAction,
+    lastAction: p === me ? p.lastAction : approxText(p.lastAction),
     augmentCount: p.augments.length,
     revealedAugments: p.augments
       .filter((a) => a.revealed && a.publicId)
@@ -462,7 +493,7 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
 
   const myHole = seated && me.inHand && holeVisible(state, me, me) ? [...me.hole] : [];
   // 실명 다트 대상에게는 보드로 계산되는 정보(현재 족보 등)도 보내지 않는다
-  const blind = boardBlind(state, me);
+  const blind = boardBlind(state, me) || boardInfoHidden(state, me);
   const hand = seated && me.inHand && !me.folded && !blind ? myHand(state, me, myHole, board) : null;
 
   const myAugments: MyAugmentView[] = me.augments.map((a) => {
@@ -497,10 +528,19 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     };
   });
 
+  // 가림 규칙: 이번 핸드 로그의 보드 카드는 숫자만, 금액은 대략값으로 바꿔 보낸다
+  const boardSet = new Set(mask.suits ? state.board.filter((c) => !me.hole.includes(c)) : []);
+  const maskLog = (x: { seq: number; hand: number; text: string }) => {
+    if (x.hand !== state.handNumber) return x.text;
+    let t = x.text;
+    if (boardSet.size) t = t.replace(/\[([2-9TJQKA][shdc])\]/g, (m, c: string) => (boardSet.has(c) ? `[${c[0]}?]` : m));
+    if (mask.amounts && state.effects.glassesSeq && x.seq >= state.effects.glassesSeq) t = blurAmounts(t, bb);
+    return t;
+  };
   const log = state.log
     .filter((x) => x.seq >= me.logFrom && (!x.to || x.to.includes(viewerId)) && !(x.except && x.except.includes(viewerId)))
     .slice(-150)
-    .map((x) => ({ seq: x.seq, hand: x.hand, text: x.text }));
+    .map((x) => ({ seq: x.seq, hand: x.hand, text: maskLog(x) }));
 
   const declOpts = seated ? declareOptions(state, me) : [];
   const counting =
@@ -529,7 +569,9 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     board,
     sealed: [...e.sealed],
     pot,
-    currentBet: state.currentBet,
+    currentBet: approx(state.currentBet),
+    masks: mask,
+    potApprox: mask.amounts,
     players,
     toActId: state.phase === 'betting' && state.toAct !== null ? state.players[state.toAct].id : null,
     lastAggressorId:
@@ -580,7 +622,8 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
       attach: seated && me.attachPending && state.phase === 'handEnd' ? { cards: [...me.hole] } : null,
       counting,
       tax: taxFor(state, me),
-      boardBlind: blind,
+      boardBlind: boardBlind(state, me),
+      turnCut: turnCutFor(state, me.id),
       extra: {
         lateLosses: findAug(me, 'lateBloomer') ? me.lateLosses : null,
         betPrediction: me.betPrediction,
@@ -598,6 +641,14 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     log,
     winnerId: state.winnerId,
   };
+}
+
+/** 금액(숫자)을 "약 N BB" 로 바꾼다. 카드 토큰([As])은 건드리지 않는다 */
+function blurAmounts(text: string, bb: number): string {
+  return text
+    .split(/(\[[^\]]*\])/)
+    .map((part) => (part.startsWith('[') ? part : part.replace(/\d[\d,]*/g, (n) => `약 ${Math.round(Number(n.replace(/,/g, '')) / bb)}BB`)))
+    .join('');
 }
 
 /** 테이블에 표시할 현재 효과 (모두에게 공개된 정보만) */

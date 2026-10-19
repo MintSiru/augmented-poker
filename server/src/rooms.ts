@@ -14,6 +14,7 @@ import {
   kickPlayer,
   removeJoiner,
   setLevelPlan,
+  turnSecondsFor,
   chooseBotAction,
   chooseBotOpportunistic,
   counterCandidates,
@@ -697,7 +698,13 @@ export class Room {
     this.deadlineKind = null;
     let base: number;
     switch (kind) {
-      case 'turn':
+      case 'turn': {
+        // 플레이어별 행동 제한 시간 (메이드 인 헤븐 등으로 줄어들 수 있음, 최소 5초)
+        const g = this.game!;
+        const id = g.toAct !== null ? g.players[g.toAct]?.id : undefined;
+        base = (id ? turnSecondsFor(g, id, this.settings.turnSeconds) : this.settings.turnSeconds) * 1000;
+        break;
+      }
       case 'discard':
       case 'declare':
         base = this.settings.turnSeconds * 1000;
