@@ -209,6 +209,36 @@ describe('방과 접속', () => {
     await waitFor(() => c.lobby?.hostId === c.id, 2000, 'host transfer on disconnect');
   });
 
+  it('방장은 접속 중인 다른 사람에게 방장을 넘길 수 있다 (대기실·게임 중, 모두에게 알림)', async () => {
+    const s = await start();
+    const a = new VClient(s.port);
+    const b = new VClient(s.port);
+    const c = new VClient(s.port);
+    const got: ChatMessage[] = [];
+    c.sock.on('chat', (m: ChatMessage) => got.push(m));
+    await a.create('A');
+    await b.join(a.code, 'B');
+    await c.join(a.code, 'C');
+    // 방장이 아니면 넘길 수 없다, 없는 사람·자기 자신도 안 된다
+    expect((await b.emit('room:host', { playerId: c.id })).error).toContain('방장');
+    expect((await a.emit('room:host', { playerId: 'nope' })).ok).toBe(false);
+    expect((await a.emit('room:host', { playerId: a.id })).ok).toBe(false);
+    expect((await a.emit('room:host', { playerId: b.id })).ok).toBe(true);
+    await waitFor(() => c.lobby?.hostId === b.id, 2000, 'host given');
+    await waitFor(() => got.some((m) => m.fromId === '' && m.text.includes('방장')), 2000, 'notice');
+    // 예전 방장은 이제 시작할 수 없고, 새 방장이 시작한다
+    expect((await a.emit('room:start')).ok).toBe(false);
+    expect((await b.emit('room:start')).ok).toBe(true);
+    await waitFor(() => !!c.env, 3000, 'game');
+    // 게임 중에도 넘길 수 있다 (연결 끊긴 사람에게는 안 됨)
+    a.sock.disconnect();
+    await waitFor(() => c.env?.view.players.find((p) => p.id === a.id)?.connected === false, 3000, 'a off');
+    expect((await b.emit('room:host', { playerId: a.id })).error).toContain('접속 중');
+    expect((await b.emit('room:host', { playerId: c.id })).ok).toBe(true);
+    await waitFor(() => c.env?.youAreHost === true, 3000, 'c host');
+    expect(c.env!.view.players.find((p) => p.id === c.id)!.isHost).toBe(true);
+  });
+
   it('모든 사람이 나간 방은 일정 시간 뒤 삭제된다', async () => {
     const s = await start();
     const a = new VClient(s.port);

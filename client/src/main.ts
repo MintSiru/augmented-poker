@@ -393,7 +393,7 @@ function chatListHtml(): string {
     .map((m) => {
       const t = new Date(m.ts);
       const hhmm = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
-      return `<div class="cm ${m.fromId === me ? 'mine' : ''}"><span class="cm-name">${esc(m.name)}</span><span class="cm-text">${esc(m.text)}</span><span class="cm-time">${hhmm}</span></div>`;
+      return `<div class="cm ${m.fromId === me ? 'mine' : ''}${m.fromId === '' ? ' sys' : ''}"><span class="cm-name">${esc(m.name)}</span><span class="cm-text">${esc(m.text)}</span><span class="cm-time">${hhmm}</span></div>`;
     })
     .join('');
 }
@@ -508,7 +508,9 @@ function renderLobby() {
           ${l.players
             .map(
               (p) =>
-                `<li class="${p.connected ? '' : 'off'}">${p.isHost ? '<span class="crown">👑</span>' : ''}${esc(p.name)}${p.id === l.youId ? ' <span class="muted">(나)</span>' : ''}${p.connected ? '' : ' <span class="muted">연결 끊김</span>'}</li>`,
+                `<li class="${p.connected ? '' : 'off'}">${p.isHost ? '<span class="crown">👑</span>' : ''}${esc(p.name)}${p.id === l.youId ? ' <span class="muted">(나)</span>' : ''}${p.connected ? '' : ' <span class="muted">연결 끊김</span>'}${
+                  isHost && p.id !== l.youId && p.connected ? ` <button class="small" data-a="giveHost" data-id="${esc(p.id)}" data-name="${esc(p.name)}">방장 넘기기</button>` : ''
+                }</li>`,
             )
             .join('')}
           ${Array.from({ length: bots }, (_, i) => `<li class="bot">🤖 봇 ${i + 1}</li>`).join('')}
@@ -661,7 +663,7 @@ function seatHtml(v: PlayerView, p: PublicPlayerView, k: number, n: number): str
   const bx = 50 + (x - 50) * 0.62;
   const by = 50 + (y - 50) * 0.55;
   return `<div class="${cls}" style="left:${x}%;top:${y}%">${bubbleHtml}${flashHtml}
-      <div class="seat-top"><span class="avatar">${p.isBot ? '🤖' : esc([...p.name][0] ?? '?')}</span><span class="nm">${esc(p.name)}</span>${badges}</div>
+      <div class="seat-top"><span class="avatar">${p.isBot ? '🤖' : esc([...p.name][0] ?? '?')}</span><span class="nm">${esc(p.name)}</span>${p.isHost ? '<span class="crown" title="방장">👑</span>' : ''}${badges}</div>
       ${p.isTurn ? '<div class="seat-timer"><div class="fill" data-seat-timer></div></div>' : ''}
       <div class="seat-mid"><span class="chips">${p.approx ? '약 ' : ''}${fmt(p.chips)}</span><span class="cards">${cards}</span></div>
       <div class="seat-status">${esc(status)}${!p.connected && !p.out && !p.kicked ? ' ⚠' : ''}</div>
@@ -1103,6 +1105,7 @@ function renderModal(env: GameEnvelope, v: PlayerView) {
       <h3>${env.youAreHost ? '방 설정' : '방 설정 (읽기 전용)'}</h3>
       <div class="settings">${env.youAreHost ? settingsForm(env.settings, env, 0, true) : settingsSummary(env.settings, null)}</div>
       <p class="muted small-note">게임 중에는 시작 칩·블라인드·상승 방식을 바꿀 수 없습니다.</p>
+      ${env.youAreHost ? giveHostHtml(v) : ''}
       <div class="lobby-actions"><button data-a="settings">닫기</button></div></div></div>`;
   } else if (v.reaction) {
     html = '';
@@ -1217,6 +1220,15 @@ function renderModal(env: GameEnvelope, v: PlayerView) {
   if (typingIn(el?.querySelector('.settings-modal'))) return;
   if (html.includes('respond-modal') && typingIn(el?.querySelector('.respond-modal'))) return;
   patch(el, html);
+}
+
+/** 게임 중 방장 넘기기: 접속 중인 다른 사람 목록 */
+function giveHostHtml(v: PlayerView): string {
+  const cands = v.players.filter((p) => !p.isBot && p.connected && !p.kicked && p.id !== v.you.id);
+  if (!cands.length) return '';
+  return `<div class="give-host"><b>방장 넘기기</b> ${cands
+    .map((p) => `<button class="small" data-a="giveHost" data-id="${esc(p.id)}" data-name="${esc(p.name)}">${esc(p.name)}</button>`)
+    .join('')}</div>`;
 }
 
 /** 제안·입찰·비공개 선언 응답 창 (15초, 응답하지 않으면 기본 응답) */
@@ -1407,6 +1419,14 @@ document.addEventListener('click', async (ev) => {
       app.showSettings = !app.showSettings;
       if (app.env) renderGame();
       return;
+    case 'giveHost': {
+      if (!confirm(`${t.dataset.name}님에게 방장을 넘길까요?`)) return;
+      const r = await send('room:host', { playerId: t.dataset.id });
+      if (!r.ok) toast(r.error ?? '방장을 넘기지 못했습니다.');
+      else app.showSettings = false;
+      if (app.env) renderGame();
+      return;
+    }
     case 'kick': {
       if (!confirm(`${t.dataset.name}님을 추방할까요? 진행 중인 핸드는 폴드 처리되고, 핸드가 끝나면 남은 칩과 함께 자리에서 사라집니다.`)) return;
       const r = await send('room:kick', { playerId: t.dataset.id });

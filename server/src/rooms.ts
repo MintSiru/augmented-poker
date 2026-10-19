@@ -332,6 +332,28 @@ export class Room {
     return null;
   }
 
+  /** 방장 이전: 방장이 접속 중인 다른 사람에게 직접 넘긴다 (대기실·게임 중 모두) */
+  giveHost(by: Member, targetId: unknown): string | null {
+    if (by.id !== this.hostId) return '방장만 넘길 수 있습니다.';
+    const t = typeof targetId === 'string' ? this.member(targetId) : undefined;
+    if (!t || t.isBot || t.left || t.kicked) return '방장을 넘길 사람을 찾을 수 없습니다.';
+    if (t.id === by.id) return '이미 방장입니다.';
+    if (!t.connected) return '접속 중인 사람에게만 넘길 수 있습니다.';
+    this.hostId = t.id;
+    this.systemChat(`${by.name}님이 ${t.name}님에게 방장을 넘겼습니다`);
+    return null;
+  }
+
+  /** 모두에게 보이는 알림 메시지 (채팅창) */
+  private systemChat(text: string): void {
+    const msg: ChatMessage = { id: ++this.chatSeq, fromId: '', name: '알림', text, ts: Date.now() };
+    this.chat.push(msg);
+    if (this.chat.length > CHAT_HISTORY) this.chat.splice(0, this.chat.length - CHAT_HISTORY);
+    for (const x of this.members) {
+      if (x.socketId) this.io.sockets.sockets.get(x.socketId)?.emit('chat', msg);
+    }
+  }
+
   /** 방장이 나가면 다음 순서의 (접속 중인) 플레이어에게 */
   private transferHost(from: Member): void {
     const humans = this.humans();
