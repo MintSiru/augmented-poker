@@ -210,6 +210,12 @@ export interface PlayerState {
   /** 재충전: 되돌릴 증강을 고르는 중 / 이번 선택 라운드에서 이미 재충전했는가 */
   rechargePending: boolean;
   rechargeDone: boolean;
+  /** 색맹: 이번 핸드 색 플러시 */
+  colorBlindOn: boolean;
+  /** 그림자 분신: 이번 판정에서 무늬를 바꾼 홀카드 */
+  shadow: { index: number; to: Card } | null;
+  /** 오마하의 피: 홀카드 2장을 모두 써서 한 단계 위로 */
+  omaha: boolean;
   /** 기록관용: 이번 핸드 프리플랍에 자발적으로 칩을 냈는가, 리버에서 베팅·레이즈했는가 */
   vpipHand: boolean;
   aggressed: boolean;

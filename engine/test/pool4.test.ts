@@ -277,3 +277,80 @@ describe('4차 방어/카운터형', () => {
     expect(view(s, 'p2').you.extra.trapArmed).toBe(false);
   });
 });
+
+// ───────────────────────── 족보 변형형 ─────────────────────────
+
+import { evaluatePlayerHand, Category } from '../src/index.js';
+
+describe('4차 족보 변형형', () => {
+  const ev = (hole: string, board: string, rules: Record<string, unknown>) => evaluatePlayerHand(cards(hole), cards(board), rules as never);
+
+  it('숫자 거울: 6과 9를 같은 숫자로 (페어 계열만, 스트레이트에는 안 씀)', () => {
+    const r = ev('6c 9d', '6h 2s Kc Jd 3h', { numberMirror: true });
+    expect(r.value.category).toBe(Category.Trips);
+    expect(r.applied).toContain('numberMirror');
+    expect(ev('6c 9d', '6h 2s Kc Jd 3h', {}).value.category).toBe(Category.Pair);
+    // 5-6-7-8 + 9 는 원래 스트레이트, 6을 9로 바꿔 쓰는 스트레이트는 없다
+    expect(ev('6c 5d', '7h 8s 2c Jd Qh', { numberMirror: true }).value.category).toBe(Category.HighCard);
+  });
+
+  it('약자의 왕관: 내 홀카드의 2는 하이카드·키커 비교에서 A보다 높다 (족보 구성에는 영향 없음)', () => {
+    const crowned = ev('2c Kd', 'As Qh 9s 7c 4d', { crown: ['2c'] });
+    const plain = ev('3c Kd', 'As Qh 9s 7c 4d', {});
+    expect(crowned.value.score[1]).toBe(15);
+    expect(crowned.value.score > plain.value.score).toBe(true);
+    // 스트레이트(A-2-3-4-5)는 원래대로
+    expect(ev('2c 3d', 'As 4h 5s Kc Jd', { crown: ['2c'] }).value.category).toBe(Category.Straight);
+  });
+
+  it('이웃사촌: 1 차이 두 장을 높은 쪽 원페어로 (하이카드일 때만), 삼쌍둥이: 페어 3쌍이면 풀하우스', () => {
+    const n = ev('7c 8d', 'Ks 2h 4c Jd Qs', { neighbors: true });
+    // K-Q 가 이웃 → K 원페어, 나머지 J·8·7 이 키커
+    expect(n.value.score).toEqual([Category.Pair, 13, 11, 8, 7]);
+    expect(n.applied).toContain('neighbors');
+    // 이미 페어가 있으면 투페어를 만들지 않는다
+    expect(ev('7c 8d', 'Ks Kh 4c Jd 2s', { neighbors: true }).value.category).toBe(Category.Pair);
+    const t = ev('Kc 9d', 'Ks 9h 4c 4d 2s', { triplets: true });
+    expect(t.value.score).toEqual([Category.FullHouse, 13, 9]);
+    expect(t.applied).toContain('triplets');
+  });
+
+  it('왕실: J·Q·K는 같은 숫자 (J-Q-K 트리플), J·Q·K 중 2장 이상이 필요한 스트레이트는 불가', () => {
+    expect(ev('Jc Qd', 'Ks 2h 4c 8d 7s', { royalty: true }).value.score.slice(0, 2)).toEqual([Category.Trips, 13]);
+    // 9-T-J-Q-K 스트레이트 대신 트리플
+    expect(ev('Tc Jd', '9s Qh Kc 2d 3h', { royalty: true }).value.category).toBe(Category.Trips);
+    expect(ev('Tc Jd', '9s Qh Kc 2d 3h', {}).value.category).toBe(Category.Straight);
+  });
+
+  it('색맹: 색으로 플러시 (일반 플러시와 같은 등급, 완전히 같으면 일반 플러시가 높다)', () => {
+    const c = ev('2h 5d', '9h Kd 7h 3c Jc', { colorFlush: true });
+    expect(c.value.category).toBe(Category.Flush);
+    expect(c.applied).toContain('colorFlush');
+    const real = ev('2h 5h', '9h Kh 7h 3c Jc', {});
+    expect(real.value.score > ev('2h 5d', '9h Kh 7h 3c Jc', { colorFlush: true }).value.score).toBe(true);
+  });
+
+  it('색맹·그림자 분신·오마하의 피는 게임에서 선언하고, 족보 역전·변형과 함께 판정된다', () => {
+    const s = setup(3, {
+      augs: { p1: ['colorBlind'], p2: ['shadow'], p3: ['omahaBlood'] },
+      deal: { board: cards('9h Kd 7s 7c Qs'), hands: { p1: cards('2h 5d'), p2: cards('7h 3d'), p3: cards('Kc Qd') } },
+    });
+    use(s, 'p1', 'colorBlind');
+    resolveAll(s);
+    toWindow(s, 'preShowdown');
+    const first = getPending(s).playerIds[0];
+    expect(first).toBe('p2');
+    // 그림자 분신: 7h 를 7s 의 무늬로 → 그대로 트리플이지만 무늬가 바뀐 카드로 판정
+    expect(view(s, 'p2').you.declare!.shadow).toEqual([{ cardIndex: 0, boardIndex: 2 }, { cardIndex: 0, boardIndex: 3 }]);
+    act(s, 'p2', { type: 'declare', augment: 'shadow', cardIndex: 0, boardIndex: 2 });
+    resolveAll(s);
+    // 오마하의 피: K·Q 두 장 + 보드 3장 = 투페어(K, Q) → 한 단계 위 트리플
+    act(s, 'p3', { type: 'declare', augment: 'omahaBlood' });
+    resolveAll(s);
+    toShowdown(s);
+    const e3 = s.result!.entries.find((e) => e.id === 'p3')!;
+    expect(e3.handName).toContain('오마하의 피');
+    expect(e3.score[0]).toBe(Category.Trips);
+    expect(s.result!.entries.find((e) => e.id === 'p2')!.applied).toContain('shadow');
+  });
+});

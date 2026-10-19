@@ -1,6 +1,6 @@
 // 엔진 공통 도우미: 게임 흐름(game.ts)과 증강 효과(effects.ts)가 함께 쓴다.
 
-import { Card, cardToken, rankName } from './cards.js';
+import { Card, cardToken, rankName, rankOf } from './cards.js';
 import { AUGMENTS, AugmentId } from './augments.js';
 import type { AppliedVariant, EvalRules } from './evaluator.js';
 import type { BlindSchedule, GameState, LogEntry, NoteKind, OwnedAugment, Phase, PlayerState } from './types.js';
@@ -114,6 +114,12 @@ export function rulesFor(p: PlayerState): EvalRules {
     fourStraight: !!findAug(p, 'fourStraight'),
     doubleStep: !!findAug(p, 'doubleStep'),
     parity: findAug(p, 'parity')?.parity ?? null,
+    numberMirror: !!findAug(p, 'numberMirror'),
+    royalty: !!findAug(p, 'royalty'),
+    colorFlush: p.colorBlindOn,
+    crown: findAug(p, 'underdogCrown') ? p.hole.filter((c) => rankOf(c) === 2) : undefined,
+    neighbors: !!findAug(p, 'neighbors'),
+    triplets: !!findAug(p, 'triplets'),
   };
 }
 
@@ -127,6 +133,14 @@ export const VARIANT_AUG: Record<AppliedVariant, AugmentId> = {
   doubleStep: 'doubleStep',
   parity: 'parity',
   blackjack: 'blackjack',
+  numberMirror: 'numberMirror',
+  royalty: 'royalty',
+  colorFlush: 'colorBlind',
+  crown: 'underdogCrown',
+  neighbors: 'neighbors',
+  triplets: 'triplets',
+  omaha: 'omahaBlood',
+  shadow: 'shadow',
 };
 
 /** 반응 대기 중이면 대기가 끝난 뒤 돌아갈 단계 */

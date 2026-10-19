@@ -177,6 +177,9 @@ function newPlayer(np: NewPlayer, seat: number, chips: number): PlayerState {
     rerolls: 0,
     rechargePending: false,
     rechargeDone: false,
+    colorBlindOn: false,
+    shadow: null,
+    omaha: false,
   };
 }
 
@@ -791,6 +794,9 @@ function resetHandState(state: GameState): void {
     p.alchemy = null;
     p.vpipHand = false;
     p.aggressed = false;
+    p.colorBlindOn = false;
+    p.shadow = null;
+    p.omaha = false;
     for (const a of p.augments) a.usedThisHand = false;
   }
   state.board = [];
@@ -1476,6 +1482,12 @@ export function declareTargets(state: GameState, p: PlayerState, id: AugmentId):
 export function alchemyChoices(state: GameState, p: PlayerState): { cardIndex: number; choice: number }[] {
   if (!declareOptions(state, p).includes('alchemy')) return [];
   return windowValidParams(state, opsFor(state), p, 'alchemy').map((x) => ({ cardIndex: x.cardIndex!, choice: x.choice! }));
+}
+
+/** 그림자 분신: 지금 고를 수 있는 (홀카드, 같은 숫자 보드 카드) 조합 */
+export function shadowChoices(state: GameState, p: PlayerState): { cardIndex: number; boardIndex: number }[] {
+  if (!declareOptions(state, p).includes('shadow')) return [];
+  return windowValidParams(state, opsFor(state), p, 'shadow').map((x) => ({ cardIndex: x.cardIndex!, boardIndex: x.boardIndex! }));
 }
 
 export function declareOptions(state: GameState, p: PlayerState): AugmentId[] {

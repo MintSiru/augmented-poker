@@ -2013,6 +2013,58 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
     },
   },
 
+  // ═════════════════════════ 4차 풀: 족보 변형형 ═════════════════════════
+
+  shadow: {
+    check(ctx, params) {
+      const { state, owner } = ctx;
+      if (basePhase(state) !== 'declare' || state.windowStage !== 'preShowdown') return '쇼다운 직전 선언 기회에만 쓸 수 있습니다.';
+      if (!live(owner)) return '핸드에 참여 중일 때만 쓸 수 있습니다.';
+      if (!validHoleIndex(owner, params.cardIndex)) return '무늬를 바꿀 홀카드를 고르세요.';
+      const bi = params.boardIndex;
+      const board = visibleBoard(state, owner);
+      if (!isInt(bi) || !board[bi]) return '같은 숫자의 보드 카드를 고르세요.';
+      const h = owner.hole[params.cardIndex];
+      const b = board[bi]!;
+      if (rankOf(h) !== rankOf(b) || suitOf(h) === suitOf(b)) return '숫자가 같고 무늬가 다른 보드 카드를 골라야 합니다.';
+      return null;
+    },
+    resolve(ctx, params) {
+      const { state, owner } = ctx;
+      const h = owner.hole[params.cardIndex!];
+      const b = state.board[params.boardIndex!];
+      owner.shadow = { index: params.cardIndex!, to: b };
+      addLog(state, `그림자 분신: ${owner.name}의 홀카드 1장을 ${cardToken(b)}의 무늬로 판정합니다`);
+      addLog(state, `그림자 분신: ${cardToken(h)} → ${cardToken(b)}`, { to: [owner.id] });
+    },
+  },
+
+  omahaBlood: {
+    check(ctx) {
+      const { state, owner } = ctx;
+      if (basePhase(state) !== 'declare' || state.windowStage !== 'preShowdown') return '쇼다운 직전 선언 기회에만 쓸 수 있습니다.';
+      if (!live(owner) || owner.hole.length < 2) return '홀카드 2장으로 핸드에 참여 중일 때만 쓸 수 있습니다.';
+      return owner.omaha ? '이미 발동했습니다.' : null;
+    },
+    resolve(ctx) {
+      ctx.owner.omaha = true;
+      addLog(ctx.state, `오마하의 피: ${ctx.owner.name}은(는) 홀카드 2장을 모두 쓰는 족보를 한 단계 올려 판정합니다`);
+    },
+  },
+
+  colorBlind: {
+    check(ctx) {
+      const { state, owner } = ctx;
+      if (basePhase(state) !== 'betting' || state.street !== 'preflop') return '프리플랍에만 선언할 수 있습니다.';
+      if (!live(owner) || owner.actedPreflop) return '핸드 시작 시(프리플랍 내 첫 행동 전)에만 선언할 수 있습니다.';
+      return owner.colorBlindOn ? '이미 선언했습니다.' : null;
+    },
+    resolve(ctx) {
+      ctx.owner.colorBlindOn = true;
+      addLog(ctx.state, `색맹: 이번 핸드 동안 ${ctx.owner.name}은(는) 색(빨강/검정)으로 플러시를 판정합니다`);
+    },
+  },
+
   // ═════════════════════════ 4차 풀: 방어/카운터형 ═════════════════════════
 
   // 정보 통행료·선택적 노출: 패시브지만 응답 창을 쓰므로 응답 처리만 등록한다 (선언하지 않음)
@@ -2487,6 +2539,7 @@ function windowSamples(state: GameState, p: PlayerState, id: AugmentId): ActiveP
   if (id === 'seal') return [{ boardIndex: [0, 1, 2, 3, 4].find((i) => !state.effects.sealed.includes(i)) }];
   if (id === 'lastFork') return [{ cardIndex: 0 }];
   if (id === 'deadScanner') return [{ choice: 0 }];
+  if (id === 'shadow') return p.hole.flatMap((_, ci) => [0, 1, 2, 3, 4, 5, 6].map((bi) => ({ cardIndex: ci, boardIndex: bi })));
   if (id === 'alchemy') return p.hole.flatMap((_, i) => [{ cardIndex: i, choice: 0 }, { cardIndex: i, choice: 1 }]);
   if (!AUGMENTS[id].target) return [{}];
   return state.players.filter((t) => t !== p).map((t) => {

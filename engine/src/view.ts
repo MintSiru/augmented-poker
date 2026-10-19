@@ -13,6 +13,7 @@ import {
   declareOptions,
   declareTargets,
   alchemyChoices,
+  shadowChoices,
   findAug,
   legalActions,
   LegalActions,
@@ -331,7 +332,12 @@ export interface PlayerView {
     dormant: number | null;
     discard: { pending: boolean; chosen: number | null } | null;
     /** 선언 기회 (되감기·봉인·밥상 뒤집기) */
-    declare: { options: AugmentInfo[]; targets: Partial<Record<AugmentId, string[]>>; alchemy: { cardIndex: number; choice: number }[] } | null;
+    declare: {
+      options: AugmentInfo[];
+      targets: Partial<Record<AugmentId, string[]>>;
+      alchemy: { cardIndex: number; choice: number }[];
+      shadow: { cardIndex: number; boardIndex: number }[];
+    } | null;
     /** 애착: 다음 핸드로 가져갈 카드 선택 */
     attach: { cards: Card[] } | null;
     counting: CountingView | null;
@@ -747,7 +753,12 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
           ? { pending: me.pendingDiscard === null, chosen: me.pendingDiscard }
           : null,
       declare: declOpts.length
-        ? { options: declOpts.map(info), targets: Object.fromEntries(declOpts.map((id) => [id, declareTargets(state, me, id)])), alchemy: alchemyChoices(state, me) }
+        ? {
+            options: declOpts.map(info),
+            targets: Object.fromEntries(declOpts.map((id) => [id, declareTargets(state, me, id)])),
+            alchemy: alchemyChoices(state, me),
+            shadow: shadowChoices(state, me),
+          }
         : null,
       attach: seated && me.attachPending && state.phase === 'handEnd' ? { cards: [...me.hole] } : null,
       counting,

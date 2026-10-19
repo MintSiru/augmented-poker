@@ -52,6 +52,18 @@ export interface EvalRules {
   doubleStep?: boolean;
   /** 짝수/홀수 동맹: 5장이 모두 이 쪽 숫자면 동맹 플러시 (A 제외) */
   parity?: 'even' | 'odd' | null;
+  /** 숫자 거울: 6과 9를 같은 숫자로 (페어 계열만) */
+  numberMirror?: boolean;
+  /** 왕실: J·Q·K를 같은 숫자로 (페어 계열), J·Q·K 중 2장 이상이 필요한 스트레이트 불가 */
+  royalty?: boolean;
+  /** 색맹: 무늬 대신 색으로 플러시 (스트레이트 플러시는 원래 무늬) */
+  colorFlush?: boolean;
+  /** 약자의 왕관: 이 카드들(내 홀카드의 2)은 하이카드·키커 비교에서 A보다 높다 */
+  crown?: Card[];
+  /** 이웃사촌: 숫자가 1 차이 나는 두 장을 원페어로 */
+  neighbors?: boolean;
+  /** 삼쌍둥이: 서로 다른 페어 3쌍이면 풀하우스 */
+  triplets?: boolean;
 }
 
 export interface HandValue {
@@ -68,6 +80,10 @@ export interface HandValue {
   usedFourStraight: boolean;
   usedDoubleStep: boolean;
   usedParity: boolean;
+  usedMirror?: boolean;
+  usedRoyal?: boolean;
+  usedColor?: boolean;
+  usedCrown?: boolean;
   name: string;
 }
 
@@ -88,6 +104,10 @@ interface CoreResult {
   usedFourStraight?: boolean;
   usedDoubleStep?: boolean;
   usedParity?: boolean;
+  usedMirror?: boolean;
+  usedRoyal?: boolean;
+  usedColor?: boolean;
+  usedCrown?: boolean;
 }
 
 /** 4장 스트레이트: 연속 4장(와일드로 채움 가능)의 가장 높은 끝 숫자 */
@@ -158,7 +178,7 @@ function fillFlushRanks(present: number[], wilds: number): number[] {
  * 자연 카드(naturals)와 와일드 w장으로 만들 수 있는 최고 족보.
  * 카드 수 합계는 5 이하. 스트레이트/플러시/풀하우스 계열은 5장일 때만 성립.
  */
-function evaluateGroup(naturals: Card[], w: number, rules: EvalRules): CoreResult {
+function evaluateGroup(naturals: Card[], w: number, rules: EvalRules, crownCount = 0): CoreResult {
   const total = naturals.length + w;
   const ranks = naturals.map(rankOf);
   const cnt = new Map<number, number>();
@@ -169,6 +189,8 @@ function evaluateGroup(naturals: Card[], w: number, rules: EvalRules): CoreResul
   const allSameSuit = suitCnt.size <= 1;
   const ranksDistinct = distinct.length === naturals.length;
   const descRanks = [...ranks].sort((a, b) => b - a);
+  // 왕실: J·Q·K 중 2장 이상이 들어간 스트레이트는 성립하지 않는다
+  const royalBlocked = !!rules.royalty && ranks.filter((r) => r >= 11 && r <= 13).length >= 2;
 
   const candidates: CoreResult[] = [];
   const push = (score: number[], usedFourFlush = false, usedGap = false, usedWrap = false, extra: Partial<CoreResult> = {}) =>
@@ -178,33 +200,92 @@ function evaluateGroup(naturals: Card[], w: number, rules: EvalRules): CoreResul
   if (total === 5 && distinct.length <= 1 && w > 0) push([Category.FiveKind, distinct[0] ?? 14]);
 
   // 스트레이트 플러시 (5장이 모두 같은 무늬여야 함)
-  if (total === 5 && allSameSuit && ranksDistinct) {
+  if (total === 5 && allSameSuit && ranksDistinct && !royalBlocked) {
     const st = findStraight(distinct, !!rules.gapStraight, !!rules.wrapStraight);
     if (st) push([Category.StraightFlush, st.top, st.normal ? 1 : 0], false, !st.normal, st.wrap);
   }
 
-  // 같은 숫자 묶음 계열: 가장 높은 숫자에 와일드를 몰아준다
-  const kickersExcluding = (r: number, leftoverWilds: number, n: number) =>
-    [...Array(leftoverWilds).fill(14), ...descRanks.filter((x) => x !== r)].slice(0, n);
+  // 약자의 왕관: 키커·하이카드 비교에서 내 홀카드의 2를 A보다 높게(15)
+  const crownKick = (list: number[], extra: Partial<CoreResult>): number[] => {
+    let c = crownCount;
+    const out = list.map((x) => (x === 2 && c-- > 0 ? 15 : x)).sort((a, b) => b - a);
+    if (c < crownCount) extra.usedCrown = true;
+    return out;
+  };
 
-  // 포카드
-  if (total >= 4) {
-    const q = distinct.find((r) => (cnt.get(r) ?? 0) + w >= 4);
-    if (q !== undefined) {
-      const left = w - Math.max(0, 4 - (cnt.get(q) ?? 0));
-      push([Category.Quads, q, ...kickersExcluding(q, left, total - 4)]);
-    } else if (w >= 4) {
-      push([Category.Quads, 14, ...descRanks.slice(0, total - 4)]);
+  // 같은 숫자 묶음 계열 (원래 숫자 + 숫자 거울·왕실로 묶은 숫자)
+  pushGroups(ranks, {});
+  if (rules.numberMirror && ranks.includes(6) && ranks.includes(9)) pushGroups(ranks.map((r) => (r === 6 ? 9 : r)), { usedMirror: true });
+  if (rules.royalty && new Set(ranks.filter((r) => r >= 11 && r <= 13)).size >= 2) pushGroups(ranks.map((r) => (r === 11 || r === 12 ? 13 : r)), { usedRoyal: true });
+
+  function pushGroups(rs: number[], tag: Partial<CoreResult>): void {
+    const cnt = new Map<number, number>();
+    for (const r of rs) cnt.set(r, (cnt.get(r) ?? 0) + 1);
+    const distinct = [...cnt.keys()].sort((a, b) => b - a);
+    const descRanks = [...rs].sort((a, b) => b - a);
+    const isTagged = Object.keys(tag).length > 0;
+    // 숫자를 묶은 판정은 실제로 묶음이 쓰였을 때만 표시
+    const pushG = (score: number[], usesGroup: boolean, extra: Partial<CoreResult> = {}) => push(score, false, false, false, { ...(isTagged && usesGroup ? tag : {}), ...extra });
+    // 가장 높은 숫자에 와일드를 몰아준다
+    const kickersExcluding = (r: number, leftoverWilds: number, n: number, extra: Partial<CoreResult>) =>
+      crownKick([...Array(leftoverWilds).fill(14), ...descRanks.filter((x) => x !== r)], extra).slice(0, n);
+    const grouped = (r: number) => isTagged && (tag.usedMirror ? r === 9 : r === 13);
+
+    // 포카드
+    if (total >= 4) {
+      const q = distinct.find((r) => (cnt.get(r) ?? 0) + w >= 4);
+      if (q !== undefined) {
+        const left = w - Math.max(0, 4 - (cnt.get(q) ?? 0));
+        const extra: Partial<CoreResult> = {};
+        pushG([Category.Quads, q, ...kickersExcluding(q, left, total - 4, extra)], grouped(q), extra);
+      } else if (w >= 4 && !isTagged) {
+        pushG([Category.Quads, 14, ...descRanks.slice(0, total - 4)], false);
+      }
     }
-  }
 
-  // 풀하우스
-  if (total === 5 && distinct.length === 2) {
-    const [a, b] = distinct;
-    const ca = cnt.get(a)!;
-    const cb = cnt.get(b)!;
-    if (ca <= 3 && cb <= 2) push([Category.FullHouse, a, b]);
-    else if (cb <= 3 && ca <= 2) push([Category.FullHouse, b, a]);
+    // 풀하우스
+    if (total === 5 && distinct.length === 2) {
+      const [a, b] = distinct;
+      const ca = cnt.get(a)!;
+      const cb = cnt.get(b)!;
+      if (ca <= 3 && cb <= 2) pushG([Category.FullHouse, a, b], grouped(a) || grouped(b));
+      else if (cb <= 3 && ca <= 2) pushG([Category.FullHouse, b, a], grouped(a) || grouped(b));
+    }
+
+    // 트리플
+    if (total >= 3) {
+      const t = distinct.find((r) => (cnt.get(r) ?? 0) + w >= 3);
+      if (t !== undefined) {
+        const left = w - Math.max(0, 3 - (cnt.get(t) ?? 0));
+        const extra: Partial<CoreResult> = {};
+        pushG([Category.Trips, t, ...kickersExcluding(t, left, total - 3, extra)], grouped(t), extra);
+      } else if (w >= 3 && !isTagged) {
+        pushG([Category.Trips, 14, ...descRanks.slice(0, total - 3)], false);
+      }
+    }
+
+    // 투페어 (와일드가 있으면 항상 트리플 이상이 가능하므로 자연 카드만)
+    if (w === 0 && total >= 4) {
+      const pairs = distinct.filter((r) => cnt.get(r)! >= 2);
+      if (pairs.length >= 2) {
+        const [p1, p2] = pairs;
+        const extra: Partial<CoreResult> = {};
+        const kick = crownKick(descRanks.filter((x) => x !== p1 && x !== p2), extra).slice(0, total - 4);
+        pushG([Category.TwoPair, p1, p2, ...kick], grouped(p1) || grouped(p2), extra);
+      }
+    }
+
+    // 원페어
+    if (total >= 2) {
+      const p = distinct.find((r) => (cnt.get(r) ?? 0) + w >= 2);
+      if (p !== undefined) {
+        const left = w - Math.max(0, 2 - (cnt.get(p) ?? 0));
+        const extra: Partial<CoreResult> = {};
+        pushG([Category.Pair, p, ...kickersExcluding(p, left, total - 2, extra)], grouped(p), extra);
+      } else if (w >= 2 && !isTagged) {
+        pushG([Category.Pair, 14, ...descRanks.slice(0, total - 2)], false);
+      }
+    }
   }
 
   // 플러시
@@ -220,6 +301,10 @@ function evaluateGroup(naturals: Card[], w: number, rules: EvalRules): CoreResul
         push([Category.Flush, 1, ...filled, 0], false, false, false, { usedParity: true });
       }
     }
+    // 색맹: 무늬 대신 색. 일반 플러시와 같은 등급, 완전히 같으면 일반 플러시가 높다
+    if (!allSameSuit && rules.colorFlush && naturals.every((c) => isRed(c) === isRed(naturals[0]))) {
+      push([Category.Flush, 1, ...fillFlushRanks(ranks, w), 0], false, false, false, { usedColor: true });
+    }
     if (!allSameSuit && rules.fourFlush) {
       for (const [s, n] of suitCnt) {
         if (n + w < 4) continue;
@@ -234,7 +319,7 @@ function evaluateGroup(naturals: Card[], w: number, rules: EvalRules): CoreResul
   }
 
   // 스트레이트
-  if (total === 5 && ranksDistinct) {
+  if (total === 5 && ranksDistinct && !royalBlocked) {
     const st = findStraight(distinct, !!rules.gapStraight, !!rules.wrapStraight);
     if (st) push([Category.Straight, st.top, st.normal ? 1 : 0], false, !st.normal, st.wrap);
     if (rules.doubleStep) {
@@ -249,49 +334,26 @@ function evaluateGroup(naturals: Card[], w: number, rules: EvalRules): CoreResul
       }
     }
   }
-  if (total === 5 && rules.fourStraight) {
+  if (total === 5 && rules.fourStraight && !royalBlocked) {
     const run = findFourRun(distinct, w, !!rules.wrapStraight);
     if (run) push([Category.Straight, run.top, 0], false, false, run.wrap, { usedFourStraight: true });
   }
 
-  // 트리플
-  if (total >= 3) {
-    const t = distinct.find((r) => (cnt.get(r) ?? 0) + w >= 3);
-    if (t !== undefined) {
-      const left = w - Math.max(0, 3 - (cnt.get(t) ?? 0));
-      push([Category.Trips, t, ...kickersExcluding(t, left, total - 3)]);
-    } else if (w >= 3) {
-      push([Category.Trips, 14, ...descRanks.slice(0, total - 3)]);
-    }
-  }
-
-  // 투페어 (와일드가 있으면 항상 트리플 이상이 가능하므로 자연 카드만)
-  if (w === 0 && total >= 4) {
-    const pairs = distinct.filter((r) => cnt.get(r)! >= 2);
-    if (pairs.length >= 2) {
-      const [p1, p2] = pairs;
-      const kick = descRanks.filter((x) => x !== p1 && x !== p2).slice(0, total - 4);
-      push([Category.TwoPair, p1, p2, ...kick]);
-    }
-  }
-
-  // 원페어
-  if (total >= 2) {
-    const p = distinct.find((r) => (cnt.get(r) ?? 0) + w >= 2);
-    if (p !== undefined) {
-      const left = w - Math.max(0, 2 - (cnt.get(p) ?? 0));
-      push([Category.Pair, p, ...kickersExcluding(p, left, total - 2)]);
-    } else if (w >= 2) {
-      push([Category.Pair, 14, ...descRanks.slice(0, total - 2)]);
-    }
-  }
-
   // 하이카드
-  push([Category.HighCard, ...[...Array(w).fill(14), ...descRanks].slice(0, total)]);
+  {
+    const extra: Partial<CoreResult> = {};
+    const hi = crownKick([...Array(w).fill(14), ...descRanks], extra).slice(0, total);
+    push([Category.HighCard, ...hi], false, false, false, extra);
+  }
 
   let best = candidates[0];
   for (const c of candidates) if (compareScores(c.score, best.score) > 0) best = c;
   return best;
+}
+
+function isRed(c: Card): boolean {
+  const s = suitOf(c);
+  return s === 'h' || s === 'd';
 }
 
 function isWild(card: Card, rules: EvalRules): boolean {
@@ -301,7 +363,8 @@ function isWild(card: Card, rules: EvalRules): boolean {
 function evaluateFive(cards: Card[], rules: EvalRules): HandValue {
   const naturals = cards.filter((c) => !isWild(c, rules));
   const w = cards.length - naturals.length;
-  const core = evaluateGroup(naturals, w, rules);
+  const crownCount = rules.crown ? cards.filter((c) => rules.crown!.includes(c) && rankOf(c) === 2 && !isWild(c, rules)).length : 0;
+  const core = evaluateGroup(naturals, w, rules, crownCount);
   return {
     score: core.score,
     category: core.score[0],
@@ -314,6 +377,10 @@ function evaluateFive(cards: Card[], rules: EvalRules): HandValue {
     usedFourStraight: !!core.usedFourStraight,
     usedDoubleStep: !!core.usedDoubleStep,
     usedParity: !!core.usedParity,
+    usedMirror: !!core.usedMirror,
+    usedRoyal: !!core.usedRoyal,
+    usedColor: !!core.usedColor,
+    usedCrown: !!core.usedCrown,
     name: describe(core),
   };
 }
@@ -376,7 +443,23 @@ export function bestHand(cards: Card[], rules: EvalRules = {}): HandValue {
   return best!;
 }
 
-export type AppliedVariant = 'fourFlush' | 'gapStraight' | 'wrapStraight' | 'wild' | 'fourStraight' | 'doubleStep' | 'parity' | 'blackjack';
+export type AppliedVariant =
+  | 'fourFlush'
+  | 'gapStraight'
+  | 'wrapStraight'
+  | 'wild'
+  | 'fourStraight'
+  | 'doubleStep'
+  | 'parity'
+  | 'blackjack'
+  | 'numberMirror'
+  | 'royalty'
+  | 'colorFlush'
+  | 'crown'
+  | 'neighbors'
+  | 'triplets'
+  | 'omaha'
+  | 'shadow';
 
 /** 변형이 만든 족보 이름 (쇼다운 표시용) */
 export const VARIANT_LABEL: Record<AppliedVariant, string> = {
@@ -388,6 +471,14 @@ export const VARIANT_LABEL: Record<AppliedVariant, string> = {
   doubleStep: '보폭 두 배 스트레이트',
   parity: '동맹 플러시',
   blackjack: '블랙잭(풀하우스 동급)',
+  numberMirror: '숫자 거울(6=9)',
+  royalty: '왕실(J=Q=K)',
+  colorFlush: '색 플러시',
+  crown: '약자의 왕관(2 > A)',
+  neighbors: '이웃사촌 페어',
+  triplets: '삼쌍둥이 풀하우스',
+  omaha: '오마하의 피 (한 단계 위)',
+  shadow: '그림자 분신',
 };
 
 /** 블랙잭이 인정되는 족보 점수: 가장 낮은 풀하우스(2·2·2·3·3)와 동급 */
@@ -419,11 +510,46 @@ export interface PlayerHandEval {
 export function evaluatePlayerHand(hole: Card[], board: Card[], rules: EvalRules): PlayerHandEval {
   const cards = [...hole, ...board];
   const standard = bestHand(cards, {});
-  const hasVariant = !!(rules.fourFlush || rules.gapStraight || rules.wrapStraight || rules.wildRank || rules.fourStraight || rules.doubleStep || rules.parity);
+  const hasVariant = !!(
+    rules.fourFlush ||
+    rules.gapStraight ||
+    rules.wrapStraight ||
+    rules.wildRank ||
+    rules.fourStraight ||
+    rules.doubleStep ||
+    rules.parity ||
+    rules.numberMirror ||
+    rules.royalty ||
+    rules.colorFlush ||
+    rules.crown?.length ||
+    rules.neighbors ||
+    rules.triplets
+  );
   if (!hasVariant) return { value: standard, applied: [] };
-  const variant = bestHand(cards, rules);
-  if (compareScores(variant.score, standard.score) <= 0) return { value: standard, applied: [] };
-  const applied: AppliedVariant[] = [];
+  let variant = bestHand(cards, rules);
+  const extra: AppliedVariant[] = [];
+  // 7장 전체로 보는 변형: 삼쌍둥이(페어 3쌍 → 풀하우스), 이웃사촌(1 차이 두 장 → 원페어)
+  if (rules.triplets) {
+    const t = tripletsHand(cards);
+    if (t && compareScores(t.score, variant.score) > 0) {
+      variant = t;
+      extra.push('triplets');
+    }
+  }
+  if (rules.neighbors && variant.category === Category.HighCard) {
+    const nb = neighborsHand(cards);
+    if (nb && compareScores(nb.score, variant.score) > 0) {
+      variant = nb;
+      extra.push('neighbors');
+    }
+  }
+  // 왕실은 스트레이트 제한이 있어 표준 판정으로 돌아가지 않는다
+  if (!rules.royalty && compareScores(variant.score, standard.score) <= 0) return { value: standard, applied: [] };
+  const applied: AppliedVariant[] = [...extra];
+  if (variant.usedMirror) applied.push('numberMirror');
+  if (variant.usedRoyal) applied.push('royalty');
+  if (variant.usedColor) applied.push('colorFlush');
+  if (variant.usedCrown && compareScores(variant.score, standard.score) !== 0) applied.push('crown');
   if (variant.usedFourFlush) applied.push('fourFlush');
   if (variant.usedGap) applied.push('gapStraight');
   if (variant.usedWrap) applied.push('wrapStraight');
@@ -432,6 +558,46 @@ export function evaluatePlayerHand(hole: Card[], board: Card[], rules: EvalRules
   if (variant.usedParity) applied.push('parity');
   if (variant.wildsUsed > 0) applied.push('wild');
   return { value: variant, applied };
+}
+
+function plainValue(score: number[], cards: Card[], core: Card[], name: string): HandValue {
+  return {
+    score,
+    category: score[0],
+    cards,
+    core,
+    wildsUsed: 0,
+    usedFourFlush: false,
+    usedGap: false,
+    usedWrap: false,
+    usedFourStraight: false,
+    usedDoubleStep: false,
+    usedParity: false,
+    name,
+  };
+}
+
+/** 삼쌍둥이: 서로 다른 페어가 3쌍 이상이면 가장 높은 페어를 트리플로 삼은 풀하우스 */
+function tripletsHand(cards: Card[]): HandValue | null {
+  const by = new Map<number, Card[]>();
+  for (const c of cards) by.set(rankOf(c), [...(by.get(rankOf(c)) ?? []), c]);
+  const pairs = [...by.entries()].filter(([, cs]) => cs.length === 2).sort((a, b) => b[0] - a[0]);
+  if (pairs.length < 3) return null;
+  const [[a, ca], [b, cb]] = pairs;
+  const used = [...ca, ...cb, pairs[2][1][0]];
+  return plainValue([Category.FullHouse, a, b], used, [...ca, ...cb], `삼쌍둥이 풀하우스 (${rankName(a)} / ${rankName(b)})`);
+}
+
+/** 이웃사촌: 숫자가 1 차이 나는 두 장을 높은 쪽 숫자의 원페어로 */
+function neighborsHand(cards: Card[]): HandValue | null {
+  const sorted = [...cards].sort((a, b) => rankOf(b) - rankOf(a));
+  for (const hi of sorted) {
+    const lo = sorted.find((c) => rankOf(c) === rankOf(hi) - 1);
+    if (!lo) continue;
+    const rest = sorted.filter((c) => c !== hi && c !== lo).slice(0, 3);
+    return plainValue([Category.Pair, rankOf(hi), ...rest.map(rankOf)], [hi, lo, ...rest], [hi, lo], `이웃사촌 원페어 (${rankName(rankOf(hi))})`);
+  }
+  return null;
 }
 
 /** 블랙잭을 발동한 플레이어의 최종 족보: 21이 되면 가장 낮은 풀하우스와 동급 (원래 족보가 더 높으면 원래 족보) */
@@ -475,7 +641,7 @@ export function isMadeHand(hole: Card[], board: Card[], rules: EvalRules): boole
 function describe(core: CoreResult): string {
   const s = core.score;
   const cat = s[0];
-  const n = (r: number) => rankName(r);
+  const n = (r: number) => (r === 15 ? '2(왕관)' : rankName(r));
   switch (cat) {
     case Category.FiveKind:
       return `파이브 카드 (${n(s[1])})`;
@@ -487,7 +653,7 @@ function describe(core: CoreResult): string {
     case Category.FullHouse:
       return `풀하우스 (${n(s[1])} / ${n(s[2])})`;
     case Category.Flush:
-      return core.usedParity ? `동맹 플러시 (${n(s[2])} 하이)` : core.usedFourFlush ? `4장 플러시 (${n(s[2])} 하이)` : `플러시 (${n(s[2])} 하이)`;
+      return core.usedParity ? `동맹 플러시 (${n(s[2])} 하이)` : core.usedColor ? `색 플러시 (${n(s[2])} 하이)` : core.usedFourFlush ? `4장 플러시 (${n(s[2])} 하이)` : `플러시 (${n(s[2])} 하이)`;
     case Category.Straight:
       return `${straightPrefix(core)}스트레이트 (${n(s[1])} 하이)`;
     case Category.Trips:
