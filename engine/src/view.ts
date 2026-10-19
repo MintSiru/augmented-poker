@@ -201,7 +201,8 @@ export type WaitingKind = 'turn' | 'pick' | 'discard' | 'declare' | 'reaction' |
 
 /** 제안·입찰 창. 제안 내용·입찰가·비공개 선언은 결과가 나올 때까지 당사자에게만 */
 export interface RespondView {
-  augment: AugmentId;
+  /** 정보 통행료·선택적 노출처럼 당사자만 아는 응답이면 null */
+  augment: AugmentId | null;
   name: string;
   ownerId: string;
   ownerName: string;
@@ -367,6 +368,8 @@ export interface PlayerView {
       contract: number | null;
       /** 잠복: 숨길 증강을 고를 수 있는가 */
       lurkChoose: boolean;
+      /** 덫을 설치해 두었는가 (나에게만) */
+      trapArmed: boolean;
       /** 기록관: 상대별 프리플랍 참여율(%)과 쇼다운에서 드러난 블러프 횟수 */
       recorder: Record<string, { hands: number; vpip: number; bluffs: number }> | null;
     };
@@ -766,6 +769,7 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
         drawPrompt: me.drawPrompt && state.phase === 'handEnd' ? { winnerName: nameById(me.drawPrompt.winnerId) } : null,
         contract: me.contract,
         lurkChoose: me.lurkChoose,
+        trapArmed: !!findAug(me, 'trap')?.armed,
         recorder: findAug(me, 'recorder')
           ? Object.fromEntries(
               state.players
@@ -845,6 +849,16 @@ function respondView(state: GameState, me: PlayerState, bb: number): RespondView
       input = 'bidCard';
       text = r.participants.includes(me.id) ? `카드 경매: 낙찰되면 공개된 카드를 고른 홀카드와 바꿉니다 (0 = 불참, 최소 ${bb})` : '카드 경매 입찰 중';
       break;
+    case 'infoToll': {
+      const augName = AUGMENTS[(r.params.extra?.augment as AugmentId) ?? 'thermal'].name;
+      input = 'accept';
+      text = r.participants.includes(me.id) ? `${owner}의 정보 통행료: ${2 * bb}칩(2BB)을 내고 「${augName}」 결과를 볼까요? 취소하면 사용 횟수를 돌려받습니다.` : isOwner ? `${name(target)}의 응답을 기다리는 중` : '응답 대기 중';
+      break;
+    }
+    case 'selectiveReveal':
+      input = 'card';
+      text = isOwner ? `${name(target)}이(가) 투시로 내 홀카드 1장을 확인합니다. 보여 줄 카드를 고르세요.` : '응답 대기 중';
+      break;
     case 'staredown': {
       input = 'strongWeak';
       const other = me.id === r.ownerId ? name(target) : owner;
@@ -853,6 +867,11 @@ function respondView(state: GameState, me: PlayerState, bb: number): RespondView
     }
     default:
       text = `${AUGMENTS[r.augment].name} 응답 대기 중`;
+  }
+  // 정보 통행료·선택적 노출: 누가 누구를 확인하는지는 당사자만 안다
+  const privateOffer = (r.augment === 'infoToll' || r.augment === 'selectiveReveal') && !isOwner && !r.participants.includes(me.id);
+  if (privateOffer) {
+    return { augment: null, name: '응답 대기', ownerId: '', ownerName: '', participants: [], needMe: false, input: null, text: '응답 대기 중', card: null, myAnswer: null, minBid: bb, maxBid: me.chips };
   }
   return {
     augment: r.augment,

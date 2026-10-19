@@ -1199,7 +1199,7 @@ function closeRound(state: GameState): void {
   switch (state.street) {
     case 'preflop':
       state.street = 'flop';
-      state.used.push({ card: state.burns[0], kind: 'burn' });
+      burnCard(state, 0);
       // 보관함: 바꾸지 않은 보관 카드는 사라진다
       for (const p of state.players) {
         if (!p.lockerReady) continue;
@@ -1216,13 +1216,13 @@ function closeRound(state: GameState): void {
       applyTurnRiver(state);
       applyEitherOr(state);
       state.street = 'turn';
-      state.used.push({ card: state.burns[1], kind: 'burn' });
+      burnCard(state, 1);
       revealTo(state, revealTarget(state, 1), '턴', true);
       if (startDeclareWindow(state, 'turn')) return;
       break;
     case 'turn':
       state.street = 'river';
-      state.used.push({ card: state.burns[2], kind: 'burn' });
+      burnCard(state, 2);
       revealTo(state, revealTarget(state, 2), '리버', true);
       if (startDeclareWindow(state, 'river')) return;
       break;
@@ -1233,6 +1233,14 @@ function closeRound(state: GameState): void {
       return;
   }
   startBettingRound(state, state.dealerIdx);
+}
+
+/** 번 카드 사용 (잔상 보유자에게 알림) */
+function burnCard(state: GameState, i: number): void {
+  const card = state.burns[i];
+  if (!card) return;
+  state.used.push({ card, kind: 'burn' });
+  for (const p of state.players) for (const a of [...p.augments]) PASSIVE[a.id]?.onBurn?.(ctxFor(state, p, a), card);
 }
 
 /** 턴과 리버 사이: 미리 본 두 카드의 공개 순서를 바꾸기로 했으면 바꾼다 */
@@ -1776,6 +1784,7 @@ export function resolveReaction(state: GameState): void {
         addLog(state, `${augLabel(decl.augment)} 효과가 적용되지 않았습니다: ${err} (횟수·세금 반환)`, { to: [owner.id] });
       } else {
         effect.resolve(ctx, decl.params, decl);
+        springTrap(state, owner, decl);
       }
     }
   }
@@ -1788,6 +1797,18 @@ export function resolveReaction(state: GameState): void {
   if (r.queue.length) dropPendingDeclarations(state);
   state.reaction = null;
   continueAfterReaction(state);
+}
+
+/** 덫: 나를 대상으로 한 지목형·정보형 증강이 발동하면 그 사용자의 보유 증강 전체가 나에게 보인다 */
+function springTrap(state: GameState, user: PlayerState, decl: Declaration): void {
+  const t = playerById(state, decl.params.targetId);
+  const def = AUGMENTS[decl.augment];
+  if (!t || t === user || !(def.targeted || def.category === '정보형')) return;
+  const trap = findAug(t, 'trap');
+  if (!trap?.armed) return;
+  trap.armed = false;
+  const list = user.augments.map((a) => `${AUGMENTS[a.id].name} ${'★'.repeat(AUGMENTS[a.id].stars)}`).join(', ') || '없음';
+  note(state, t, 'info', `덫: ${user.name}이(가) 나에게 증강을 썼습니다. ${user.name}의 보유 증강 — ${list}`, undefined, user.id);
 }
 
 /** 반응 대기 후 원래 단계의 흐름을 이어 간다 (효과로 상황이 바뀌었을 수 있음) */
@@ -2559,6 +2580,15 @@ function applyUseAugment(state: GameState, p: PlayerState, a: Extract<GameAction
     if (on && (aug.usesLeft ?? 0) <= 0) return '남은 사용 횟수가 없습니다.';
     aug.armed = on;
     addLog(state, `면제권 자동 사용: ${on ? '켜짐' : '꺼짐'}`, { to: [p.id] });
+    return null;
+  }
+  // 덫: 비공개로 설치 (알림·반응 대기 없음)
+  if (aug.id === 'trap') {
+    if ((aug.usesLeft ?? 0) <= 0 || aug.armed) return '이미 설치했습니다.';
+    aug.usesLeft = 0;
+    aug.armed = true;
+    countUse(state, 'trap');
+    addLog(state, '덫: 설치했습니다. 다음에 나를 대상으로 한 증강의 사용자가 가진 증강이 모두 보입니다.', { to: [p.id] });
     return null;
   }
   if (aug.id === 'disguise') {

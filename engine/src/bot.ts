@@ -174,6 +174,8 @@ export function chooseBotAction(view: PlayerView, rng: Rng): GameAction | null {
       case 'accept':
         if (rs.augment === 'pickMe') return { type: 'respond', accept: true };
         if (rs.augment === 'loanShark') return { type: 'respond', accept: you.chips < 15 * bb };
+        // 정보 통행료: 팟이 10BB 이상일 때만 내고 진행
+        if (rs.text.includes('정보 통행료')) return { type: 'respond', accept: view.pot >= 10 * bb };
         return { type: 'respond', accept: chance(rng, 50) };
       case 'card':
         return { type: 'respond', cardIndex: low() };
