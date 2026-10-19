@@ -5,7 +5,7 @@
 // 새 증강은 augments.ts 에 정의를 추가하고 여기에 효과를 등록하면 된다.
 
 import { Card, cardToken, fullDeck, isCard, rankOf, rankName, suitOf } from './cards.js';
-import { AUGMENTS, AugmentId, canHold, isActiveAugment, isAugmentId } from './augments.js';
+import { AUGMENTS, AugmentId, canHold, isActiveAugment, isAugmentId, rollOneAugment } from './augments.js';
 import { blackjackCards, isMadeHand, Category, CATEGORY_NAMES } from './evaluator.js';
 import { pickOne } from './rng.js';
 import { compareContenders } from './showdown.js';
@@ -32,6 +32,9 @@ import {
   findAug,
   handInProgress,
   holeVisible,
+  newOwnedAugment,
+  poolSet,
+  takenByOthers,
   idxOf,
   live,
   nameOf,
@@ -380,6 +383,34 @@ function turnRiverIdx(state: GameState): number[] {
 
 function realMade(state: GameState, p: PlayerState): boolean {
   return isMadeHand(p.hole, evalBoard(state), rulesFor(p));
+}
+
+// ───────────────────────── 연승 (폭주기관차·연승 수당 공용 카운터) ─────────────────────────
+
+/** 핸드가 끝날 때 한 번만 연승을 센다. 연승 수당은 모든 팟 승리, 폭주기관차만 가졌으면 최종 팟 5BB 이상 */
+function updateStreak(ctx: Ctx, result: HandResult): void {
+  const { state, owner } = ctx;
+  if (!active(owner) || owner.streakHand === result.hand) return;
+  owner.streakHand = result.hand;
+  const total = result.pots.reduce((s, p) => s + p.amount, 0);
+  const won = (result.won[owner.id] ?? 0) > 0;
+  const bonus = findAug(owner, 'winBonus');
+  const counts = won && (!!bonus || total >= 5 * bbOf(state));
+  owner.streak = counts ? owner.streak + 1 : 0;
+  if (!counts) return;
+  if (owner.streak >= 2) addLog(state, `연승: ${owner.name} ${owner.streak}연승`);
+  // 연승 수당: 2연승 1BB, 3연승 2BB … 를 이번 핸드에 나에게 진 상대들이 나눠 낸다
+  if (bonus && owner.streak >= 2) {
+    const losers = state.players.filter((p) => p !== owner && p.inHand && (result.won[p.id] ?? 0) <= 0 && p.chips > 0);
+    if (!losers.length) return;
+    const amount = (owner.streak - 1) * bbOf(state);
+    const share = Math.floor(amount / losers.length);
+    let got = 0;
+    for (const p of losers) got += transfer(state, p, owner, share);
+    const text = `${owner.name}: 연승 수당 ${owner.streak}연승 — ${got}칩`;
+    result.extras.push(text);
+    revealPassive({ ...ctx, aug: bonus }, `— ${owner.streak}연승, ${got}칩을 진 상대들에게서`);
+  }
 }
 
 // ───────────────────────── 증강 이동 (증강 셔플·대출 몰수·사냥꾼) ─────────────────────────
@@ -2190,6 +2221,125 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
     },
   },
 
+  // ═════════════════════════ 4차 풀: 경제/베팅형 ═════════════════════════
+
+  reserveOrder: {
+    check(ctx, params) {
+      const err = preflopBeforeAct(ctx);
+      if (err) return err;
+      const c = params.choice;
+      return isInt(c) && c >= 2 && c <= 14 ? null : '숫자를 고르세요.';
+    },
+    detail: (_ctx, p) => `— ${rankName(p.choice ?? 2)}`,
+    resolve(ctx, params) {
+      ctx.owner.reserveRank = params.choice!;
+    },
+  },
+
+  wanted: {
+    check(ctx, params) {
+      const err = betweenHandsCheck(ctx);
+      if (err) return err;
+      const t = targetOf(ctx, params);
+      if (!t || !active(t)) return '지목할 상대를 고르세요.';
+      return ctx.owner.wantedNext ? '이미 지목했습니다.' : null;
+    },
+    detail: (ctx, p) => `— 대상: ${nameOf(ctx.state, p.targetId ?? '')}`,
+    resolve(ctx, params) {
+      const t = targetOf(ctx, params)!;
+      ctx.owner.wantedNext = t.id;
+      addLog(ctx.state, `현상수배: 다음 핸드에 ${ctx.owner.name}이(가) 쇼다운에서 ${t.name}을(를) 이기면 ${5 * bbOf(ctx.state)}칩을 추가로 받습니다`);
+    },
+  },
+
+  nerveTest: {
+    check(ctx, params) {
+      const { state, owner } = ctx;
+      const la = state.lastAggression;
+      if (basePhase(state) !== 'betting' || state.street !== 'river') return '리버에서만 쓸 수 있습니다.';
+      if (!la || la.seq !== state.betActionSeq || la.street !== 'river' || state.players[la.idx] !== owner) return '리버에서 내가 베팅·레이즈한 직후에만 쓸 수 있습니다.';
+      return validHoleIndex(owner, params.cardIndex) ? null : '공개할 홀카드를 고르세요.';
+    },
+    detail: (ctx, p) => (typeof p.cardIndex === 'number' && ctx.owner.hole[p.cardIndex] ? `— ${cardToken(ctx.owner.hole[p.cardIndex])} 공개` : ''),
+    resolve(ctx, params) {
+      const c = ctx.owner.hole[params.cardIndex!];
+      if (c && !ctx.owner.exposed.includes(c)) ctx.owner.exposed.push(c);
+    },
+  },
+
+  sideBet: {
+    check(ctx, params) {
+      const { state, owner } = ctx;
+      if (!handInProgress(state) || !owner.inHand || !owner.folded) return '내가 폴드한 핸드에서만 쓸 수 있습니다.';
+      if (state.players.filter(live).length < 2) return '남은 플레이어가 2명 이상일 때만 쓸 수 있습니다.';
+      if (owner.sideBetOn) return '이미 예측했습니다.';
+      if (owner.chips < 2 * bbOf(state)) return `칩(${2 * bbOf(state)})이 부족합니다.`;
+      const t = targetOf(ctx, params);
+      return t && live(t) ? null : '이길 사람을 고르세요.';
+    },
+    resolve(ctx, params) {
+      const { state, owner } = ctx;
+      const t = targetOf(ctx, params)!;
+      const paid = Math.min(2 * bbOf(state), owner.chips);
+      owner.chips -= paid;
+      state.deadMoney += paid;
+      owner.sideBetOn = t.id;
+      addLog(state, `사이드 베팅: ${owner.name}이(가) ${paid}칩을 팟에 넣고 승자를 예측했습니다`);
+      addLog(state, `사이드 베팅: 내 예측은 ${t.name}`, { to: [owner.id] });
+    },
+  },
+
+  betCap: {
+    check: (ctx) => betweenHandsCheck(ctx) ?? (ctx.owner.betCapNext ? '이미 다음 핸드에 걸어 두었습니다.' : null),
+    resolve(ctx) {
+      ctx.owner.betCapNext = true;
+    },
+  },
+
+  straw: {
+    check(ctx, params) {
+      const { state, owner } = ctx;
+      if (!handInProgress(state) || !owner.inHand || !owner.folded) return '내가 폴드한 뒤에만 쓸 수 있습니다.';
+      if (state.players.filter(live).length < 2) return '핸드에 2명 이상 남아 있을 때만 쓸 수 있습니다.';
+      if (owner.strawOn) return '이미 지목했습니다.';
+      const t = targetOf(ctx, params);
+      return t && live(t) ? null : '지목할 사람을 고르세요.';
+    },
+    resolve(ctx, params) {
+      const t = targetOf(ctx, params)!;
+      ctx.owner.strawOn = t.id;
+      addLog(ctx.state, `빨대 꼽기: 내 지목은 ${t.name} (핸드가 끝나면 공개)`, { to: [ctx.owner.id] });
+    },
+  },
+
+  cataclysm: {
+    check: (ctx) => betweenHandsCheck(ctx) ?? (ctx.owner.augments.length < 2 ? '바꿀 증강이 없습니다.' : null),
+    resolve(ctx) {
+      const { state, owner } = ctx;
+      const changes: string[] = [];
+      const pool = poolSet(state);
+      for (const old of [...owner.augments]) {
+        if (old.id === 'cataclysm') continue;
+        const from = AUGMENTS[old.id].stars;
+        // ★ → ★★, ★★ → ★★★, ★★★ → 몰?루 상자(별부터 무작위)
+        const stars = (from === 1 ? 2 : from === 2 ? 3 : 1 + state.rng.int(3)) as 1 | 2 | 3;
+        const keep = owner.augments.filter((a) => a !== old).map((a) => a.id);
+        const id = rollOneAugment(stars, keep, state.rng, takenByOthers(state, owner), pool);
+        if (!id) continue;
+        const fresh = newOwnedAugment(state, id);
+        // 잠복으로 숨긴 증강은 바뀐 뒤에도 숨김
+        fresh.hidden = old.hidden;
+        owner.augments[owner.augments.indexOf(old)] = fresh;
+        state.stats.picks[id] = (state.stats.picks[id] ?? 0) + 1;
+        changes.push(`${AUGMENTS[old.id].name} → ${AUGMENTS[id].name} ${'★'.repeat(AUGMENTS[id].stars)}${from === 3 ? ' (몰?루 상자)' : ''}`);
+      }
+      // 대격변은 쓰고 나면 사라진다
+      owner.augments = owner.augments.filter((a) => a.id !== 'cataclysm');
+      addLog(state, `대격변: ${owner.name}의 증강이 새 증강으로 바뀌었습니다`);
+      note(state, owner, 'augment', `대격변: ${changes.join(', ') || '바뀐 증강 없음'}`);
+    },
+  },
+
   // ═════════════════════════ 4차 풀: 족보 변형형 ═════════════════════════
 
   shadow: {
@@ -2328,7 +2478,7 @@ export const PASSIVE: Partial<Record<AugmentId, PassiveEffect>> = {
       const fromBets = Math.min(refund, owner.contributed);
       owner.contributed -= fromBets;
       owner.streetBet = Math.max(0, owner.streetBet - fromBets);
-      const fromDead = Math.min(refund - fromBets, state.deadMoney);
+      const fromDead = Math.min(refund - fromBets, Math.max(0, state.deadMoney));
       state.deadMoney -= fromDead;
       owner.chips += fromBets + fromDead;
       revealPassive(ctx, `— 낸 칩 ${paid}의 25%인 ${fromBets + fromDead}칩을 팟에서 환급`);
@@ -2571,14 +2721,7 @@ export const PASSIVE: Partial<Record<AugmentId, PassiveEffect>> = {
   },
 
   runaway: {
-    onHandEnd(ctx, result) {
-      const { state, owner } = ctx;
-      if (!active(owner)) return;
-      const total = result.pots.reduce((s, p) => s + p.amount, 0);
-      const won = (result.won[owner.id] ?? 0) > 0 && total >= 5 * bbOf(state);
-      owner.streak = won ? owner.streak + 1 : 0;
-      if (won && owner.streak >= 3) addLog(state, `폭주기관차: ${owner.name} ${owner.streak}연승`);
-    },
+    onHandEnd: (ctx, result) => updateStreak(ctx, result),
     onPickRound(ctx) {
       const { state, owner } = ctx;
       if (owner.streak < 3 || !owner.pickOptions) return;
@@ -2639,6 +2782,138 @@ export const PASSIVE: Partial<Record<AugmentId, PassiveEffect>> = {
       for (const c of info.cards ?? []) state.used.push({ card: c, kind: 'called' });
       revealPassive(ctx, `— ${looker.name}이(가) 「${INFO_NAME[kind]}」으로 확인함`);
       addLog(state, `공개 청문회: ${looker.name}${info.text}`);
+    },
+  },
+
+  winBonus: {
+    onHandEnd: (ctx, result) => updateStreak(ctx, result),
+  },
+
+  savings: {
+    onFold(ctx) {
+      if (ctx.state.street === 'preflop') ctx.owner.savings++;
+    },
+    onHandEnd(ctx, result) {
+      const { state, owner } = ctx;
+      if ((result.won[owner.id] ?? 0) <= 0 || owner.savings <= 0) return;
+      const amt = Math.floor((owner.savings * bbOf(state)) / 10);
+      owner.savings = 0;
+      if (amt <= 0) return;
+      owner.chips += amt;
+      state.stats.bankChips += amt;
+      result.extras.push(`${owner.name}: 적금 ${amt}칩 (은행)`);
+      revealPassive(ctx, `— 적립한 ${amt}칩을 은행에서`);
+    },
+  },
+
+  smallPot: {
+    onHandEnd(ctx, result) {
+      const { state, owner, aug } = ctx;
+      if ((aug.usesLeft ?? 0) <= 0) return;
+      const total = result.pots.reduce((s, p) => s + p.amount, 0);
+      const winners = Object.entries(result.won).filter(([, w]) => w > 0).map(([id]) => id);
+      if (winners.length !== 1 || winners[0] !== owner.id || total > 6 * bbOf(state)) return;
+      aug.usesLeft = (aug.usesLeft ?? 0) - 1;
+      owner.chips += bbOf(state);
+      state.stats.bankChips += bbOf(state);
+      result.extras.push(`${owner.name}: 소액 전문 ${bbOf(state)}칩 (은행)`);
+      revealPassive(ctx, `— 작은 팟 단독 승리 (남은 ${aug.usesLeft}회)`);
+    },
+  },
+
+  regroup: {
+    onHandEnd(ctx, result) {
+      const { state, owner, aug } = ctx;
+      if ((aug.usesLeft ?? 0) <= 0 || !result.showdown || !result.entries.some((e) => e.id === owner.id)) return;
+      if ((result.won[owner.id] ?? 0) > 0 || owner.chips <= 0) return;
+      aug.usesLeft = (aug.usesLeft ?? 0) - 1;
+      owner.chips += 2 * bbOf(state);
+      state.stats.bankChips += 2 * bbOf(state);
+      result.extras.push(`${owner.name}: 재정비 ${2 * bbOf(state)}칩 (은행)`);
+      revealPassive(ctx, '— 쇼다운에서 지고 살아남아 2BB');
+    },
+  },
+
+  coHarvest: {
+    onHandEnd(ctx, result) {
+      const { state, owner, aug } = ctx;
+      if ((aug.usesLeft ?? 0) <= 0 || !result.showdown) return;
+      // 같은 팟(같은 판정 단위)을 동점으로 나눠 받았을 때만
+      const tie = result.pots.some((p) => (p.units ? p.units.some((u) => u.winners.length >= 2 && u.winners.includes(owner.id)) : p.winners.length >= 2 && p.winners.includes(owner.id)));
+      if (!tie) return;
+      aug.usesLeft = (aug.usesLeft ?? 0) - 1;
+      owner.chips += 2 * bbOf(state);
+      state.stats.bankChips += 2 * bbOf(state);
+      result.extras.push(`${owner.name}: 공동 수확 ${2 * bbOf(state)}칩 (은행)`);
+      revealPassive(ctx, '— 동점으로 나눠 받음');
+    },
+  },
+
+  revenge: {
+    onHandEnd(ctx, result) {
+      const { state, owner } = ctx;
+      if (!result.showdown || !result.entries.some((e) => e.id === owner.id)) return;
+      const won = (result.won[owner.id] ?? 0) > 0;
+      const foe = playerById(state, owner.nemesis);
+      if (won && foe && result.entries.some((e) => e.id === foe.id) && (result.won[foe.id] ?? 0) <= 0) {
+        const total = result.pots.reduce((s, p) => s + p.amount, 0);
+        const paid = transfer(state, foe, owner, Math.floor(total * 0.15));
+        const text = `${owner.name}: 복수 — ${foe.name}에게서 팟의 15%인 ${paid}칩`;
+        result.extras.push(text);
+        revealPassive(ctx, `— ${foe.name}에게 복수 (${paid}칩)`);
+      }
+      // 다음 복수 대상: 이번 쇼다운에서 나를 이긴 사람 (이겼으면 없음)
+      owner.nemesis = won ? null : (result.pots[0]?.winners.find((id) => id !== owner.id) ?? null);
+    },
+  },
+
+  wanted: {
+    onHandEnd(ctx, result) {
+      const { state, owner } = ctx;
+      const t = playerById(state, owner.wanted);
+      if (!t || !result.showdown) return;
+      if (!result.entries.some((e) => e.id === owner.id) || !result.entries.some((e) => e.id === t.id)) return;
+      if ((result.won[owner.id] ?? 0) <= 0 || (result.won[t.id] ?? 0) > 0) return;
+      // 지목형: 철벽이면 막힌다
+      if (t.ironWall) return addLog(state, `현상수배: ${t.name}의 철벽에 막혔습니다`);
+      const paid = transfer(state, t, owner, 5 * bbOf(state));
+      result.extras.push(`${owner.name}: 현상수배 — ${t.name}에게서 ${paid}칩`);
+      addLog(state, result.extras.at(-1)!);
+    },
+  },
+
+  nerveTest: {
+    onHandEnd(ctx, result) {
+      const { state, owner } = ctx;
+      if (result.showdown || (result.won[owner.id] ?? 0) <= 0 || !owner.exposed.length || !findAug(owner, 'nerveTest')?.revealed) return;
+      const folder = playerById(state, state.lastFolderId);
+      if (!folder || folder === owner) return;
+      const paid = transfer(state, folder, owner, 3 * bbOf(state));
+      result.extras.push(`${owner.name}: 배짱 시험 성공 — ${folder.name}에게서 ${paid}칩`);
+      addLog(state, result.extras.at(-1)!);
+    },
+  },
+
+  straw: {
+    onHandEnd(ctx, result) {
+      const { state, owner } = ctx;
+      const t = playerById(state, owner.strawOn);
+      if (!t) return;
+      addLog(state, `빨대 꼽기: ${owner.name}의 지목은 ${t.name}이었습니다`);
+      const tw = result.won[t.id] ?? 0;
+      if (tw <= 0) return;
+      // 이번 핸드에 낸 칩을 승자의 몫에서 (보험 환급분과 합쳐 100%까지)
+      const paid = transfer(state, t, owner, Math.min(owner.contributed, tw));
+      result.won[t.id] = tw - paid;
+      result.extras.push(`${owner.name}: 빨대 꼽기 적중 — ${t.name}의 몫에서 ${paid}칩`);
+      addLog(state, result.extras.at(-1)!);
+    },
+  },
+
+  sideBet: {
+    onHandEnd(ctx) {
+      const { state, owner } = ctx;
+      if (owner.sideBetOn) addLog(state, `사이드 베팅: ${owner.name}의 예측은 ${nameOf(state, owner.sideBetOn)}이었습니다`);
     },
   },
 

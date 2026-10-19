@@ -196,16 +196,54 @@ export function announceAnonymous(state: GameState, p: PlayerState): void {
   addLog(state, `${p.name}님이 비공개 증강을 사용했습니다`, { except: [p.id] });
 }
 
+/** 이번 핸드에 더 낼 수 있는 칩 (한도 설정이 걸려 있으면 한도까지) */
+export function stackOf(p: PlayerState): number {
+  return p.betCap !== null ? Math.max(0, Math.min(p.chips, p.betCap - p.contributed)) : p.chips;
+}
+
 export function putChips(p: PlayerState, amount: number): number {
-  const amt = Math.max(0, Math.min(amount, p.chips));
+  const amt = Math.max(0, Math.min(amount, stackOf(p)));
   p.chips -= amt;
   p.streetBet += amt;
   p.contributed += amt;
-  if (p.chips === 0 && p.inHand) {
+  // 칩이 바닥나거나 한도 설정 한도에 닿으면 올인과 같은 규칙
+  if ((p.chips === 0 || (p.betCap !== null && p.contributed >= p.betCap)) && p.inHand) {
     p.allIn = true;
     p.wentAllIn = true;
   }
   return amt;
+}
+
+/** 이번 게임의 증강 풀 (null = 전체) */
+export function poolSet(state: GameState): ReadonlySet<AugmentId> | null {
+  return state.options.pool ? new Set(state.options.pool) : null;
+}
+
+/** 다른 사람이 가진 유일 증강 (선택지에서 뺀다) */
+export function takenByOthers(state: GameState, p: PlayerState): AugmentId[] {
+  return [...state.players, ...state.joiners.map((j) => j.player)]
+    .filter((x) => x !== p)
+    .flatMap((x) => x.augments.map((a) => a.id))
+    .filter((id) => AUGMENTS[id].unique);
+}
+
+/** 새 보유 증강 (횟수는 처음부터 꽉 참) */
+export function newOwnedAugment(state: GameState, id: AugmentId, wildRank?: number, parity?: 'even' | 'odd'): OwnedAugment {
+  const def = AUGMENTS[id];
+  const aug: OwnedAugment = {
+    id,
+    usesLeft: def.uses?.per === 'game' ? def.uses.count : null,
+    usedThisHand: false,
+    revealed: false,
+    publicId: null,
+    acquiredHand: state.handNumber,
+  };
+  if (id === 'favoritism') aug.wildRank = wildRank ?? 2 + state.rng.int(13);
+  if (id === 'exemption') aug.armed = false;
+  if (id === 'disguise') aug.fakeId = null;
+  if (id === 'shepherd') aug.fakeUsed = false;
+  if (id === 'parity') aug.parity = parity ?? (state.rng.int(2) ? 'even' : 'odd');
+  return aug;
 }
 
 /** 지금 족보 순위가 뒤집혀 있는가: 밥상 뒤집기 횟수 + 언더독, 짝수 번이면 상쇄 */

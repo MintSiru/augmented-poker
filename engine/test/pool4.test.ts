@@ -449,3 +449,193 @@ describe('4차 카드 조작형', () => {
     expect(s.result!.entries.find((e) => e.id === 'p1')!.cards).toEqual(['Qc', 'Jh']);
   });
 });
+
+describe('4차 경제/베팅형', () => {
+  // p1 딜러, p2 SB, p3 BB. 보드 As Kd 7c 4h 2s 에서 p2(QQ) > p1(9 하이) > p3(9 하이, 낮은 키커)
+  const HANDS = { p1: cards('9c 8d'), p2: cards('Qc Qh'), p3: cards('9d 6c') };
+  const deal = (hands: Record<string, string[]> = HANDS, board = BOARD) => ({ board: cards(board), hands });
+  /** 다음 핸드의 카드를 정하고 시작한다 */
+  const next = (s: GameState, d: DebugDeal) => {
+    ok(debugSetNextDeal(s, d));
+    resolveAll(s);
+    ok(startNextHand(s));
+    resolveAll(s);
+  };
+
+  it('예약 주문: 첫 행동 전에 숫자를 공개로 고르고, 플랍에 나오면 팟에서 1BB', () => {
+    const s = setup(3, { augs: { p1: ['reserveOrder'] }, deal: deal() });
+    use(s, 'p1', 'reserveOrder', { choice: 7 });
+    resolveAll(s);
+    expect(view(s, 'p3').players.find((p) => p.id === 'p1')!.reserveRank).toBe(7);
+    act(s, 'p1', { type: 'call' });
+    expect(tryUse(s, 'p1', 'reserveOrder', { choice: 7 }).ok).toBe(false);
+    passUntil(s, () => s.street === 'flop');
+    expect(P(s, 'p1').chips).toBe(1000);
+  });
+
+  it('현상수배: 다음 핸드 쇼다운에서 대상을 이기면 5BB를 대상에게서', () => {
+    const s = setup(3, { augs: { p1: ['wanted'] }, deal: deal() });
+    toShowdown(s);
+    use(s, 'p1', 'wanted', { targetId: 'p3' });
+    resolveAll(s);
+    expect(view(s, 'p1').you.extra.wanted).toBe('P3');
+    const before = P(s, 'p3').chips;
+    next(s, deal({ p1: cards('Qc Qh'), p2: cards('9c 8d'), p3: cards('9d 6c') }));
+    expect(P(s, 'p1').wanted).toBe('p3');
+    toShowdown(s);
+    expect(s.result!.extras.some((t) => t.includes('현상수배'))).toBe(true);
+    // p3 는 블라인드 20 + 현상금 100
+    expect(P(s, 'p3').chips).toBe(before - 20 - 100);
+  });
+
+  it('사이드 베팅: 폴드 후 2BB를 걸고, 예측이 맞으면 4BB (예측은 본인만)', () => {
+    const s = setup(3, { augs: { p1: ['sideBet'] }, deal: deal() });
+    expect(tryUse(s, 'p1', 'sideBet', { targetId: 'p2' }).ok).toBe(false);
+    act(s, 'p1', { type: 'fold' });
+    use(s, 'p1', 'sideBet', { targetId: 'p2' });
+    resolveAll(s);
+    expect(view(s, 'p1').you.extra.sideBetOn).toBe('P2');
+    expect(view(s, 'p2').you.extra.sideBetOn).toBeNull();
+    toShowdown(s);
+    expect(P(s, 'p1').chips).toBe(1000 - 40 + 80);
+  });
+
+  it('한도 설정: 다음 핸드 최대 20BB까지만 내고, 넘는 베팅은 사이드 팟', () => {
+    const s = setup(3, { augs: { p1: ['betCap'] }, deal: deal() });
+    toShowdown(s);
+    use(s, 'p1', 'betCap');
+    resolveAll(s);
+    const before = P(s, 'p1').chips;
+    // 다음 핸드: p2 딜러, p3 SB, p1 BB, p2 먼저
+    next(s, deal());
+    expect(P(s, 'p1').betCap).toBe(400);
+    expect(view(s, 'p1').you.extra.betCap).toBe(400);
+    act(s, 'p2', { type: 'raise', amount: 800 });
+    act(s, 'p3', { type: 'fold' });
+    const l = legalActions(s, 'p1')!;
+    expect(l.allInAmount).toBe(400);
+    act(s, 'p1', { type: 'call' });
+    expect(P(s, 'p1').contributed).toBe(400);
+    toShowdown(s);
+    // p2(QQ) 승: p1 은 400만 잃고, 남는 400 은 p2 의 사이드 팟(돌려받음)
+    expect(P(s, 'p1').chips).toBe(before - 400);
+    expect(P(s, 'p1').betCap).toBe(400);
+  });
+
+  it('연승 수당·폭주기관차: 한 연승 카운터, 연승 수당은 작은 팟도 센다', () => {
+    const win = { p1: cards('Qc Qh'), p2: cards('9c 8d'), p3: cards('9d 6c') };
+    const s = setup(3, { augs: { p1: ['winBonus', 'runaway'] }, deal: deal(win) });
+    toShowdown(s);
+    expect(P(s, 'p1').streak).toBe(1);
+    next(s, deal(win));
+    toShowdown(s);
+    expect(P(s, 'p1').streak).toBe(2);
+    expect(view(s, 'p2').players.find((p) => p.id === 'p1')!.streak).toBe(2);
+    expect(s.result!.extras.some((t) => t.includes('연승 수당'))).toBe(true);
+  });
+
+  it('적금: 프리플랍 폴드마다 0.1BB 적립 (본인만), 팟을 이기면 은행에서', () => {
+    const s = setup(3, { augs: { p1: ['savings'] }, deal: deal() });
+    act(s, 'p1', { type: 'fold' });
+    expect(P(s, 'p1').savings).toBe(1);
+    expect(view(s, 'p1').you.extra.savings).toBe(2);
+    expect(view(s, 'p2').you.extra.savings).toBe(0);
+    toShowdown(s);
+    next(s, deal({ p1: cards('Qc Qh'), p2: cards('9c 8d'), p3: cards('9d 6c') }));
+    toShowdown(s);
+    expect(s.result!.extras.some((t) => t.includes('적금 2칩'))).toBe(true);
+    expect(P(s, 'p1').savings).toBe(0);
+  });
+
+  it('소액 전문: 6BB 이하 팟 단독 승리 시 1BB', () => {
+    const s = setup(3, { augs: { p1: ['smallPot'] }, deal: deal({ p1: cards('Qc Qh'), p2: cards('9c 8d'), p3: cards('9d 6c') }) });
+    toShowdown(s);
+    expect(P(s, 'p1').chips).toBe(1000 + 40 + 20);
+  });
+
+  it('재정비: 쇼다운에서 지고 칩이 남으면 2BB', () => {
+    const s = setup(3, { augs: { p1: ['regroup'] }, deal: deal() });
+    toShowdown(s);
+    expect(P(s, 'p1').chips).toBe(1000 - 20 + 40);
+  });
+
+  it('공동 수확: 동점으로 나눠 받으면 2BB', () => {
+    const s = setup(3, {
+      augs: { p1: ['coHarvest'] },
+      deal: deal({ p1: cards('9c 8d'), p2: cards('9d 8h'), p3: cards('3c 5c') }, 'As Kd Qc Jh 2s'),
+    });
+    toShowdown(s);
+    expect(s.result!.extras.some((t) => t.includes('공동 수확'))).toBe(true);
+    expect(P(s, 'p1').chips).toBe(1000 + 10 + 40);
+  });
+
+  it('복수: 쇼다운에서 나를 이긴 사람을 다음에 이기면 팟의 15% (대상은 본인만)', () => {
+    const s = setup(3, { augs: { p1: ['revenge'] }, deal: deal() });
+    toShowdown(s);
+    expect(P(s, 'p1').nemesis).toBe('p2');
+    expect(view(s, 'p1').you.extra.nemesis).toBe('P2');
+    expect(view(s, 'p2').you.extra.nemesis).toBeNull();
+    next(s, deal({ p1: cards('Qc Qh'), p2: cards('9c 8d'), p3: cards('9d 6c') }));
+    toShowdown(s);
+    expect(s.result!.extras.some((t) => t.includes('복수') && t.includes('9칩'))).toBe(true);
+  });
+
+  it('배짱 시험: 리버 베팅 직후 카드 1장 공개, 모두 폴드하면 마지막 폴드한 사람이 3BB', () => {
+    const s = setup(3, { augs: { p1: ['nerveTest'] }, deal: deal() });
+    passUntil(s, () => s.street === 'river' && s.phase === 'betting' && s.players[s.toAct!].id === 'p1');
+    expect(tryUse(s, 'p1', 'nerveTest', { cardIndex: 0 }).ok).toBe(false);
+    act(s, 'p1', { type: 'raise', amount: 40 });
+    use(s, 'p1', 'nerveTest', { cardIndex: 0 });
+    resolveAll(s);
+    expect(view(s, 'p2').players.find((p) => p.id === 'p1')!.exposed).toEqual(['9c']);
+    act(s, 'p2', { type: 'fold' });
+    const p3 = P(s, 'p3').chips;
+    act(s, 'p3', { type: 'fold' });
+    expect(P(s, 'p3').chips).toBe(p3 - 60);
+    expect(s.result!.extras.some((t) => t.includes('배짱 시험'))).toBe(true);
+  });
+
+  it('빨대 꼽기: 폴드 후 지목한 사람이 이기면 내가 낸 칩을 그 몫에서 돌려받는다', () => {
+    const s = setup(3, { augs: { p3: ['straw'] }, deal: deal() });
+    act(s, 'p1', { type: 'raise', amount: 60 });
+    act(s, 'p2', { type: 'call' });
+    act(s, 'p3', { type: 'fold' });
+    use(s, 'p3', 'straw', { targetId: 'p2' });
+    resolveAll(s);
+    expect(view(s, 'p3').you.extra.strawOn).toBe('P2');
+    expect(view(s, 'p1').you.extra.strawOn).toBeNull();
+    toShowdown(s);
+    expect(P(s, 'p3').chips).toBe(1000);
+    expect(P(s, 'p2').chips).toBe(1000 + 60 + 20 - 20);
+  });
+
+  it('대격변: ★→★★, ★★→★★★, 대격변은 사라지고 잠복 숨김은 유지, 풀에서 꺼진 증강은 안 나온다', () => {
+    const s = setup(3, { augs: { p1: ['savings', 'revenge', 'cataclysm'] }, deal: deal() });
+    P(s, 'p1').augments[0].hidden = true;
+    const allowed = ALL_AUGMENT_IDS.filter((id) => (AUGMENTS[id].pool ?? 1) <= 2);
+    s.options.pool = allowed;
+    toShowdown(s);
+    use(s, 'p1', 'cataclysm');
+    resolveAll(s);
+    const augs = P(s, 'p1').augments;
+    expect(augs.map((a) => AUGMENTS[a.id].stars)).toEqual([2, 3]);
+    expect(augs.some((a) => a.id === 'cataclysm')).toBe(false);
+    expect(augs[0].hidden).toBe(true);
+    for (const a of augs) expect(allowed).toContain(a.id);
+    expect(lastNote(s, 'p1')).toContain('대격변');
+  });
+
+  it('대격변: ★★★는 몰?루 상자 — 별 등급이 무작위 (1/3씩)', () => {
+    const counts: number[] = [0, 0, 0, 0];
+    for (let seed = 1; seed <= 60; seed++) {
+      const s = setup(3, { seed, augs: { p1: ['foresight', 'cataclysm'] }, deal: deal() });
+      toShowdown(s);
+      use(s, 'p1', 'cataclysm');
+      resolveAll(s);
+      counts[AUGMENTS[P(s, 'p1').augments[0].id].stars]++;
+    }
+    expect(counts[1]).toBeGreaterThan(5);
+    expect(counts[2]).toBeGreaterThan(5);
+    expect(counts[3]).toBeGreaterThan(5);
+  });
+});

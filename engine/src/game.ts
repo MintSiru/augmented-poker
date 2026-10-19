@@ -2,7 +2,7 @@
 // 네트워크/화면 코드를 참조하지 않는 순수 모듈. 증강 효과는 effects.ts 레지스트리를 통해 부른다.
 
 import { Card, cardToken, fullDeck, rankName, rankOf } from './cards.js';
-import { AUGMENTS, AugmentId, canHold, isAugmentId, rollAugmentOffer, uniqueTaken } from './augments.js';
+import { AUGMENTS, AugmentId, canHold, isAugmentId, rollAugmentOffer } from './augments.js';
 import { evaluatePlayerHand, VARIANT_LABEL, Category, CATEGORY_NAMES } from './evaluator.js';
 import { computePots, splitPot } from './pots.js';
 import { cryptoRng, pickOne, Rng, shuffle } from './rng.js';
@@ -39,6 +39,10 @@ import {
   ownCardsHidden,
   seatOrderFromDealer,
   taxError,
+  stackOf,
+  poolSet,
+  takenByOthers,
+  newOwnedAugment,
 } from './core.js';
 import { ACTIVE, Ctx, EngineOps, holeCardCount, PASSIVE, TASKS, windowOptions, windowTargets, windowValidParams } from './effects.js';
 import { decidePot, type Contender, type PotDecision } from './showdown.js';
@@ -67,7 +71,7 @@ import type {
   TableEffects,
 } from './types.js';
 
-export { blindsAt, bigBlindAt, niceRound, STANDARD_MULTIPLIERS, currentBlinds, findAug } from './core.js';
+export { blindsAt, bigBlindAt, niceRound, STANDARD_MULTIPLIERS, currentBlinds, findAug, poolSet } from './core.js';
 
 export const MAX_PLAYERS = 8;
 /** 증강 선언 후 효과 적용 전 반응 대기 시간 (카운터 스펠 보유 여부와 무관하게 항상 같다) */
@@ -184,6 +188,16 @@ function newPlayer(np: NewPlayer, seat: number, chips: number): PlayerState {
     envelope: null,
     prepay: false,
     frozen: null,
+    betCap: null,
+    betCapNext: false,
+    savings: 0,
+    reserveRank: null,
+    wanted: null,
+    wantedNext: null,
+    sideBetOn: null,
+    strawOn: null,
+    nemesis: null,
+    streakHand: 0,
   };
 }
 
@@ -412,37 +426,14 @@ function startPickRound(state: GameState): void {
   }
 }
 
-/** 이번 게임의 증강 풀 (null = 전체) */
-export function poolSet(state: GameState): ReadonlySet<AugmentId> | null {
-  return state.options.pool ? new Set(state.options.pool) : null;
-}
-
 /** 개발용 통계: 선택지에 나온 횟수 */
 function countOffer(state: GameState, offer: AugmentId[]): void {
   for (const id of offer) state.stats.offered[id] = (state.stats.offered[id] ?? 0) + 1;
 }
 
-/** 다른 사람이 가진 유일 증강 (선택지에서 뺀다) */
-function takenByOthers(state: GameState, p: PlayerState): AugmentId[] {
-  return uniqueTaken([...state.players, ...state.joiners.map((j) => j.player)].filter((x) => x !== p).flatMap((x) => x.augments.map((a) => a.id)));
-}
-
 export function grantAugment(state: GameState, p: PlayerState, id: AugmentId, wildRank?: number, parity?: 'even' | 'odd'): OwnedAugment {
   if (findAug(p, id)) throw new Error('이미 보유한 증강입니다.');
-  const def = AUGMENTS[id];
-  const aug: OwnedAugment = {
-    id,
-    usesLeft: def.uses?.per === 'game' ? def.uses.count : null,
-    usedThisHand: false,
-    revealed: false,
-    publicId: null,
-    acquiredHand: state.handNumber,
-  };
-  if (id === 'favoritism') aug.wildRank = wildRank ?? 2 + state.rng.int(13);
-  if (id === 'exemption') aug.armed = false;
-  if (id === 'disguise') aug.fakeId = null;
-  if (id === 'shepherd') aug.fakeUsed = false;
-  if (id === 'parity') aug.parity = parity ?? (state.rng.int(2) ? 'even' : 'odd');
+  const aug = newOwnedAugment(state, id, wildRank, parity);
   p.augments.push(aug);
   state.stats.picks[id] = (state.stats.picks[id] ?? 0) + 1;
   for (const a of [...p.augments]) PASSIVE[a.id]?.onAcquire?.(ctxFor(state, p, a), aug);
@@ -842,6 +833,11 @@ function resetHandState(state: GameState): void {
     p.exposed = [];
     p.envelope = null;
     p.prepay = false;
+    p.betCap = null;
+    p.reserveRank = null;
+    p.wanted = null;
+    p.sideBetOn = null;
+    p.strawOn = null;
     for (const a of p.augments) a.usedThisHand = false;
   }
   state.board = [];
@@ -981,6 +977,21 @@ function beginHand(state: GameState): void {
   if (!betweenHands(state)) return;
   resetHandState(state);
   for (const p of state.players) p.lurkChoose = false;
+  // 한도 설정·현상수배: 핸드 사이에 걸어 둔 것을 이번 핸드에
+  const { bb: capBB } = currentBlinds(state);
+  for (const p of state.players) {
+    if (p.betCapNext) {
+      p.betCapNext = false;
+      if (active(p)) {
+        p.betCap = 20 * capBB;
+        addLog(state, `한도 설정: 이번 핸드 ${p.name}은(는) 최대 ${p.betCap}칩까지만 냅니다`);
+      }
+    }
+    if (p.wantedNext) {
+      p.wanted = p.wantedNext;
+      p.wantedNext = null;
+    }
+  }
   // 운명 공동체: 예약된 팀으로 이번 핸드를 진행 (둘 다 남아 있는 팀만)
   if (state.teamsNext) {
     state.teams = state.teamsNext.filter((t) => t.every((id) => active(playerById(state, id)!)));
@@ -1270,6 +1281,19 @@ function closeRound(state: GameState): void {
         addLog(state, '보관함: 보관한 카드를 쓰지 않아 사라졌습니다.', { to: [p.id] });
       }
       revealTo(state, revealTarget(state, 0), '플랍', false);
+      // 예약 주문: 지정한 숫자가 플랍에 나오고 핸드에 남아 있으면 팟에서 1BB
+      for (const p of state.players) {
+        if (p.reserveRank === null || !live(p)) continue;
+        const flop = state.board.slice(0, state.boardRevealed);
+        if (!flop.some((c) => rankOf(c) === p.reserveRank)) continue;
+        const pot = state.players.reduce((sum, x) => sum + x.contributed, 0) + state.deadMoney;
+        const amt = Math.min(currentBlinds(state).bb, Math.max(0, pot));
+        if (amt <= 0) continue;
+        p.chips += amt;
+        state.deadMoney -= amt;
+        const ro = findAug(p, 'reserveOrder');
+        if (ro) announceNamed(state, p, ro, '발동', `— 플랍에 ${rankName(p.reserveRank)}이(가) 나와 팟에서 ${amt}칩`);
+      }
       // 복기 노트용: 플랍 시점의 족보 종류
       for (const p of state.players) if (live(p) && p.hole.length) state.flopCategory[p.id] = handEvalFor(state, p).value.category;
       if (startDiscardPhase(state)) return;
@@ -1365,7 +1389,7 @@ function applyBet(state: GameState, idx: number, a: BetAction): string | null {
       doFold(state, p, false);
       break;
     case 'check':
-      if (toCall > 0) return `체크할 수 없습니다. 콜 금액은 ${Math.min(toCall, p.chips)}입니다.`;
+      if (toCall > 0) return `체크할 수 없습니다. 콜 금액은 ${Math.min(toCall, stackOf(p))}입니다.`;
       p.lastAction = '체크';
       addLog(state, `${p.name}: 체크`);
       break;
@@ -1381,7 +1405,7 @@ function applyBet(state: GameState, idx: number, a: BetAction): string | null {
     case 'raise':
     case 'allin': {
       const level = p.streetBet + p.streetShort;
-      const maxTo = level + p.chips;
+      const maxTo = level + stackOf(p);
       const target = a.type === 'allin' ? maxTo : a.amount;
       if (typeof target !== 'number' || !Number.isInteger(target) || target <= 0) return '금액이 올바르지 않습니다.';
       if (target > maxTo) return '보유 칩보다 많이 걸 수 없습니다.';
@@ -1389,7 +1413,7 @@ function applyBet(state: GameState, idx: number, a: BetAction): string | null {
         if (target !== maxTo && target > state.currentBet && !p.forcedCall) return '상대가 모두 올인해 레이즈할 수 없습니다. 콜하세요.';
         if (target !== maxTo) return `레이즈 금액은 ${state.currentBet + state.minRaise} 이상이어야 합니다.`;
         if (toCall === 0) return '콜할 금액이 없습니다. 체크하세요.';
-        if (p.forcedCall && p.chips > toCall) return '강제 집행 대상이라 콜만 할 수 있습니다.';
+        if (p.forcedCall && stackOf(p) > toCall) return '강제 집행 대상이라 콜만 할 수 있습니다.';
         if (state.street === 'preflop') p.vpipHand = true;
         putChips(p, toCall);
         p.lastAction = p.allIn ? `올인 ${p.streetBet}` : `콜 ${p.streetBet}`;
@@ -2296,6 +2320,24 @@ function showdown(state: GameState): void {
       addLog(state, text);
     }
   }
+  // 사이드 베팅: 예측이 맞으면 팟을 나누기 전에 4BB를 돌려받는다
+  for (const p of state.players) {
+    if (!p.sideBetOn || !p.inHand) continue;
+    const hit = decisions[0]?.some((u) => u.winners.includes(p.sideBetOn!));
+    if (!hit) continue;
+    let refund = 4 * currentBlinds(state).bb;
+    let got = 0;
+    for (const pot of pots) {
+      const take = Math.min(refund, pot.amount);
+      pot.amount -= take;
+      refund -= take;
+      got += take;
+    }
+    p.chips += got;
+    const text = `${p.name}: 사이드 베팅 적중 — 팟에서 ${got}칩`;
+    extras.push(text);
+    addLog(state, text);
+  }
   const won: Record<string, number> = {};
   // 운명 공동체: 팀원이 받은 몫 (각자 낸 칩 한도)
   const teamGot = new Map<string, number>();
@@ -2442,7 +2484,17 @@ function endHandUncontested(state: GameState, winner: PlayerState): void {
   dropPendingDeclarations(state);
   state.reaction = null;
   returnUncalled(state);
-  const total = state.players.reduce((s, p) => s + p.contributed, 0) + state.deadMoney;
+  let total = state.players.reduce((s, p) => s + p.contributed, 0) + state.deadMoney;
+  const extras: string[] = [];
+  // 사이드 베팅: 예측이 맞으면 팟을 나누기 전에 4BB
+  for (const p of state.players) {
+    if (p.sideBetOn !== winner.id || !p.inHand) continue;
+    const got = Math.min(4 * currentBlinds(state).bb, total);
+    total -= got;
+    p.chips += got;
+    extras.push(`${p.name}: 사이드 베팅 적중 — 팟에서 ${got}칩`);
+    addLog(state, extras.at(-1)!);
+  }
   winner.chips += total;
   addLog(state, `${winner.name} 팟 ${total}칩 획득 (나머지 모두 폴드)`);
   // 쇼맨십: 쇼다운 없이 이겼으면 카드를 자진 공개할지 고른다
@@ -2459,7 +2511,7 @@ function endHandUncontested(state: GameState, winner: PlayerState): void {
     pots: [{ amount: total, eligible: [winner.id], winners: [winner.id] }],
     won: { [winner.id]: total },
     table: tableEffectNotes(state),
-    extras: [],
+    extras,
   });
 }
 
@@ -2915,23 +2967,24 @@ export function legalActions(state: GameState, playerId: string): LegalActions |
   const p = state.players[idx];
   const toCall = owed(state, p);
   const level = p.streetBet + p.streetShort;
-  const maxTo = level + p.chips;
-  const raise = !p.forcedCall && canRaise(state, p) && othersCanRespond(state, p) && p.chips > toCall;
+  const stack = stackOf(p);
+  const maxTo = level + stack;
+  const raise = !p.forcedCall && canRaise(state, p) && othersCanRespond(state, p) && stack > toCall;
   const fr = findAug(p, 'freeRide');
   const freeRide = !!fr && (fr.usesLeft ?? 0) > 0 && !ACTIVE.freeRide!.check(ctxFor(state, p, fr), {}, false) && !taxError(state, p);
   return {
     fold: !p.forcedCall && !noFold(state, p),
     check: toCall === 0,
     call: toCall > 0,
-    callAmount: Math.min(toCall, p.chips),
+    callAmount: Math.min(toCall, stack),
     raise,
     minRaiseTo: Math.min(state.currentBet + state.minRaise, maxTo),
     maxRaiseTo: maxTo,
-    allIn: p.chips > 0 && (raise || p.chips <= toCall),
+    allIn: stack > 0 && (raise || stack <= toCall),
     allInAmount: maxTo,
     opening: state.currentBet === 0,
     freeRide,
-    freeRideAmount: Math.min(Math.ceil(toCall / 2), p.chips),
+    freeRideAmount: Math.min(Math.ceil(toCall / 2), stack),
     forced: p.forcedCall,
   };
 }

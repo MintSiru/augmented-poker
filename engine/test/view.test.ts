@@ -130,6 +130,13 @@ function perturb(s: GameState, viewerId: string, rng: Rng): GameState {
     q.blindsPaid = rng.int(4);
     if (q.eitherOr) q.eitherOr.pick = rng.int(2) ? rng.int(2) : null;
     if (q.contract !== null) q.contract = rng.int(2);
+    // 4차 경제형: 적금 적립액·복수 대상·사이드 베팅/빨대 지목은 본인만
+    const others = c.players.filter((x) => x !== q).map((x) => x.id);
+    q.savings = rng.int(10);
+    q.nemesis = rng.int(2) ? others[rng.int(others.length)] : null;
+    if (q.sideBetOn) q.sideBetOn = others[rng.int(others.length)];
+    if (q.strawOn) q.strawOn = others[rng.int(others.length)];
+    q.betCapNext = rng.int(2) === 0;
   }
   // 제안·입찰: 다른 사람의 응답(입찰가·비공개 선언)과 다른 사람이 제안한 내용
   if (c.respond) {

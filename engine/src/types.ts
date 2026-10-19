@@ -219,6 +219,23 @@ export interface PlayerState {
   prepay: boolean;
   /** 냉동 보관: 보관한 카드 (핸드가 바뀌어도 유지, 이후 덱에서 제외) */
   frozen: Card | null;
+  /** 한도 설정: 이번 핸드에 낼 수 있는 최대 칩 (null = 없음) / 다음 핸드에 걸 한도 */
+  betCap: number | null;
+  betCapNext: boolean;
+  /** 적금: 적립한 0.1BB 단위 수 (나에게만) */
+  savings: number;
+  /** 예약 주문: 이번 핸드에 지정한 숫자 (공개) */
+  reserveRank: number | null;
+  /** 현상수배: 이번 핸드·다음 핸드 대상 */
+  wanted: string | null;
+  wantedNext: string | null;
+  /** 사이드 베팅·빨대 꼽기: 비공개로 지목한 사람 */
+  sideBetOn: string | null;
+  strawOn: string | null;
+  /** 복수: 직전 쇼다운에서 나를 이긴 상대 (나에게만) */
+  nemesis: string | null;
+  /** 연승을 마지막으로 센 핸드 (연승 수당·폭주기관차가 같은 카운터를 쓰므로 한 번만) */
+  streakHand: number;
   /** 색맹: 이번 핸드 색 플러시 */
   colorBlindOn: boolean;
   /** 그림자 분신: 이번 판정에서 무늬를 바꾼 홀카드 */

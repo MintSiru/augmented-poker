@@ -125,6 +125,8 @@ export interface PublicPlayerView {
   team: number | null;
   /** 공개된 홀카드 1장씩 (미끼 공개·반쪽짜리 비밀·배짱 시험 등) */
   exposed: Card[];
+  /** 예약 주문으로 고른 숫자 (공개) */
+  reserveRank: number | null;
 }
 
 export interface NoteView {
@@ -385,6 +387,15 @@ export interface PlayerView {
       /** 봉인 봉투의 예비 카드 / 냉동 보관한 카드 (나에게만) */
       envelope: Card | null;
       frozen: Card | null;
+      /** 적금 적립액 (칩) · 복수 대상 이름 · 사이드 베팅/빨대 꼽기 지목 · 현상수배 대상 (나에게만) */
+      savings: number;
+      nemesis: string | null;
+      sideBetOn: string | null;
+      strawOn: string | null;
+      wanted: string | null;
+      /** 한도 설정: 이번 핸드 상한 / 다음 핸드 예약 */
+      betCap: number | null;
+      betCapNext: boolean;
       /** 기록관: 상대별 프리플랍 참여율(%)과 쇼다운에서 드러난 블러프 횟수 */
       recorder: Record<string, { hands: number; vpip: number; bluffs: number }> | null;
     };
@@ -528,6 +539,7 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     // 연승 수는 공개 정보 (연승을 세는 증강 보유자만 쌓인다)
     streak: p.streak > 0 ? p.streak : null,
     exposed: p.inHand ? p.exposed.filter((c) => p.hole.includes(c)) : [],
+    reserveRank: p.inHand ? p.reserveRank : null,
     team: (() => {
       const k = state.teams.findIndex((t) => t.includes(p.id));
       return k >= 0 ? k : null;
@@ -794,6 +806,13 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
         trapArmed: !!findAug(me, 'trap')?.armed,
         envelope: me.envelope,
         frozen: me.frozen,
+        savings: Math.floor((me.savings * bb) / 10),
+        nemesis: me.nemesis ? nameById(me.nemesis) : null,
+        sideBetOn: me.sideBetOn ? nameById(me.sideBetOn) : null,
+        strawOn: me.strawOn ? nameById(me.strawOn) : null,
+        wanted: me.wanted ?? me.wantedNext ? nameById((me.wanted ?? me.wantedNext)!) : null,
+        betCap: me.betCap,
+        betCapNext: me.betCapNext,
         recorder: findAug(me, 'recorder')
           ? Object.fromEntries(
               state.players
