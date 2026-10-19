@@ -366,6 +366,11 @@ export class Room {
   }
 
   private checkEmpty(): void {
+    // 남은 사람이 0명(모두 나감)이면 바로 삭제. 연결만 끊긴 사람이 있으면 재접속을 기다린다
+    if (!this.humans().some((m) => !m.left)) {
+      queueMicrotask(() => this.destroy());
+      return;
+    }
     if (this.humans().some((m) => m.connected)) return;
     if (this.deleteTimer) return;
     this.deleteTimer = setTimeout(() => this.destroy(), this.ms(this.opts.emptyRoomTtlMs));
@@ -953,7 +958,8 @@ export class RoomManager {
   publicList(): RoomListItem[] {
     const order = (x: RoomListItem) => (x.status === 'waiting' ? 0 : 1) * 2 + (x.joinable ? 0 : 1);
     return [...this.rooms.values()]
-      .filter((r) => r.isPublic && !r.deleted)
+      // 접속 중인 사람이 없는 방(0명)은 목록에 보이지 않는다
+      .filter((r) => r.isPublic && !r.deleted && r.humans().some((m) => m.connected))
       .map((r) => r.listItem())
       .sort((a, b) => order(a) - order(b) || a.name.localeCompare(b.name, 'ko'));
   }

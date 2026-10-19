@@ -232,6 +232,27 @@ export function boardBlindIds(state: GameState): string[] {
   return state.players.filter((p) => maskFor(state, p).board).map((p) => p.id);
 }
 
+/** 보드 카드가 담긴 로그: 짙은 안개로 가려진 사람, 실명 다트 대상에게는 카드 없이 */
+export function logBoard(state: GameState, text: string, hiddenText: string, fogged: boolean): void {
+  const fog = state.effects.fogSeers;
+  const blind = boardBlindIds(state);
+  const seers = fogged && fog.length ? fog.filter((id) => !blind.includes(id)) : null;
+  if (seers) {
+    addLog(state, hiddenText, { except: seers });
+    if (seers.length) addLog(state, `${text} (안개: 나만 보임)`, { to: seers });
+  } else if (blind.length) {
+    addLog(state, hiddenText, { to: blind });
+    addLog(state, text, { except: blind });
+  } else {
+    addLog(state, text);
+  }
+}
+
+/** 첫 스트리트(플랍)에 공개되는 장수: 짙은 안개가 가리는 범위 (거꾸로 강을 거슬러면 1장) */
+export function flopCount(state: GameState): number {
+  return state.revealPlan[0];
+}
+
 /** 메이드 인 헤븐으로 줄어드는 이 플레이어의 행동 시간 (초) */
 export function turnCutFor(state: GameState, playerId: string): number {
   let cut = 0;
@@ -266,9 +287,15 @@ export function evalBoard(state: GameState): Card[] {
 
 /** 이 플레이어가 볼 수 있는 보드 (짙은 안개로 가려진 플랍은 null) */
 export function visibleBoard(state: GameState, viewer: PlayerState): (Card | null)[] {
+  return boardView(state, state.board, viewer);
+}
+
+/** 보드 하나를 보는 사람 기준으로 (짙은 안개·실명 다트로 가려진 칸은 null) */
+export function boardView(state: GameState, board: Card[], viewer: PlayerState): (Card | null)[] {
   const fogged = state.effects.fogSeers.length > 0 && !state.effects.fogLifted && !state.effects.fogSeers.includes(viewer.id);
   const blind = boardBlind(state, viewer);
-  return state.board.slice(0, state.boardRevealed).map((c, i) => (blind || (fogged && i < 3) ? null : c));
+  const fc = flopCount(state);
+  return board.slice(0, state.boardRevealed).map((c, i) => (blind || (fogged && i < fc) ? null : c));
 }
 
 /** viewer 가 owner 의 홀카드를 볼 수 있는가 (본인·유리 테이블·쇼다운, 암전이면 본인도 못 봄) */

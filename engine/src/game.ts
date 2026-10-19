@@ -33,6 +33,8 @@ import {
   boardBlindIds,
   invertedNow,
   turnCutFor,
+  logBoard,
+  flopCount,
   lockError,
   ownCardsHidden,
   seatOrderFromDealer,
@@ -148,6 +150,8 @@ function newPlayer(np: NewPlayer, seat: number, chips: number): PlayerState {
     eitherOr: null,
     lateLosses: 0,
     showPending: false,
+    turnRiver: null,
+    drawPrompt: null,
   };
 }
 
@@ -169,8 +173,17 @@ export function freshEffects(): TableEffects {
     glasses: [],
     glassesImmune: [],
     glassesSeq: 0,
+    highLow: false,
+    lastStand: false,
+    lastStandImmune: [],
+    capitalism: false,
+    magnet: null,
+    twoFates: false,
   };
 }
+
+export const DEFAULT_REVEAL_PLAN: readonly number[] = [3, 4, 5];
+export const REVERSE_REVEAL_PLAN: readonly number[] = [1, 2, 5];
 
 function freshRound(state: GameState | null, firstFrom: number): RoundState {
   const startBets: Record<string, number> = {};
@@ -185,6 +198,8 @@ function freshRound(state: GameState | null, firstFrom: number): RoundState {
     firstFrom,
     raiseCap: null,
     locked: false,
+    maxPut: null,
+    capitalDone: false,
   };
 }
 
@@ -221,6 +236,14 @@ export function createGame(players: NewPlayer[], opts: CreateGameOptions = {}): 
     burns: [],
     boardRevealed: 0,
     deck: [],
+    board2: null,
+    revealPlan: [...DEFAULT_REVEAL_PLAN],
+    extraCards: 0,
+    reservedPublic: [],
+    fixedIdx: [],
+    nextHand: { reverse: false, prophecy: false, freezeCard: null },
+    windowStage: null,
+    capitalChooser: null,
     used: [],
     effects: freshEffects(),
     blackoutNext: false,
@@ -599,9 +622,18 @@ function resetHandState(state: GameState): void {
     p.betPrediction = null;
     p.eitherOr = null;
     p.showPending = false;
+    p.turnRiver = null;
+    p.drawPrompt = null;
     for (const a of p.augments) a.usedThisHand = false;
   }
   state.board = [];
+  state.board2 = null;
+  state.revealPlan = [...DEFAULT_REVEAL_PLAN];
+  state.extraCards = 0;
+  state.reservedPublic = [];
+  state.fixedIdx = [];
+  state.windowStage = null;
+  state.capitalChooser = null;
   state.burns = [];
   state.boardRevealed = 0;
   state.deck = [];
@@ -684,7 +716,29 @@ function dealCards(state: GameState): void {
   const fixedHands = new Map<string, Card[]>();
   for (const p of seated) fixedHands.set(p.id, take(deal?.hands?.[p.id], Math.max(0, holeCardCount(p) - own(p).length)));
   // 보드 5장과 번 카드 3장은 핸드 시작 시 미리 떼어 둔다 (예지로 본 순서 그대로 나오도록)
-  state.board = [...fixedBoard, ...pool.splice(0, 5 - fixedBoard.length)];
+  // 예약 카드: 동결(다음 플랍에 포함), 미리 온 결말(리버)
+  const slots: (Card | null)[] = [null, null, null, null, null];
+  const nh = state.nextHand;
+  if (nh.freezeCard) {
+    const i = pool.indexOf(nh.freezeCard);
+    const at = state.rng.int(3);
+    if (i >= 0) {
+      slots[at] = pool.splice(i, 1)[0];
+      state.reservedPublic.push({ index: at, card: slots[at]!, label: '동결: 이번 플랍에 포함' });
+      state.fixedIdx.push(at);
+      addLog(state, `동결: ${cardToken(slots[at]!)}이(가) 이번 플랍에 포함됩니다`);
+    }
+  }
+  if (nh.prophecy) {
+    const c = pool.splice(state.rng.int(pool.length), 1)[0];
+    slots[4] = c;
+    state.reservedPublic.push({ index: 4, card: c, label: '미리 온 결말: 리버' });
+    state.fixedIdx.push(4);
+    addLog(state, `미리 온 결말: 이번 핸드의 리버는 ${cardToken(c)}로 예약되었습니다`);
+  }
+  state.nextHand = { ...nh, prophecy: false, freezeCard: null };
+  const fill = [...fixedBoard];
+  state.board = slots.map((c) => c ?? fill.shift() ?? pool.shift()!);
   state.burns = [...fixedBurns, ...pool.splice(0, 3 - fixedBurns.length)];
   for (const i of seatOrderFromDealer(state)) {
     const p = state.players[i];
@@ -707,6 +761,10 @@ function beginHand(state: GameState): void {
   state.blackoutImmuneNext = [];
   state.effects.bomb = state.bombNext;
   state.bombNext = false;
+  if (state.nextHand.reverse) {
+    state.revealPlan = [...REVERSE_REVEAL_PLAN];
+    state.nextHand.reverse = false;
+  }
   if (state.underdogLeft > 0) {
     state.effects.underdog = true;
     state.underdogLeft--;
@@ -734,6 +792,7 @@ function logHandStart(state: GameState): void {
   if (state.effects.blackout) addLog(state, '암전: 이번 핸드는 모두 자기 홀카드를 보지 못한 채 진행합니다');
   if (state.effects.underdog) addLog(state, `언더독: 이번 핸드는 족보 순위가 뒤바뀝니다 (이후 ${state.underdogLeft}핸드 더)`);
   if (state.effects.bomb) addLog(state, `폭탄 팟: 전원 ${3 * bb}칩을 내고 바로 플랍을 공개합니다`);
+  if (state.revealPlan[0] !== 3) addLog(state, '거꾸로 강을 거슬러: 이번 핸드는 보드가 1장 → 1장 → 3장 순서로 공개됩니다');
   for (const p of state.players) {
     if (!p.inHand) continue;
     if (ownCardsHidden(state, p)) addLog(state, `내 홀카드: ${p.hole.length}장 (암전 — 볼 수 없음)`, { to: [p.id] });
@@ -866,28 +925,80 @@ function returnUncalled(state: GameState): void {
   }
 }
 
-/** 보드 카드가 담긴 로그: 짙은 안개로 가려진 사람, 실명 다트 대상에게는 카드 없이 */
-export function logBoard(state: GameState, text: string, hiddenText: string, fogged: boolean): void {
-  const fog = state.effects.fogSeers;
-  const blind = boardBlindIds(state);
-  const seers = fogged && fog.length ? fog.filter((id) => !blind.includes(id)) : null;
-  if (seers) {
-    addLog(state, hiddenText, { except: seers });
-    if (seers.length) addLog(state, `${text} (안개: 나만 보임)`, { to: seers });
-  } else if (blind.length) {
-    addLog(state, hiddenText, { to: blind });
-    addLog(state, text, { except: blind });
-  } else {
-    addLog(state, text);
-  }
-}
-
 function logBoardStreet(state: GameState, label: string, cards: Card[], fogged: boolean): void {
   const hidden = fogged && state.effects.fogSeers.length ? `${label}: (짙은 안개 — 쇼다운 때 공개)` : `${label}: (실명 다트 — 보드를 볼 수 없음)`;
   logBoard(state, `${label}: ${cardsText(cards)}`, hidden, fogged);
 }
 
+/** 이 스트리트까지 공개될 누적 장수 (추가된 보드 카드만큼 뒤로 밀린다, 최대 7장) */
+function revealTarget(state: GameState, streetIdx: number): number {
+  return Math.min(state.board.length, state.revealPlan[streetIdx] + state.extraCards);
+}
+
+/**
+ * 보드를 count 장까지 공개한다. 자석이 걸려 있으면 턴·리버에서 지정한 무늬가 아닌 카드가 처음 나올 때 다시 뽑는다.
+ * 두 번째 보드(더블 보드·두 번의 운명)도 같은 장수만큼 함께 공개된다.
+ */
+function revealTo(state: GameState, count: number, label: string, magnetOn: boolean): void {
+  const from = state.boardRevealed;
+  const mg = state.effects.magnet;
+  if (magnetOn && mg && !mg.used) {
+    for (let i = from; i < count && !mg.used; i++) {
+      if (state.fixedIdx.includes(i) || state.board[i][1] === mg.suit || !state.deck.length) continue;
+      const old = state.board[i];
+      const fresh = state.deck.shift()!;
+      state.board[i] = fresh;
+      state.used.push({ card: old, kind: 'shown' });
+      mg.used = true;
+      logBoard(state, `자석: ${cardToken(old)}은(는) 지정한 무늬가 아니어서 버리고 다시 뽑습니다`, '자석: 지정한 무늬가 아닌 카드를 버리고 다시 뽑습니다', false);
+    }
+  }
+  state.boardRevealed = count;
+  const fogged = from < flopCount(state);
+  const fresh = state.board.slice(from, count);
+  if (state.board2) {
+    logBoard(state, `${label}: ${cardsText(fresh)} / 두 번째 보드 ${cardsText(state.board2.slice(from, count))}`, `${label}: (보드를 볼 수 없음)`, fogged);
+  } else logBoardStreet(state, label, fresh, fogged);
+}
+
+/** 자본주의: 플랍·턴 라운드가 끝날 때 가장 크게 베팅한 사람이 보드 1장 추가 여부를 정한다 */
+function capitalPending(state: GameState): boolean {
+  const r = state.round;
+  if (!state.effects.capitalism || r.capitalDone || !r.maxPut) return false;
+  if (state.street !== 'flop' && state.street !== 'turn') return false;
+  if (state.board.length >= 7 || !state.deck.length) return false;
+  r.capitalDone = true;
+  const idx = idxOf(state, r.maxPut.id);
+  if (idx < 0 || !live(state.players[idx])) return false;
+  state.capitalChooser = r.maxPut.id;
+  state.windowStage = state.street;
+  state.phase = 'declare';
+  state.declareQueue = [idx];
+  state.toAct = null;
+  state.decisionSeq++;
+  return true;
+}
+
+/** 보드 카드 1장 추가 (자본주의·플러스 원): 다음 카드보다 먼저 공개한다 */
+export function addBoardCard(state: GameState, label: string): void {
+  const at = state.boardRevealed;
+  const card = state.deck.shift()!;
+  state.board.splice(at, 0, card);
+  if (state.board2) state.board2.splice(at, 0, state.deck.shift() ?? card);
+  // 미리 정해진 뒤쪽 카드들의 위치가 한 칸씩 밀린다
+  const shift = (i: number) => (i >= at ? i + 1 : i);
+  state.fixedIdx = state.fixedIdx.map(shift);
+  state.reservedPublic = state.reservedPublic.map((r) => ({ ...r, index: shift(r.index) }));
+  for (const p of state.players) {
+    p.foreseen = p.foreseen.map(shift);
+    if (p.turnRiver) p.turnRiver.idx = p.turnRiver.idx.map(shift);
+  }
+  if (at < 5 || state.board.length > 6) state.extraCards++;
+  revealTo(state, at + 1, label, false);
+}
+
 function closeRound(state: GameState): void {
+  if (capitalPending(state)) return;
   returnUncalled(state);
   for (const p of state.players) {
     p.streetBet = 0;
@@ -904,37 +1015,51 @@ function closeRound(state: GameState): void {
     case 'preflop':
       state.street = 'flop';
       state.used.push({ card: state.burns[0], kind: 'burn' });
-      state.boardRevealed = 3;
       // 보관함: 바꾸지 않은 보관 카드는 사라진다
       for (const p of state.players) {
         if (!p.lockerReady) continue;
         p.lockerReady = null;
         addLog(state, '보관함: 보관한 카드를 쓰지 않아 사라졌습니다.', { to: [p.id] });
       }
-      logBoardStreet(state, '플랍', state.board.slice(0, 3), true);
+      revealTo(state, revealTarget(state, 0), '플랍', false);
       if (startDiscardPhase(state)) return;
-      if (startDeclareWindow(state)) return;
+      if (startDeclareWindow(state, 'flop')) return;
       break;
     case 'flop':
+      applyTurnRiver(state);
       applyEitherOr(state);
       state.street = 'turn';
       state.used.push({ card: state.burns[1], kind: 'burn' });
-      state.boardRevealed = 4;
-      logBoardStreet(state, '턴', [state.board[3]], false);
-      if (startDeclareWindow(state)) return;
+      revealTo(state, revealTarget(state, 1), '턴', true);
+      if (startDeclareWindow(state, 'turn')) return;
       break;
     case 'turn':
       state.street = 'river';
       state.used.push({ card: state.burns[2], kind: 'burn' });
-      state.boardRevealed = 5;
-      logBoardStreet(state, '리버', [state.board[4]], false);
-      if (startDeclareWindow(state)) return;
+      revealTo(state, revealTarget(state, 2), '리버', true);
+      if (startDeclareWindow(state, 'river')) return;
       break;
     case 'river':
+      // 쇼다운 직전 선언 기회 (명추리·기생)
+      if (startDeclareWindow(state, 'preShowdown')) return;
       showdown(state);
       return;
   }
   startBettingRound(state, state.dealerIdx);
+}
+
+/** 턴과 리버 사이: 미리 본 두 카드의 공개 순서를 바꾸기로 했으면 바꾼다 */
+function applyTurnRiver(state: GameState): void {
+  for (const p of state.players) {
+    const tr = p.turnRiver;
+    if (!tr) continue;
+    if (tr.swap) {
+      const [a, b] = tr.idx;
+      [state.board[a], state.board[b]] = [state.board[b], state.board[a]];
+    }
+    addLog(state, `턴과 리버 사이: ${tr.swap ? '순서를 바꿨습니다' : '순서를 그대로 둡니다'}`, { to: [p.id] });
+    p.turnRiver = { ...tr, swap: tr.swap ?? false };
+  }
 }
 
 function afterBetAction(state: GameState, lastIdx: number): void {
@@ -1013,6 +1138,7 @@ function applyBet(state: GameState, idx: number, a: BetAction): string | null {
       if (raiseSize >= state.minRaise) state.minRaise = raiseSize;
       state.currentBet = target;
       state.betSetter = { idx, raise: !opening };
+      if (!state.round.maxPut || target > state.round.maxPut.amount) state.round.maxPut = { id: p.id, amount: target };
       if (!opening) {
         state.round.raises++;
         if (state.round.raiseCap !== null) state.round.raiseCap = Math.max(0, state.round.raiseCap - 1);
@@ -1101,8 +1227,8 @@ function resolveDiscards(state: GameState): void {
       announceNamed(state, p, th, '발동', '— 카드 1장을 버림');
     }
   }
-  // 플랍 직후 선언 기회 (양자택일)
-  if (startDeclareWindow(state)) return;
+  // 플랍 직후 선언 기회 (양자택일 등)
+  if (startDeclareWindow(state, 'flop')) return;
   startBettingRound(state, state.dealerIdx);
 }
 
@@ -1113,7 +1239,7 @@ function applyEitherOr(state: GameState): void {
     if (!eo) continue;
     p.eitherOr = null;
     const pick = eo.pick ?? 0;
-    state.board[3] = eo.cards[pick];
+    state.board[state.boardRevealed] = eo.cards[pick];
     state.used.push({ card: eo.cards[1 - pick], kind: 'discard' });
     addLog(state, `양자택일: 턴 후보 중 ${eo.pick === null ? '처음 카드(선택하지 않음)' : `${pick + 1}번째 카드`}로 정했습니다.`, { to: [p.id] });
   }
@@ -1121,7 +1247,8 @@ function applyEitherOr(state: GameState): void {
 
 // ───────────────────────── 선언 기회 (턴·리버 공개 직후) ─────────────────────────
 
-function startDeclareWindow(state: GameState): boolean {
+function startDeclareWindow(state: GameState, stage: 'flop' | 'turn' | 'river' | 'preShowdown'): boolean {
+  state.windowStage = stage;
   state.phase = 'declare';
   const ops = opsFor(state);
   const queue = seatOrderFromDealer(state).filter((i) => {
@@ -1130,6 +1257,7 @@ function startDeclareWindow(state: GameState): boolean {
   });
   if (!queue.length) {
     state.phase = 'betting';
+    state.windowStage = null;
     return false;
   }
   state.declareQueue = queue;
@@ -1139,13 +1267,27 @@ function startDeclareWindow(state: GameState): boolean {
 
 export function declareOptions(state: GameState, p: PlayerState): AugmentId[] {
   if (state.phase !== 'declare' || state.players[state.declareQueue[0]] !== p) return [];
+  if (state.capitalChooser) return state.capitalChooser === p.id ? ['capitalism'] : [];
   return windowOptions(state, opsFor(state), p);
 }
 
-/** 선언 기회: 봉인은 boardIndex(보드 카드), 마지막 갈림길은 같은 칸으로 홀카드 번호를 받는다 */
-function applyDeclare(state: GameState, idx: number, augment: AugmentId | null, boardIndex?: number): string | null {
+/** 선언 기회 (봉인: boardIndex, 마지막 갈림길·연금술: cardIndex, 기생·명추리·공동 환승: targetId 등) */
+function applyDeclare(state: GameState, idx: number, a: Extract<GameAction, { type: 'declare' }>): string | null {
   if (state.phase !== 'declare' || state.declareQueue[0] !== idx) return '지금은 선언할 차례가 아닙니다.';
   const p = state.players[idx];
+  const augment = a.augment ?? null;
+  // 자본주의: 보드 카드를 1장 더 깔지 (증강 사용이 아니므로 반응 대기 없음)
+  if (state.capitalChooser) {
+    if (state.capitalChooser !== p.id) return '지금은 선언할 차례가 아닙니다.';
+    state.capitalChooser = null;
+    state.declareQueue = [];
+    if (augment === 'capitalism') {
+      addLog(state, `자본주의: ${p.name}이(가) 보드 카드를 1장 더 깝니다`);
+      addBoardCard(state, '추가 보드');
+    } else addLog(state, `자본주의: ${p.name}이(가) 보드를 늘리지 않습니다`);
+    closeRound(state);
+    return null;
+  }
   if (augment === null) {
     state.declareQueue.shift();
     advanceDeclare(state);
@@ -1153,7 +1295,14 @@ function applyDeclare(state: GameState, idx: number, augment: AugmentId | null, 
   }
   if (!isAugmentId(augment) || !declareOptions(state, p).includes(augment)) return '지금 선언할 수 없는 증강입니다.';
   const aug = findAug(p, augment)!;
-  const params: ActiveParams = augment === 'seal' ? { boardIndex } : augment === 'lastFork' ? { cardIndex: boardIndex } : {};
+  const params: ActiveParams = {};
+  if (typeof a.boardIndex === 'number') params.boardIndex = a.boardIndex;
+  if (typeof a.cardIndex === 'number') params.cardIndex = a.cardIndex;
+  if (typeof a.targetId === 'string') params.targetId = a.targetId;
+  if (typeof a.choice === 'number') params.choice = a.choice;
+  if (typeof a.card === 'string') params.card = a.card;
+  // 예전 형식: 마지막 갈림길은 boardIndex 칸으로 홀카드 번호를 받았다
+  if (augment === 'lastFork' && params.cardIndex === undefined) params.cardIndex = a.boardIndex;
   const err = ACTIVE[augment]!.check(ctxFor(state, p, aug), params, false) ?? taxError(state, p);
   if (err) return err;
   declare(state, p, aug, params);
@@ -1171,6 +1320,9 @@ function advanceDeclare(state: GameState): void {
     state.decisionSeq++;
     return;
   }
+  const stage = state.windowStage;
+  state.windowStage = null;
+  if (stage === 'preShowdown') return showdown(state);
   startBettingRound(state, state.dealerIdx);
 }
 
@@ -1930,7 +2082,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       err = applyDiscard(state, p, action.cardIndex);
       break;
     case 'declare':
-      err = applyDeclare(state, idx, action.augment ?? null, action.boardIndex);
+      err = applyDeclare(state, idx, action);
       break;
     case 'counter':
       err = applyCounter(state, p);

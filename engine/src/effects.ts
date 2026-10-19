@@ -17,6 +17,8 @@ import {
   boardBlind,
   boardBlindIds,
   boardInfoHidden,
+  flopCount,
+  logBoard,
   invertedNow,
   ownCardsHidden,
   cardsText,
@@ -243,7 +245,7 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
       const err = needLive(ctx) ?? needSight(ctx);
       if (err) return err;
       const { state, owner } = ctx;
-      if (state.boardRevealed < 3 || state.boardRevealed > 4) return '플랍 이후, 리버가 나오기 전에만 쓸 수 있습니다.';
+      if ((state.street !== 'flop' && state.street !== 'turn') || state.boardRevealed >= state.board.length) return '플랍 이후, 리버가 나오기 전에만 쓸 수 있습니다.';
       if (owner.foreseen.includes(state.boardRevealed)) return '이미 다음 카드를 보았습니다.';
       return null;
     },
@@ -252,7 +254,7 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
       const bi = state.boardRevealed;
       const card = state.board[bi];
       owner.foreseen.push(bi);
-      note(state, owner, 'foresight', `예지: 다음 보드 카드(${bi === 3 ? '턴' : '리버'})는 ${cardToken(card)}`, [card]);
+      note(state, owner, 'foresight', `예지: 다음 보드 카드(${state.street === 'flop' ? '턴' : '리버'})는 ${cardToken(card)}`, [card]);
     },
   },
 
@@ -318,9 +320,10 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
   rewind: {
     check(ctx) {
       const { state, owner } = ctx;
-      if (basePhase(state) !== 'declare' || (state.street !== 'turn' && state.street !== 'river')) return '턴·리버 공개 직후 선언 기회에만 쓸 수 있습니다.';
+      if (basePhase(state) !== 'declare' || (state.windowStage !== 'turn' && state.windowStage !== 'river')) return '턴·리버 공개 직후 선언 기회에만 쓸 수 있습니다.';
       if (!live(owner)) return '핸드에 참여 중일 때만 쓸 수 있습니다.';
       if (!state.deck.length) return '덱에 남은 카드가 없습니다.';
+      if (state.fixedIdx.includes(state.boardRevealed - 1)) return '예약·확정된 카드는 되감을 수 없습니다.';
       return null;
     },
     resolve(ctx) {
@@ -341,10 +344,10 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
   seal: {
     check(ctx, params) {
       const { state, owner } = ctx;
-      if (basePhase(state) !== 'declare' || state.street !== 'river') return '리버 공개 직후 선언 기회에만 쓸 수 있습니다.';
+      if (basePhase(state) !== 'declare' || state.windowStage !== 'river') return '리버 공개 직후 선언 기회에만 쓸 수 있습니다.';
       if (!live(owner)) return '핸드에 참여 중일 때만 쓸 수 있습니다.';
       const bi = params.boardIndex;
-      if (typeof bi !== 'number' || !Number.isInteger(bi) || bi < 0 || bi > 4) return '봉인할 보드 카드를 고르세요.';
+      if (typeof bi !== 'number' || !Number.isInteger(bi) || bi < 0 || bi >= state.boardRevealed) return '봉인할 보드 카드를 고르세요.';
       if (state.effects.sealed.includes(bi)) return '이미 봉인된 카드입니다.';
       if (state.effects.sealed.length >= 2) return '한 핸드에 보드 카드는 2장까지만 봉인할 수 있습니다.';
       return null;
@@ -356,10 +359,11 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
       const card = state.board[bi];
       const blind = boardBlindIds(state);
       const fog = state.effects.fogSeers.filter((id) => !blind.includes(id));
-      if (blind.length && !(bi < 3 && state.effects.fogSeers.length && !state.effects.fogLifted)) {
+      const foggedIdx = bi < flopCount(state) && state.effects.fogSeers.length > 0 && !state.effects.fogLifted;
+      if (blind.length && !foggedIdx) {
         addLog(state, `봉인: 보드 ${bi + 1}번째 카드가 이번 핸드 족보 계산에서 빠집니다`, { to: blind });
         addLog(state, `봉인: ${cardToken(card)}가 이번 핸드 족보 계산에서 빠집니다`, { except: blind });
-      } else if (bi < 3 && state.effects.fogSeers.length && !state.effects.fogLifted) {
+      } else if (foggedIdx) {
         // 안개에 가려진 플랍 카드는 볼 수 있는 사람에게만 카드 이름을 보여 준다
         addLog(state, `봉인: 보드 ${bi + 1}번째 카드가 이번 핸드 족보 계산에서 빠집니다`, { except: fog });
         addLog(state, `봉인: 보드 ${bi + 1}번째 카드 ${cardToken(card)}가 이번 핸드 족보 계산에서 빠집니다`, { to: fog });
@@ -501,7 +505,7 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
   flipTable: {
     check(ctx) {
       const { state, owner } = ctx;
-      if (basePhase(state) !== 'declare' || state.street !== 'river') return '리버 공개 직후 선언 기회에만 쓸 수 있습니다.';
+      if (basePhase(state) !== 'declare' || state.windowStage !== 'river') return '리버 공개 직후 선언 기회에만 쓸 수 있습니다.';
       if (!live(owner)) return '핸드에 참여 중일 때만 쓸 수 있습니다.';
       return null;
     },
@@ -579,7 +583,7 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
     resolve(ctx) {
       const { state, owner } = ctx;
       const card = state.board[state.boardRevealed];
-      note(state, owner, 'forecast', `색채 예보: 다음 보드 카드(${state.boardRevealed === 3 ? '턴' : '리버'})의 무늬는 ${SUIT_NAME[suitOf(card)]}`);
+      note(state, owner, 'forecast', `색채 예보: 다음 보드 카드(${state.street === 'flop' ? '턴' : '리버'})의 무늬는 ${SUIT_NAME[suitOf(card)]}`);
     },
   },
 
@@ -642,17 +646,18 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
   eitherOr: {
     check(ctx) {
       const { state, owner } = ctx;
-      if (basePhase(state) !== 'declare' || state.street !== 'flop') return '플랍 공개 직후 선언 기회에만 쓸 수 있습니다.';
+      if (basePhase(state) !== 'declare' || state.windowStage !== 'flop') return '플랍 공개 직후 선언 기회에만 쓸 수 있습니다.';
       if (!live(owner)) return '핸드에 참여 중일 때만 쓸 수 있습니다.';
       const err = needSight(ctx);
       if (err) return err;
       if (state.players.some((p) => p.eitherOr)) return '이번 턴은 이미 양자택일 중입니다.';
+      if (state.fixedIdx.includes(state.boardRevealed)) return '다음 카드는 이미 확정된 카드입니다.';
       if (!state.deck.length) return '덱에 남은 카드가 없습니다.';
       return null;
     },
     resolve(ctx) {
       const { state, owner } = ctx;
-      const cards = [state.board[3], state.deck.shift()!];
+      const cards = [state.board[state.boardRevealed], state.deck.shift()!];
       owner.eitherOr = { cards, pick: null };
       note(state, owner, 'info', `양자택일: 턴 후보 ${cardsText(cards)} — 턴이 공개되기 전에 하나를 고르세요 (고르지 않으면 첫 번째)`, cards);
     },
@@ -661,7 +666,7 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
   lastFork: {
     check(ctx, params) {
       const { state, owner } = ctx;
-      if (basePhase(state) !== 'declare' || state.street !== 'river') return '리버 공개 직후 선언 기회에만 쓸 수 있습니다.';
+      if (basePhase(state) !== 'declare' || state.windowStage !== 'river') return '리버 공개 직후 선언 기회에만 쓸 수 있습니다.';
       if (!live(owner)) return '핸드에 참여 중일 때만 쓸 수 있습니다.';
       if (!ownCardsHidden(state, owner) && !validHoleIndex(owner, params.cardIndex)) return '버릴 카드를 고르세요.';
       if (!state.deck.length) return '덱에 남은 카드가 없습니다.';
@@ -683,7 +688,7 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
   blackjack: {
     check(ctx) {
       const { state, owner } = ctx;
-      if (basePhase(state) !== 'declare' || state.street !== 'river') return '리버 공개 직후(리버 베팅 전)에만 쓸 수 있습니다.';
+      if (basePhase(state) !== 'declare' || state.windowStage !== 'river') return '리버 공개 직후(리버 베팅 전)에만 쓸 수 있습니다.';
       if (!live(owner)) return '핸드에 참여 중일 때만 쓸 수 있습니다.';
       const err = needSight(ctx);
       if (err) return err;

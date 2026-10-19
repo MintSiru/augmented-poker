@@ -275,7 +275,7 @@ function renderHome() {
           <button class="big" data-a="join">방 코드로 입장</button>
         </div>
         <div id="home-extra"></div>
-        <div class="panel rooms"><h3>공개 방 목록 <span class="muted small-note">실시간</span></h3><div id="home-rooms"></div></div>
+        <div class="panel rooms"><h3>공개 방 목록 <span class="rooms-tools"><span class="muted small-note">실시간</span><button class="small" data-a="roomsRefresh" title="목록 새로고침">↻ 새로고침</button></span></h3><div id="home-rooms"></div></div>
       </div>`,
     );
   }
@@ -1227,6 +1227,12 @@ document.addEventListener('click', async (ev) => {
       return homeEnter('join');
     case 'joinList':
       return homeEnter('join', t.dataset.code);
+    case 'roomsRefresh': {
+      const r = await send('rooms:watch', { on: true });
+      app.watchingRooms = r.ok;
+      toast(r.ok ? '공개 방 목록을 새로고침했습니다.' : (r.error ?? '새로고침하지 못했습니다.'));
+      return;
+    }
     case 'reconnect':
       app.forcedOff = false;
       socket.connect();

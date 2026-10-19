@@ -427,6 +427,31 @@ describe('공개 방 목록과 방 설정', () => {
     await waitFor(() => list.length === 0, 2000, 'deleted');
   });
 
+  it('0명이 된 방은 바로 삭제되고, 접속자가 없는 방은 목록에 보이지 않는다', async () => {
+    const s = await start(false, 1);
+    const a = new VClient(s.port);
+    const b = new VClient(s.port);
+    await a.create('A');
+    await b.ready();
+    await b.emit('room:create', { name: 'B', roomName: '끊긴 방' });
+    expect(s.rooms.rooms.size).toBe(2);
+    // 모두 나가면(0명) 바로 삭제
+    await a.emit('room:leave');
+    await waitFor(() => s.rooms.rooms.size === 1, 2000, 'empty room deleted');
+    // 연결만 끊긴 방은 재접속을 기다리지만 목록에서는 숨긴다
+    expect(s.rooms.publicList().map((r) => r.name)).toEqual(['끊긴 방']);
+    b.sock.disconnect();
+    await waitFor(() => s.rooms.publicList().length === 0, 2000, 'hidden from list');
+    expect(s.rooms.rooms.size).toBe(1);
+    // 새로고침: 목록을 다시 받는다
+    const c = new VClient(s.port);
+    let got: RoomListItem[] | null = null;
+    c.sock.on('rooms', (l: RoomListItem[]) => (got = l));
+    await c.ready();
+    expect((await c.emit('rooms:watch', { on: true })).ok).toBe(true);
+    await waitFor(() => got !== null, 2000, 'list refresh');
+  });
+
   it('동시에 존재할 수 있는 방 수를 제한한다', async () => {
     server = await createAppServer(0, { maxRooms: 2, timeScale: 0.005 });
     const s = server;

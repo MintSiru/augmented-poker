@@ -426,3 +426,5 @@ button.aug-btn { background: #2d2346; border-color: #6c4fb0; }
 @media (max-width: 760px) {
   .dd-card .card.md { width: 22px; height: 31px; font-size: 10px; }
 }
+
+.rooms-tools { display: inline-flex; align-items: center; gap: 8px; }

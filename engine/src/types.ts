@@ -139,6 +139,10 @@ export interface PlayerState {
   lateLosses: number;
   /** 쇼맨십: 핸드 종료 후 카드 공개 여부를 고르는 중 */
   showPending: boolean;
+  /** 턴과 리버 사이: 미리 본 두 카드의 보드 위치와 순서를 바꿀지 (null = 아직 안 정함) */
+  turnRiver: { idx: number[]; cards: Card[]; swap: boolean | null } | null;
+  /** 무승부로 하지 않을래?: 쇼다운 직후 제안할 수 있는 상대와 팟 */
+  drawPrompt: { winnerId: string; pots: number[] } | null;
   /** 이 플레이어에게 보여 줄 로그의 시작 번호 (중도 참여자는 참여 이후 로그만 본다) */
   logFrom: number;
 }
@@ -161,10 +165,19 @@ export interface LogEntry {
   except?: string[];
 }
 
+/** 팟 분할 판정 단위 (보드별, 하이·로우, 팀별, 무승부) */
+export interface PotUnit {
+  label: string;
+  amount: number;
+  winners: string[];
+}
+
 export interface PotResult {
   amount: number;
   eligible: string[];
   winners: string[];
+  /** 둘 이상의 판정 단위로 나뉜 경우 */
+  units?: PotUnit[];
 }
 
 export interface ShowdownEntry {
@@ -176,6 +189,8 @@ export interface ShowdownEntry {
   applied: AppliedVariant[];
   /** 동점 처리 증강이 승부를 가른 경우 */
   tiebreak: AugmentId[];
+  /** 다른 판정 단위(두 번째 보드)의 족보 */
+  alt?: { label: string; handName: string }[];
 }
 
 export interface HandResult {
@@ -183,6 +198,8 @@ export interface HandResult {
   showdown: boolean;
   board: Card[];
   sealed: number[];
+  /** 더블 보드·두 번의 운명의 두 번째 보드 */
+  board2?: Card[];
   entries: ShowdownEntry[];
   pots: PotResult[];
   won: Record<string, number>;
@@ -240,6 +257,9 @@ export interface RoundState {
   raiseCap: number | null;
   /** 자물쇠: 이번 라운드에는 액티브·공개형 증강 사용 불가 */
   locked: boolean;
+  /** 자본주의: 이번 라운드에서 가장 크게 베팅·레이즈한 사람과 금액 */
+  maxPut: { id: string; amount: number } | null;
+  capitalDone: boolean;
 }
 
 export interface TableEffects {
@@ -267,6 +287,17 @@ export interface TableEffects {
   glasses: string[];
   glassesImmune: string[];
   glassesSeq: number;
+  /** 하이로우: 팟을 가장 높은 패와 가장 낮은 패가 반씩 */
+  highLow: boolean;
+  /** 배수진: 폴드·레이즈 금지 (면역이면 폴드 가능) */
+  lastStand: boolean;
+  lastStandImmune: string[];
+  /** 자본주의: 플랍·턴 라운드가 끝날 때마다 가장 크게 베팅한 사람이 보드 1장 추가 여부를 정함 */
+  capitalism: boolean;
+  /** 자석: 지정한 무늬, 이미 다시 뽑았는가 */
+  magnet: { suit: string; used: boolean } | null;
+  /** 두 번의 운명 (두 번째 보드는 리버만 다름) */
+  twoFates: boolean;
 }
 
 /** 선언된 액티브·공개형 증강 (3초 반응 대기 후 적용) */
@@ -346,6 +377,21 @@ export interface GameState {
   boardRevealed: number;
   /** 남은 덱 (멀리건 교체, 되감기용) */
   deck: Card[];
+  /** 두 번째 보드 (더블 보드, 두 번의 운명). 첫 보드와 같은 장수만큼 공개된다 */
+  board2: Card[] | null;
+  /** 스트리트별 누적 공개 장수 (기본 3-4-5, 거꾸로 강을 거슬러 1-2-5). 보드가 늘어나면 extraCards 만큼 뒤로 밀린다 */
+  revealPlan: number[];
+  extraCards: number;
+  /** 미리 공개된 예약 카드 (미리 온 결말, 동결) */
+  reservedPublic: { index: number; card: Card; label: string }[];
+  /** 다른 효과가 바꿀 수 없는 확정 카드의 보드 위치 (예약 카드, 턴과 리버 사이) */
+  fixedIdx: number[];
+  /** 다음 핸드에 적용할 보드 효과 */
+  nextHand: { reverse: boolean; prophecy: boolean; freezeCard: Card | null };
+  /** 지금 열린 선언 기회의 단계 */
+  windowStage: 'flop' | 'turn' | 'river' | 'preShowdown' | null;
+  /** 자본주의: 보드 추가 여부를 정하는 사람 */
+  capitalChooser: string | null;
   used: UsedCard[];
   effects: TableEffects;
   /** 다음 핸드에 암전 적용 */
@@ -405,7 +451,7 @@ export type GameAction =
   | { type: 'pick'; augment: AugmentId; parity?: 'even' | 'odd' }
   | { type: 'discard'; cardIndex: number }
   /** 선언 기회: augment=null 이면 넘기기 */
-  | { type: 'declare'; augment: AugmentId | null; boardIndex?: number }
+  | { type: 'declare'; augment: AugmentId | null; boardIndex?: number; cardIndex?: number; targetId?: string; choice?: number; card?: Card }
   | { type: 'counter' }
   | { type: 'attach'; cardIndex: number }
   /** 보관함: 핸드 종료 후 보관할 카드 / 프리플랍에 보관한 카드와 바꿀 홀카드 */
@@ -416,6 +462,10 @@ export type GameAction =
   | { type: 'show'; reveal: boolean }
   /** 면역: 반응 대기 중인 공개형 효과에서 빠진다 */
   | { type: 'immunity' }
+  /** 턴과 리버 사이: 미리 본 두 카드의 순서를 바꿀지 */
+  | { type: 'turnRiver'; swap: boolean }
+  /** 무승부로 하지 않을래?: 쇼다운 직후 제안 여부 */
+  | { type: 'draw'; accept: boolean }
   | {
       type: 'useAugment';
       augment: AugmentId;
