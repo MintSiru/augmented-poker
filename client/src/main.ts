@@ -25,6 +25,8 @@ const app = {
   env: null as GameEnvelope | null,
   debug: null as DebugView | null,
   revealAll: false,
+  /** 설명을 펼쳐 둔 증강 (증강 카드는 기본으로 접혀 있다) */
+  augOpen: new Set<string>(),
   offset: 0,
   connected: false,
   everConnected: false,
@@ -588,7 +590,7 @@ function renderLobby() {
         <div><b class="room-name">${esc(l.name)}</b> <span class="tag">${l.isPublic ? '공개' : '비공개'}</span><br/>방 코드 <b class="code">${esc(l.code)}</b></div>
         <button data-a="copy">링크 복사</button>
       </div>
-      <div class="panel">
+      <div class="panel players-panel">
         <h3>참가자 ${humans}/${s.maxPlayers}${bots ? ` <span class="muted">+ 봇 ${bots}</span>` : ''}</h3>
         <ul class="plist">
           ${l.players
@@ -599,7 +601,7 @@ function renderLobby() {
                 }</li>`,
             )
             .join('')}
-          ${Array.from({ length: bots }, (_, i) => `<li class="bot">🤖 봇 ${i + 1}</li>`).join('')}
+          ${bots ? `<li class="bot">🤖 봇 ${bots}명 <span class="muted">(빈자리를 채움)</span></li>` : ''}
         </ul>
       </div>
       <div class="panel settings">
@@ -1096,8 +1098,7 @@ function augControl(v: PlayerView, a: MyAugmentView): string {
       .join('');
   }
   if (a.id === 'reserveOrder') {
-    if (!a.usableNow) return useBtn(v, a, '숫자 고르기');
-    return [14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2].map((r) => `<button class="small" data-a="use" data-aug="reserveOrder" data-choice="${r}" ${tip}>${RANKS[r]}</button>`).join('');
+    return `<select data-reserve>${[14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2].map((r) => `<option value="${r}">${RANKS[r]}</option>`).join('')}</select>${useBtn(v, a, '예약')}`;
   }
   if (a.id === 'catchThief') {
     return `<button class="small primary" data-a="use" data-aug="catchThief" data-choice="0" ${dis} ${tip}>← 왼쪽으로</button><button class="small primary" data-a="use" data-aug="catchThief" data-choice="1" ${dis} ${tip}>오른쪽으로 →</button>`;
@@ -1171,9 +1172,28 @@ function augControl(v: PlayerView, a: MyAugmentView): string {
 
 const BET_NAMES = ['하이카드', '원페어', '투페어', '트리플', '스트레이트', '플러시', '풀하우스', '포카드 이상'];
 
+/** 증강 정렬: 지금 쓸 수 있는 것 → 버튼·선언형 → 패시브 */
+function augOrder(a: MyAugmentView): number {
+  if (a.usableNow) return 0;
+  return a.trigger === 'passive' ? 2 : 1;
+}
+
 function renderAugments(v: PlayerView) {
-  const list = v.you.augments;
-  const html = list.length
+  // 패시브는 이름 칩으로 한 장에 모은다 (잠복으로 숨길 증강을 고르는 중이면 카드로 보여 줌)
+  const all = [...v.you.augments].sort((a, b) => augOrder(a) - augOrder(b));
+  const chipPassives = !v.you.extra.lurkChoose;
+  const passives = chipPassives ? all.filter((a) => a.trigger === 'passive') : [];
+  const list = all.filter((a) => !passives.includes(a));
+  const passiveHtml = passives.length
+    ? `<div class="aug passive-box"><div class="aug-head"><span class="cat">패시브 ${passives.length}개 · 자동 발동</span></div><div class="pchips">${passives
+        .map((a) => {
+          const extra = augControl(v, a).replace(/<[^>]+>/g, '').replace(/^자동 발동\s*·?\s*/, '');
+          const tip = `${a.name} ${'★'.repeat(a.stars)} — ${a.description}${extra && extra !== '자동 발동' ? `\n${extra}` : ''}`;
+          return `<span class="pchip s${a.stars}${a.revealed ? ' revealed' : ''}" data-tip="${esc(tip)}">${esc(a.name)}<i>${'★'.repeat(a.stars)}</i>${a.revealed ? '<b title="공개됨">●</b>' : ''}</span>`;
+        })
+        .join('')}</div></div>`
+    : '';
+  const html = all.length
     ? list
         .map((a) => {
           const uses =
@@ -1183,18 +1203,21 @@ function renderAugments(v: PlayerView) {
             : '<span class="tag">비공개</span>';
           const kind =
             (a.public ? '<span class="tag pubkind">공개형</span>' : a.disclosure === 'anonymous' ? '<span class="tag">익명 알림</span>' : '') +
-            (a.hidden ? '<span class="tag" title="잠복: 상대의 보유 수·탐문에서 빠짐, 처음 쓰면 드러남">숨김</span>' : '') +
-            (v.you.extra.lurkChoose && a.id !== 'lurk' && !a.hidden ? ` <button class="small" data-a="lurk" data-aug="${a.id}" title="잠복: 이 증강을 대신 숨김 (다음 핸드 시작 전까지)">숨기기</button>` : '');
-          return `<div class="aug s${a.stars}" title="${esc(a.hint)}">
-            <div class="aug-head"><span class="st">${stars(a.stars)}</span><span class="cat">${esc(a.category)}</span></div>
-            <div class="aug-name">${esc(a.name)}${a.wildRank ? ` <span class="wild">와일드 ${esc(a.wildRank)}</span>` : ''}</div>
-            <div class="aug-desc">${esc(a.description)}</div>
-            <div class="aug-meta">${uses} ${pub} ${kind}</div>
+            (a.hidden ? '<span class="tag" title="잠복: 상대의 보유 수·탐문에서 빠짐, 처음 쓰면 드러남">숨김</span>' : '');
+          const lurkBtn = v.you.extra.lurkChoose && a.id !== 'lurk' && !a.hidden ? ` <button class="small" data-a="lurk" data-aug="${a.id}" title="잠복: 이 증강을 대신 숨김 (다음 핸드 시작 전까지)">숨기기</button>` : '';
+          // 설명은 접어 두고 이름을 누르면 펼친다 (마우스를 올리면 툴팁)
+          const open = app.augOpen.has(a.id);
+          // 남은 횟수는 이름 줄 오른쪽에 짧게 (2/3, 핸드당), 쓸 수 있는 시점은 펼치거나 마우스를 올리면
+          const short = a.maxUses !== null ? `${a.usesLeft ?? 0}/${a.maxUses}` : a.perHand ? (a.usedThisHand ? '이번 핸드 사용' : '핸드당') : '';
+          const flags = [a.revealed ? '<span class="pubdot">공개됨</span>' : '', a.public ? '공개형' : '', a.hidden ? '숨김' : ''].filter(Boolean).join(' · ');
+          const tip = `${a.description}\n\n시점: ${a.hint}`;
+          return `<div class="aug s${a.stars}${a.usableNow ? ' ready' : ''}${open ? ' open' : ''}" data-tip="${esc(tip)}">
+            <button class="aug-name" data-a="augInfo" data-aug="${a.id}"><span class="st">${stars(a.stars)}</span> ${esc(a.name)}${a.wildRank ? ` <span class="wild">와일드 ${esc(a.wildRank)}</span>` : ''}<span class="uses">${short}</span><span class="caret">${open ? '▴' : '▾'}</span></button>
+            ${open ? `<div class="aug-desc">${esc(a.description)}</div><div class="aug-meta"><span class="cat">${esc(a.category)}</span> ${uses} ${pub} ${kind}${lurkBtn}</div>${a.trigger === 'button' && !a.usableNow ? `<div class="aug-hint">${esc(a.hint)}</div>` : ''}` : flags || lurkBtn ? `<div class="aug-meta">${flags}${lurkBtn}</div>` : ''}
             <div class="aug-ctrl">${augControl(v, a)}</div>
-            ${a.trigger === 'button' && !a.usableNow ? `<div class="aug-hint">${esc(a.hint)}</div>` : ''}
           </div>`;
         })
-        .join('')
+        .join('') + passiveHtml
     : '<div class="muted empty">보유한 증강이 없습니다</div>';
   patch($('#g-augs'), html + infoCardHtml(v));
 }
@@ -1859,6 +1882,13 @@ document.addEventListener('click', async (ev) => {
       return act({ type: 'discard', cardIndex: Number(t.dataset.i) });
     case 'lurk':
       return act({ type: 'lurk', augment: t.dataset.aug });
+    case 'augInfo': {
+      const id = t.dataset.aug!;
+      if (app.augOpen.has(id)) app.augOpen.delete(id);
+      else app.augOpen.add(id);
+      renderGame();
+      return;
+    }
     case 'respond': {
       const bidNow = () => Number(($('#bid-num') as HTMLInputElement | null)?.value ?? 0);
       if (t.dataset.accept !== undefined) return act({ type: 'respond', accept: t.dataset.accept === '1' });
@@ -1905,6 +1935,7 @@ document.addEventListener('click', async (ev) => {
       if (app.targets[id]) payload.targetId = app.targets[id];
       if (t.dataset.i !== undefined) payload.cardIndex = Number(t.dataset.i);
       if (id === 'radar') payload.boardIndex = Number((($('[data-radar]') as HTMLSelectElement | null)?.value ?? app.radarIdx));
+      if (id === 'reserveOrder' && t.dataset.choice === undefined) payload.choice = Number(($('[data-reserve]') as HTMLSelectElement | null)?.value ?? 14);
       if (id === 'rumor') payload.rumor = ($('[data-rumor]') as HTMLSelectElement | null)?.value ?? app.rumor;
       if (t.dataset.choice !== undefined) payload.choice = Number(t.dataset.choice);
       if (t.dataset.board !== undefined) payload.boardIndex = Number(t.dataset.board);
