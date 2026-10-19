@@ -921,3 +921,49 @@ describe('5. 판정 공유·팀·탈취', () => {
     expect(P(s, 'p2').augments[0].usesLeft).toBe(0);
   });
 });
+
+// ───────────────────────── 6. 확률·통계 ─────────────────────────
+
+describe('6. 확률·통계', () => {
+  it('기록관: 상대별 프리플랍 참여율과 쇼다운에서 드러난 블러프 횟수를 보유자에게만', () => {
+    const s = setup(3, { augs: { p1: ['recorder'] }, deal: { board: cards('As Kd 7c 4h 2s'), hands: { p1: cards('Ac Ah'), p2: cards('9c 8d'), p3: cards('Qc Jd') } } });
+    act(s, 'p1', { type: 'call' });
+    act(s, 'p2', { type: 'call' });
+    act(s, 'p3', { type: 'check' });
+    passUntil(s, () => s.street === 'flop');
+    act(s, 'p2', { type: 'raise', amount: 40 });
+    act(s, 'p3', { type: 'call' });
+    act(s, 'p1', { type: 'call' });
+    toShowdown(s);
+    const rec = view(s, 'p1').you.extra.recorder!;
+    expect(rec.p2).toEqual({ hands: 1, vpip: 100, bluffs: 1 });
+    expect(rec.p3).toEqual({ hands: 1, vpip: 0, bluffs: 0 });
+    expect(rec.p1).toBeUndefined();
+    expect(view(s, 'p2').you.extra.recorder).toBeNull();
+  });
+
+  it('운명의 실: 두 사람만 리버까지 맞붙는다고 가정한 정확한 승률을 나에게만 (증강 효과 반영)', () => {
+    const s = setup(3, { augs: { p1: ['fateThread'] }, deal: { board: cards('Ad Ac Kd 4h 2s'), hands: { p1: cards('As Ah'), p2: cards('2c 3d'), p3: cards('Qc Jd') } } });
+    passUntil(s, () => s.street === 'flop');
+    use(s, 'p1', 'fateThread', { targetId: 'p2' });
+    expect(view(s, 'p2').log.at(-1)!.text).toBe('P1님이 비공개 증강을 사용했습니다');
+    resolveAll(s);
+    expect(lastNote(s, 'p1')).toContain('100.0%');
+    expect(JSON.stringify(view(s, 'p2'))).not.toContain('운명의 실:');
+
+    // 무늬만 다른 같은 패는 정확히 50%
+    const t = setup(3, { augs: { p1: ['fateThread'] }, deal: { board: cards('2c 7s 9c 4d 5s'), hands: { p1: cards('Kh Qh'), p2: cards('Kd Qd'), p3: cards('3c 3s') } } });
+    passUntil(t, () => t.street === 'flop');
+    use(t, 'p1', 'fateThread', { targetId: 'p2' });
+    resolveAll(t);
+    expect(lastNote(t, 'p1')).toContain('50.0%');
+
+    // 족보 역전이 걸려 있으면 반영된다
+    const u = setup(3, { augs: { p1: ['fateThread'] }, deal: { board: cards('Ad Ac Kd 4h 2s'), hands: { p1: cards('As Ah'), p2: cards('2c 3d'), p3: cards('Qc Jd') } } });
+    passUntil(u, () => u.street === 'flop');
+    u.effects.flips = 1;
+    use(u, 'p1', 'fateThread', { targetId: 'p2' });
+    resolveAll(u);
+    expect(lastNote(u, 'p1')).toMatch(/승률은 0\.0%/);
+  });
+});

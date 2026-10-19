@@ -335,6 +335,8 @@ export function chooseBotAction(view: PlayerView, rng: Rng): GameAction | null {
     return use('pickMe', { targetId: pickOne(pm.targets, rng), cardIndex: Math.max(0, ranks.indexOf(Math.min(...ranks))) });
   }
   if (usable(view, 'infoAuction') && chance(rng, 15)) return use('infoAuction');
+  const ft = usable(view, 'fateThread');
+  if (ft && ft.targets.length && chance(rng, 40)) return use('fateThread', { targetId: pickOne(ft.targets, rng) });
   if (usable(view, 'cardAuction') && chance(rng, 15)) return use('cardAuction');
   if (usable(view, 'truthGame') && you.hand && chance(rng, 40)) return use('truthGame', { choice: Math.min(7, you.hand.category) });
   const sd = usable(view, 'staredown');

@@ -166,6 +166,8 @@ function newPlayer(np: NewPlayer, seat: number, chips: number): PlayerState {
     parasite: null,
     promoted: false,
     alchemy: null,
+    vpipHand: false,
+    aggressed: false,
   };
 }
 
@@ -266,6 +268,7 @@ export function createGame(players: NewPlayer[], opts: CreateGameOptions = {}): 
     tasks: [],
     teams: [],
     teamsNext: null,
+    records: {},
     used: [],
     effects: freshEffects(),
     blackoutNext: false,
@@ -697,6 +700,8 @@ function resetHandState(state: GameState): void {
     p.parasite = null;
     p.promoted = false;
     p.alchemy = null;
+    p.vpipHand = false;
+    p.aggressed = false;
     for (const a of p.augments) a.usedThisHand = false;
   }
   state.board = [];
@@ -1197,6 +1202,7 @@ function applyBet(state: GameState, idx: number, a: BetAction): string | null {
     case 'call': {
       if (toCall === 0) return '콜할 금액이 없습니다. 체크하세요.';
       if (a.freeRide) return declareFreeRide(state, p);
+      if (state.street === 'preflop') p.vpipHand = true;
       putChips(p, toCall);
       p.lastAction = p.allIn ? `올인 ${p.streetBet}` : `콜 ${p.streetBet}`;
       addLog(state, `${p.name}: ${p.allIn ? '올인 콜' : '콜'} (${p.streetBet})`);
@@ -1214,6 +1220,7 @@ function applyBet(state: GameState, idx: number, a: BetAction): string | null {
         if (target !== maxTo) return `레이즈 금액은 ${state.currentBet + state.minRaise} 이상이어야 합니다.`;
         if (toCall === 0) return '콜할 금액이 없습니다. 체크하세요.';
         if (p.forcedCall && p.chips > toCall) return '강제 집행 대상이라 콜만 할 수 있습니다.';
+        if (state.street === 'preflop') p.vpipHand = true;
         putChips(p, toCall);
         p.lastAction = p.allIn ? `올인 ${p.streetBet}` : `콜 ${p.streetBet}`;
         addLog(state, `${p.name}: ${p.allIn ? '올인 콜' : '콜'} (${p.streetBet})`);
@@ -1226,6 +1233,8 @@ function applyBet(state: GameState, idx: number, a: BetAction): string | null {
       if (target < minTo && target !== maxTo) return `최소 ${minTo}까지 레이즈해야 합니다.`;
       const opening = state.currentBet === 0;
       const raiseSize = target - state.currentBet;
+      p.aggressed = true;
+      if (state.street === 'preflop') p.vpipHand = true;
       putChips(p, target - level);
       if (raiseSize >= state.minRaise) state.minRaise = raiseSize;
       state.currentBet = target;
@@ -1267,6 +1276,7 @@ function declareFreeRide(state: GameState, p: PlayerState): string | null {
   if ((aug.usesLeft ?? 0) <= 0) return '무임승차 남은 횟수가 없습니다.';
   const err = lockError(state) ?? ACTIVE.freeRide!.check(ctxFor(state, p, aug), {}, false) ?? taxError(state, p);
   if (err) return err;
+  if (state.street === 'preflop') p.vpipHand = true;
   declare(state, p, aug, {});
   return null;
 }
@@ -2262,12 +2272,25 @@ function finishHand(state: GameState, result: HandResult): void {
   state.declareQueue = [];
   // 칩이 0이 된 사람 (토템 등으로 살아나기 전, 사냥꾼 판정용)
   result.busted = state.players.filter((p) => p.inHand && active(p) && p.chips <= 0).map((p) => p.id);
+  recordHand(state, result);
   runHandEndHooks(state, result);
   state.result = result;
   // 쇼다운 직후 선택(무승부 제안)이 남아 있으면 탈락 판정은 다음 핸드 시작 전에
   if (!state.players.some((p) => p.drawPrompt) && bustSweep(state)) return;
   state.phase = 'handEnd';
   state.decisionSeq++;
+}
+
+/** 기록관: 공개된 행동만으로 쌓는 기록 (프리플랍 참여율, 쇼다운에서 드러난 블러프) */
+function recordHand(state: GameState, result: HandResult): void {
+  for (const p of state.players) {
+    if (!p.inHand || !p.hole.length) continue;
+    const r = (state.records[p.id] ??= { hands: 0, vpip: 0, bluffs: 0 });
+    r.hands++;
+    if (p.vpipHand) r.vpip++;
+    const e = result.showdown ? result.entries.find((x) => x.id === p.id) : undefined;
+    if (e && p.aggressed && e.score[0] === Category.HighCard) r.bluffs++;
+  }
 }
 
 /** 탈락·추방된 사람의 상환 예약은 사라진다 (빌린 칩은 돌려받지 못함) */

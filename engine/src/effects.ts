@@ -9,6 +9,7 @@ import { AUGMENTS, AugmentId, canHold, isActiveAugment, isAugmentId } from './au
 import { blackjackCards, isMadeHand, Category, CATEGORY_NAMES } from './evaluator.js';
 import { pickOne } from './rng.js';
 import { compareContenders } from './showdown.js';
+import { headsUpEquity } from './equity.js';
 import { contenderFor, handEvalFor, standingOf } from './standing.js';
 import {
   active,
@@ -1716,6 +1717,23 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
       const to = alchemyTarget(from, params.choice!)!;
       owner.alchemy = { index: params.cardIndex!, from, to };
       addLog(state, `연금술: ${owner.name}의 홀카드 ${cardToken(from)}을(를) 이번 핸드 족보 계산에서 ${cardToken(to)}(으)로 바꿉니다`);
+    },
+  },
+
+  // ═════════════════════════ 3차 풀: 확률·통계 ═════════════════════════
+
+  fateThread: {
+    check(ctx, params) {
+      const { state } = ctx;
+      if (basePhase(state) !== 'betting' || state.street !== 'flop') return '플랍 베팅 라운드에서만 쓸 수 있습니다.';
+      return opponentInHand(ctx, params) ?? needSight(ctx);
+    },
+    detail: (ctx, p) => `— 대상: ${nameOf(ctx.state, p.targetId ?? '')}`,
+    resolve(ctx, params) {
+      const { state, owner } = ctx;
+      const t = targetOf(ctx, params)!;
+      const eq = headsUpEquity(state, owner, t);
+      note(state, owner, 'info', `운명의 실: ${t.name}와(과) 리버까지 둘이 맞붙으면 지금 내 승률은 ${(eq * 100).toFixed(1)}%`, undefined, t.id);
     },
   },
 

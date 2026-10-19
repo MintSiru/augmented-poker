@@ -203,6 +203,9 @@ export interface PlayerState {
   promoted: boolean;
   /** 연금술: 이번 핸드 족보 계산에서 바꾼 홀카드 (공개) */
   alchemy: { index: number; from: Card; to: Card } | null;
+  /** 기록관용: 이번 핸드 프리플랍에 자발적으로 칩을 냈는가, 베팅·레이즈했는가 */
+  vpipHand: boolean;
+  aggressed: boolean;
   /** 이 플레이어에게 보여 줄 로그의 시작 번호 (중도 참여자는 참여 이후 로그만 본다) */
   logFrom: number;
 }
@@ -471,6 +474,8 @@ export interface GameState {
   teams: string[][];
   /** 운명 공동체: 다음 핸드에 적용할 팀 */
   teamsNext: string[][] | null;
+  /** 기록관: 플레이어별 공개 행동 기록 (참여 핸드 수, 프리플랍 참여 수, 쇼다운에서 드러난 블러프 수) */
+  records: Record<string, { hands: number; vpip: number; bluffs: number }>;
   used: UsedCard[];
   effects: TableEffects;
   /** 다음 핸드에 암전 적용 */

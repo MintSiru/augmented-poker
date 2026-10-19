@@ -669,6 +669,10 @@ function seatHtml(v: PlayerView, p: PublicPlayerView, k: number, n: number): str
       <div class="seat-status">${esc(status)}${!p.connected && !p.out && !p.kicked ? ' ⚠' : ''}</div>
       ${canKick(p) ? `<button class="small kick" data-a="kick" data-id="${esc(p.id)}" data-name="${esc(p.name)}">추방</button>` : ''}
       ${shep}
+      ${(() => {
+        const r = v.you.extra.recorder?.[p.id];
+        return r && r.hands ? `<div class="seat-rec" title="기록관: 프리플랍 참여율 · 쇼다운에서 드러난 블러프 (${r.hands}핸드)">📒 VPIP ${r.vpip}% · 블러프 ${r.bluffs}</div>` : '';
+      })()}
       <div class="seat-augs"><span class="cnt" title="보유 증강 수">증강 ${p.augmentCount}</span>${p.streak ? `<span class="streak" title="폭주기관차 연승">🔥${p.streak}연승</span>` : ''}${revealed}</div>
     </div>
     ${p.streetBet > 0 ? `<div class="bet" style="left:${bx}%;top:${by}%">${fmt(p.streetBet)}</div>` : ''}`;

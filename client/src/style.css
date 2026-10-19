@@ -513,3 +513,4 @@ body.blurred #g-center .board { filter: blur(1.2px) saturate(.6); }
 .seat.team-2 { --team-c: #ba68c8; }
 .seat.team-3 { --team-c: #aed581; }
 .rx-steal { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin-top: 6px; }
+.seat-rec { font-size: 11px; color: #c9d8a6; margin-top: 2px; }

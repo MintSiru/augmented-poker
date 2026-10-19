@@ -354,6 +354,8 @@ export interface PlayerView {
       contract: number | null;
       /** 잠복: 숨길 증강을 고를 수 있는가 */
       lurkChoose: boolean;
+      /** 기록관: 상대별 프리플랍 참여율(%)과 쇼다운에서 드러난 블러프 횟수 */
+      recorder: Record<string, { hands: number; vpip: number; bluffs: number }> | null;
     };
   };
   result: HandResultView | null;
@@ -737,6 +739,16 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
         drawPrompt: me.drawPrompt && state.phase === 'handEnd' ? { winnerName: nameById(me.drawPrompt.winnerId) } : null,
         contract: me.contract,
         lurkChoose: me.lurkChoose,
+        recorder: findAug(me, 'recorder')
+          ? Object.fromEntries(
+              state.players
+                .filter((p) => p !== me)
+                .map((p) => {
+                  const r = state.records[p.id] ?? { hands: 0, vpip: 0, bluffs: 0 };
+                  return [p.id, { hands: r.hands, vpip: r.hands ? Math.round((r.vpip / r.hands) * 100) : 0, bluffs: r.bluffs }];
+                }),
+            )
+          : null,
       },
     },
     result,
