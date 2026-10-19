@@ -11,7 +11,7 @@ function guard(state: GameState): ActionResult | null {
 }
 
 /** 특정 증강을 강제로 지급 */
-export function debugGiveAugment(state: GameState, playerId: string, augment: AugmentId, wildRank?: number): ActionResult {
+export function debugGiveAugment(state: GameState, playerId: string, augment: AugmentId, wildRank?: number, parity?: 'even' | 'odd'): ActionResult {
   const g = guard(state);
   if (g) return g;
   const p = getPlayer(state, playerId);
@@ -19,7 +19,7 @@ export function debugGiveAugment(state: GameState, playerId: string, augment: Au
   if (!isAugmentId(augment)) return { ok: false, error: '알 수 없는 증강' };
   if (findAug(p, augment)) return { ok: false, error: '이미 보유한 증강' };
   const wr = typeof wildRank === 'number' && wildRank >= 2 && wildRank <= 14 ? wildRank : undefined;
-  grantAugment(state, p, augment, wr);
+  grantAugment(state, p, augment, wr, parity);
   return { ok: true };
 }
 
@@ -81,7 +81,7 @@ export interface DebugView {
     discarded: Card[];
     keptCard: Card | null;
     shepherdLied: boolean;
-    augments: { id: AugmentId; name: string; usesLeft: number | null; usedThisHand: boolean; revealed: boolean; publicName: string | null; wildRank: string | null; armed: boolean | null; fakeId: AugmentId | null }[];
+    augments: { id: AugmentId; name: string; usesLeft: number | null; usedThisHand: boolean; revealed: boolean; publicName: string | null; wildRank: string | null; armed: boolean | null; fakeId: AugmentId | null; parity: string | null }[];
   }[];
 }
 
@@ -117,6 +117,7 @@ export function getDebugView(state: GameState): DebugView | null {
         wildRank: a.wildRank ? rankName(a.wildRank) : null,
         armed: a.armed ?? null,
         fakeId: a.fakeId ?? null,
+        parity: a.parity ?? null,
       })),
     })),
   };

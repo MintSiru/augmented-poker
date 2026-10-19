@@ -17,6 +17,7 @@ import {
   chooseBotAction,
   chooseBotOpportunistic,
   counterCandidates,
+  immunityCandidates,
   REACTION_MS,
   createGame,
   cryptoRng,
@@ -652,12 +653,12 @@ export class Room {
       );
     };
     if (kind === 'reaction') {
-      for (const id of counterCandidates(g)) {
+      for (const id of new Set([...counterCandidates(g), ...immunityCandidates(g)])) {
         if (!bots.some((b) => b.id === id)) continue;
         schedule(`counter:${seq}:${id}`, 300 + Math.random() * 1500, () => {
           if (getPending(g).seq !== seq) return;
           const a = chooseBotAction(getPlayerView(g, id), cryptoRng);
-          if (a?.type === 'counter' && applyAction(g, id, a).ok) this.sync();
+          if ((a?.type === 'counter' || a?.type === 'immunity') && applyAction(g, id, a).ok) this.sync();
         });
       }
       return;
@@ -684,7 +685,7 @@ export class Room {
     console.log(
       `\n[게임 종료 통계] 방 ${this.code} · 총 핸드 ${g.handNumber}` +
         ` · 은행에서 생성된 칩 ${st.bankChips + st.joinChips} (하이리스크 ${st.bankChips}, 중도 참여 지급 ${st.joinChips})` +
-        ` · 세금으로 사라진 칩 ${st.bankTaxed} · 추방으로 사라진 칩 ${st.kickedChips}`,
+        ` · 은행으로 빠진 칩 ${st.bankTaxed + st.bankPaid} (세금 ${st.bankTaxed}, 나 다시 돌아갈래 ${st.bankPaid}) · 추방으로 사라진 칩 ${st.kickedChips}`,
     );
     console.table(rows);
   }

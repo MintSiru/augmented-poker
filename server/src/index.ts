@@ -198,7 +198,8 @@ export async function createAppServer(port = 0, overrides: Partial<ServerOptions
           return reply(ack, { ok: false, error: '대상과 증강을 고르세요.' });
         }
         const wild = typeof payload.wildRank === 'number' ? payload.wildRank : undefined;
-        const r = debugGiveAugment(g, payload.playerId, payload.augment, wild);
+        const parity = payload.parity === 'even' || payload.parity === 'odd' ? payload.parity : undefined;
+        const r = debugGiveAugment(g, payload.playerId, payload.augment, wild, parity);
         current.room.sync();
         reply(ack, r);
       });

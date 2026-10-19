@@ -46,6 +46,12 @@ export interface EvalRules {
   wrapStraight?: boolean;
   /** 이 숫자(2..14)의 카드는 와일드 */
   wildRank?: number | null;
+  /** 연속된 4장 + 다른 카드 1장도 스트레이트 (4장의 최고 숫자로 비교) */
+  fourStraight?: boolean;
+  /** 숫자가 정확히 2씩 증가하는 5장도 스트레이트 (A는 1로만) */
+  doubleStep?: boolean;
+  /** 짝수/홀수 동맹: 5장이 모두 이 쪽 숫자면 동맹 플러시 (A 제외) */
+  parity?: 'even' | 'odd' | null;
 }
 
 export interface HandValue {
@@ -59,6 +65,9 @@ export interface HandValue {
   usedFourFlush: boolean;
   usedGap: boolean;
   usedWrap: boolean;
+  usedFourStraight: boolean;
+  usedDoubleStep: boolean;
+  usedParity: boolean;
   name: string;
 }
 
@@ -76,7 +85,24 @@ interface CoreResult {
   usedFourFlush: boolean;
   usedGap: boolean;
   usedWrap: boolean;
+  usedFourStraight?: boolean;
+  usedDoubleStep?: boolean;
+  usedParity?: boolean;
 }
+
+/** 4장 스트레이트: 연속 4장(와일드로 채움 가능)의 가장 높은 끝 숫자 */
+function findFourRun(ranks: number[], w: number, wrapAllowed: boolean): StraightFit | null {
+  for (let top = 14; top >= 2; top--) {
+    const win = cyclicWindow(top, 4);
+    const wrap = win.includes(13) && win.includes(2);
+    if (wrap && !wrapAllowed) continue;
+    const present = win.filter((r) => ranks.includes(r)).length;
+    if (4 - present <= w) return { top, normal: false, wrap };
+  }
+  return null;
+}
+
+const PARITY_RANKS = { even: [12, 10, 8, 6, 4, 2], odd: [13, 11, 9, 7, 5, 3] } as const;
 
 interface StraightFit {
   top: number;
@@ -145,8 +171,8 @@ function evaluateGroup(naturals: Card[], w: number, rules: EvalRules): CoreResul
   const descRanks = [...ranks].sort((a, b) => b - a);
 
   const candidates: CoreResult[] = [];
-  const push = (score: number[], usedFourFlush = false, usedGap = false, usedWrap = false) =>
-    candidates.push({ score, usedFourFlush, usedGap, usedWrap });
+  const push = (score: number[], usedFourFlush = false, usedGap = false, usedWrap = false, extra: Partial<CoreResult> = {}) =>
+    candidates.push({ score, usedFourFlush, usedGap, usedWrap, ...extra });
 
   // 파이브 카드 (와일드가 있어야 가능)
   if (total === 5 && distinct.length <= 1 && w > 0) push([Category.FiveKind, distinct[0] ?? 14]);
@@ -184,9 +210,17 @@ function evaluateGroup(naturals: Card[], w: number, rules: EvalRules): CoreResul
   // 플러시
   if (total === 5) {
     if (allSameSuit) {
-      // 진짜 5장 플러시는 4장 플러시보다 항상 높다(두 번째 값 1)
-      push([Category.Flush, 1, ...fillFlushRanks(ranks, w)]);
-    } else if (rules.fourFlush) {
+      // 진짜 5장 플러시는 4장 플러시보다 항상 높다(두 번째 값 1). 동맹 플러시와 완전히 같으면 일반 플러시가 높다(마지막 값 1)
+      push([Category.Flush, 1, ...fillFlushRanks(ranks, w), 1]);
+    }
+    if (rules.parity) {
+      const allowed: readonly number[] = PARITY_RANKS[rules.parity];
+      if (ranks.every((r) => allowed.includes(r))) {
+        const filled = [...ranks, ...Array(w).fill(allowed[0])].sort((a, b) => b - a);
+        push([Category.Flush, 1, ...filled, 0], false, false, false, { usedParity: true });
+      }
+    }
+    if (!allSameSuit && rules.fourFlush) {
       for (const [s, n] of suitCnt) {
         if (n + w < 4) continue;
         const suited = naturals.filter((c) => suitOf(c) === s).map(rankOf);
@@ -203,6 +237,21 @@ function evaluateGroup(naturals: Card[], w: number, rules: EvalRules): CoreResul
   if (total === 5 && ranksDistinct) {
     const st = findStraight(distinct, !!rules.gapStraight, !!rules.wrapStraight);
     if (st) push([Category.Straight, st.top, st.normal ? 1 : 0], false, !st.normal, st.wrap);
+    if (rules.doubleStep) {
+      // A는 1로만 쓴다. 와일드는 빈 칸을 채운다
+      const low = ranks.map((r) => (r === 14 ? 1 : r));
+      for (let t = 13; t >= 9; t--) {
+        const win = [t, t - 2, t - 4, t - 6, t - 8];
+        if (low.every((r) => win.includes(r))) {
+          push([Category.Straight, t, 0], false, false, false, { usedDoubleStep: true });
+          break;
+        }
+      }
+    }
+  }
+  if (total === 5 && rules.fourStraight) {
+    const run = findFourRun(distinct, w, !!rules.wrapStraight);
+    if (run) push([Category.Straight, run.top, 0], false, false, run.wrap, { usedFourStraight: true });
   }
 
   // 트리플
@@ -262,6 +311,9 @@ function evaluateFive(cards: Card[], rules: EvalRules): HandValue {
     usedFourFlush: core.usedFourFlush,
     usedGap: core.usedGap,
     usedWrap: core.usedWrap,
+    usedFourStraight: !!core.usedFourStraight,
+    usedDoubleStep: !!core.usedDoubleStep,
+    usedParity: !!core.usedParity,
     name: describe(core),
   };
 }
@@ -324,7 +376,7 @@ export function bestHand(cards: Card[], rules: EvalRules = {}): HandValue {
   return best!;
 }
 
-export type AppliedVariant = 'fourFlush' | 'gapStraight' | 'wrapStraight' | 'wild';
+export type AppliedVariant = 'fourFlush' | 'gapStraight' | 'wrapStraight' | 'wild' | 'fourStraight' | 'doubleStep' | 'parity' | 'blackjack';
 
 /** 변형이 만든 족보 이름 (쇼다운 표시용) */
 export const VARIANT_LABEL: Record<AppliedVariant, string> = {
@@ -332,7 +384,30 @@ export const VARIANT_LABEL: Record<AppliedVariant, string> = {
   gapStraight: '징검다리 스트레이트',
   wrapStraight: '원형 스트레이트',
   wild: '와일드카드 사용',
+  fourStraight: '4장 스트레이트',
+  doubleStep: '보폭 두 배 스트레이트',
+  parity: '동맹 플러시',
+  blackjack: '블랙잭(풀하우스 동급)',
 };
+
+/** 블랙잭이 인정되는 족보 점수: 가장 낮은 풀하우스(2·2·2·3·3)와 동급 */
+export const BLACKJACK_SCORE: readonly number[] = [Category.FullHouse, 2, 3];
+
+function bjValue(c: Card): number {
+  const r = rankOf(c);
+  return r === 14 ? 1 : Math.min(10, r);
+}
+
+/** 7장(보드에 봉인 제외) 중 숫자 합이 정확히 21인 5장 (J·Q·K=10, A=1 또는 11). 없으면 null */
+export function blackjackCards(cards: Card[]): Card[] | null {
+  for (const combo of cards.length <= 5 ? [cards] : combinations(cards, 5)) {
+    if (combo.length !== 5) continue;
+    const base = combo.reduce((s, c) => s + bjValue(c), 0);
+    const aces = combo.filter((c) => rankOf(c) === 14).length;
+    for (let k = 0; k <= aces; k++) if (base + 10 * k === 21) return combo;
+  }
+  return null;
+}
 
 export interface PlayerHandEval {
   value: HandValue;
@@ -344,7 +419,7 @@ export interface PlayerHandEval {
 export function evaluatePlayerHand(hole: Card[], board: Card[], rules: EvalRules): PlayerHandEval {
   const cards = [...hole, ...board];
   const standard = bestHand(cards, {});
-  const hasVariant = !!(rules.fourFlush || rules.gapStraight || rules.wrapStraight || rules.wildRank);
+  const hasVariant = !!(rules.fourFlush || rules.gapStraight || rules.wrapStraight || rules.wildRank || rules.fourStraight || rules.doubleStep || rules.parity);
   if (!hasVariant) return { value: standard, applied: [] };
   const variant = bestHand(cards, rules);
   if (compareScores(variant.score, standard.score) <= 0) return { value: standard, applied: [] };
@@ -352,12 +427,33 @@ export function evaluatePlayerHand(hole: Card[], board: Card[], rules: EvalRules
   if (variant.usedFourFlush) applied.push('fourFlush');
   if (variant.usedGap) applied.push('gapStraight');
   if (variant.usedWrap) applied.push('wrapStraight');
+  if (variant.usedFourStraight) applied.push('fourStraight');
+  if (variant.usedDoubleStep) applied.push('doubleStep');
+  if (variant.usedParity) applied.push('parity');
   if (variant.wildsUsed > 0) applied.push('wild');
   return { value: variant, applied };
 }
 
+/** 블랙잭을 발동한 플레이어의 최종 족보: 21이 되면 가장 낮은 풀하우스와 동급 (원래 족보가 더 높으면 원래 족보) */
+export function applyBlackjack(ev: PlayerHandEval, cards: Card[]): PlayerHandEval {
+  if (compareScores(ev.value.score, BLACKJACK_SCORE) >= 0) return ev;
+  const bj = blackjackCards(cards);
+  if (!bj) return ev;
+  return {
+    value: {
+      ...ev.value,
+      score: [...BLACKJACK_SCORE],
+      category: Category.FullHouse,
+      cards: bj,
+      core: bj,
+      name: '블랙잭 (풀하우스 동급)',
+    },
+    applied: ['blackjack'],
+  };
+}
+
 function straightPrefix(core: CoreResult): string {
-  return `${core.usedWrap ? '원형 ' : ''}${core.usedGap ? '징검다리 ' : ''}`;
+  return `${core.usedWrap ? '원형 ' : ''}${core.usedGap ? '징검다리 ' : ''}${core.usedFourStraight ? '4장 ' : ''}${core.usedDoubleStep ? '보폭 두 배 ' : ''}`;
 }
 
 /** 족보의 '숫자' 부분 (키커 제외): 절대 키커의 "같은 숫자의 같은 족보" 판정에 쓴다 */
@@ -391,7 +487,7 @@ function describe(core: CoreResult): string {
     case Category.FullHouse:
       return `풀하우스 (${n(s[1])} / ${n(s[2])})`;
     case Category.Flush:
-      return core.usedFourFlush ? `4장 플러시 (${n(s[2])} 하이)` : `플러시 (${n(s[2])} 하이)`;
+      return core.usedParity ? `동맹 플러시 (${n(s[2])} 하이)` : core.usedFourFlush ? `4장 플러시 (${n(s[2])} 하이)` : `플러시 (${n(s[2])} 하이)`;
     case Category.Straight:
       return `${straightPrefix(core)}스트레이트 (${n(s[1])} 하이)`;
     case Category.Trips:

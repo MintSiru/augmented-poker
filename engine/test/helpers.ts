@@ -8,6 +8,7 @@ import {
   chooseBotAction,
   chooseBotOpportunistic,
   counterCandidates,
+  immunityCandidates,
   getPlayerView,
   seededRng,
   type GameState,
@@ -29,7 +30,7 @@ export function totalChips(state: GameState): number {
 /** 은행에서 생기거나 사라진 칩(하이리스크 보너스, 중도 참여 지급, 세금, 추방)을 반영한 기대 총액 */
 export function expectedChips(state: GameState, initial: number): number {
   const st = state.stats;
-  return initial + st.bankChips + st.joinChips - st.bankTaxed - st.kickedChips;
+  return initial + st.bankChips + st.joinChips - st.bankTaxed - st.bankPaid - st.kickedChips;
 }
 
 function act(state: GameState, id: string, a: GameAction, strict: boolean): boolean {
@@ -43,7 +44,7 @@ export function stepBots(state: GameState, rng: Rng, strict = true): boolean {
   const pending = getPending(state);
   if (pending.kind === 'none') return false;
   if (pending.kind === 'reaction') {
-    for (const id of counterCandidates(state)) {
+    for (const id of new Set([...counterCandidates(state), ...immunityCandidates(state)])) {
       const a = chooseBotAction(getPlayerView(state, id), rng);
       if (a) act(state, id, a, strict);
     }
@@ -54,7 +55,9 @@ export function stepBots(state: GameState, rng: Rng, strict = true): boolean {
   for (const p of state.players) {
     if (p.out || pending.playerIds.includes(p.id)) continue;
     const a = chooseBotOpportunistic(getPlayerView(state, p.id), rng);
-    if (a && act(state, p.id, a, strict)) return true;
+    // 데스티니 드로우는 남이 가져온 카드(봇이 알 수 없음)를 고르면 거절될 수 있다
+    const lenient = a?.type === 'useAugment' && a.augment === 'destinyDraw';
+    if (a && act(state, p.id, a, strict && !lenient)) return true;
   }
   if (pending.kind === 'handEnd') {
     for (const id of pending.playerIds) {

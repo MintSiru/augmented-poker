@@ -43,6 +43,13 @@ const app = {
   /** 서버(디버그)가 연결을 끊어 자동 재연결하지 않는 상태 */
   forcedOff: false,
   showSettings: false,
+  /** 데스티니 드로우 카드 선택 창 */
+  destinyOpen: false,
+  /** 내기할래? 선택 창을 건너뛴 핸드 */
+  betSkipHand: -1,
+  betOpen: false,
+  radarIdx: 0,
+  rumor: 'observer' as string,
   lastLogSeq: 0,
   showHandTable: false,
   chat: [] as ChatMessage[],
@@ -549,6 +556,7 @@ function renderTop(env: GameEnvelope, v: PlayerView) {
       <span class="muted">다음 레벨까지 ${Math.max(0, v.handsUntilLevelUp)}핸드</span>
       <span class="muted">남은 인원 ${v.alive}명</span>
       ${v.joiners.length ? `<span class="muted hide-sm" title="다음 핸드부터 참여">참여 대기: ${esc(v.joiners.map((j) => j.name).join(', '))}</span>` : ''}
+      ${v.table.underdogHands ? `<span class="taxbadge" title="언더독: 족보 순위가 뒤바뀌는 남은 핸드 수 (이번 핸드 포함)">🐶 언더독 ${v.table.underdogHands}핸드</span>` : ''}
       ${v.table.taxers.length ? `<span class="taxbadge" title="죽음과 세금 선언자: ${esc(v.table.taxers.join(', '))}">💀 세금 ${v.you.tax ? `${fmt(v.you.tax)}칩/사용` : '면제'}</span>` : ''}</div>
      <div class="tb-right"><span class="wait">${waitingText(v)} <span class="timer-text" data-timer></span></span>
       ${env.debug ? '<span class="debug-flag">DEBUG</span>' : ''}
@@ -626,6 +634,7 @@ function reactionHtml(v: PlayerView): string {
       <div>${who} ${what} 선언 <span class="timer-text" data-timer></span></div>
       ${r.countered ? `<div class="rx-sub">🛡 ${esc(r.counteredBy ?? '')}의 카운터 스펠로 무효화됨</div>` : '<div class="rx-sub">반응 대기 중…</div>'}
       ${r.canCounter && !r.countered ? `<button class="primary small" data-a="counter">카운터 스펠: 무효화할까요?${v.you.tax ? ` (세금 ${fmt(v.you.tax)})` : ''}</button>` : ''}
+      ${r.canImmune && !r.countered ? `<button class="small" data-a="immunity">면역: 나만 이 효과에서 빠지기${v.you.tax ? ` (세금 ${fmt(v.you.tax)})` : ''}</button>` : ''}
       ${r.queued ? `<div class="rx-sub">대기 중인 선언 ${r.queued}개</div>` : ''}
     </div>`;
 }
@@ -666,7 +675,7 @@ function renderTable(v: PlayerView) {
           const tags = [
             ...e.variants.map((t) => `<em class="var">${esc(t)}</em>`),
             ...e.applied.map((t) => `<em>적용: ${esc(t)}</em>`),
-            ...e.tiebreak.map((t) => `<em class="tb">${esc(t)}로 승리</em>`),
+            ...e.tiebreak.map((t) => `<em class="tb">${t === '순혈' ? '순혈 적용' : `${esc(t)}로 승리`}</em>`),
           ].join(' ');
           return `<div class="res-row ${e.won > 0 ? 'win' : ''}">
           <span class="nm">${esc(e.name)}</span>
@@ -710,6 +719,14 @@ function renderHand(v: PlayerView) {
       ${me.folded ? ' · <span class="muted">폴드</span>' : ''}</div>
       ${handPanelHtml(v)}
       ${v.you.holeHidden && !me.folded ? '<div class="muted small-note">암전: 쇼다운까지 내 카드를 볼 수 없습니다</div>' : ''}
+      ${v.you.boardBlind ? '<div class="warn">실명 다트: 이번 핸드는 보드를 볼 수 없습니다 (쇼다운 때 공개)</div>' : ''}
+      ${
+        v.you.extra.lockerReady
+          ? `<div class="locker-row">보관함 ${cardHtml(v.you.extra.lockerReady, { size: 'sm', extra: 'inline' })}와 바꾸기: ${(v.you.hole.length ? v.you.hole : Array.from({ length: v.you.holeHidden }, () => ''))
+              .map((c, i) => `<button class="small" data-a="locker" data-i="${i}">${c ? cardHtml(c, { size: 'sm', extra: 'inline' }) : `${i + 1}번`}</button>`)
+              .join('')}</div>`
+          : ''
+      }
       ${me.sittingOut ? '<div class="warn">자리 비움 상태입니다</div>' : ''}</div>`;
   }
   patch($('#g-hand'), html);
@@ -781,7 +798,7 @@ function augControl(v: PlayerView, a: MyAugmentView): string {
     case 'call':
       return `<span class="muted" title="${esc(a.hint)}">${a.usesLeft ? '레이즈·올인에 콜할 때 "무임승차 콜" 버튼' : '사용함'}</span>`;
     case 'reaction':
-      return `<span class="muted" title="${esc(a.hint)}">${a.usesLeft ? '다른 사람 증강의 반응 대기 중에 버튼이 나타남' : '사용함'}</span>`;
+      return `<span class="muted" title="${esc(a.hint)}">${a.usesLeft ? (a.id === 'immunity' ? '다른 사람의 공개형 증강 반응 대기 중에 버튼이 나타남' : '다른 사람 증강의 반응 대기 중에 버튼이 나타남') : '사용함'}</span>`;
   }
   if (a.id === 'exemption') {
     return `<button class="small ${a.armed ? 'on' : ''}" data-a="toggle" data-on="${a.armed ? '0' : '1'}" ${a.usesLeft ? '' : 'disabled'} title="블라인드 차례에 자동 사용 (선언 → 3초 반응 대기)">자동 사용 ${a.armed ? '켜짐' : '꺼짐'}</button>`;
@@ -816,6 +833,31 @@ function augControl(v: PlayerView, a: MyAugmentView): string {
       .map((c) => `<option value="${c}" ${c === app.fakeCard ? 'selected' : ''}>${c.replace('T', '10')}</option>`)
       .join('')}</select><button class="small" data-a="shepherdFake" ${a.usableNow ? '' : 'disabled'} title="게임 1회: 가짜 카드를 진짜처럼 공개 (쇼다운에서 들키면 2BB 벌금)">가짜 공개</button></span>`;
   }
+  if (a.id === 'blindDraw') {
+    if (!v.you.hole.length) return useBtn(v, a, '무작위 1장 교체', 'data-i="0"');
+    return v.you.hole
+      .map((c, i) => `<button class="small" data-a="use" data-aug="blindDraw" data-i="${i}" ${a.usableNow ? '' : 'disabled'} title="${esc(a.hint)}">${cardHtml(c, { size: 'sm', extra: 'inline' })} 교체</button>`)
+      .join('');
+  }
+  if (a.id === 'radar') {
+    const opts = v.board.map((c, i) => (c ? `<option value="${i}" ${i === app.radarIdx ? 'selected' : ''}>${c.replace('T', '10')}</option>` : '')).join('');
+    return (opts ? `<select data-radar>${opts}</select>` : '<span class="muted">보드 없음</span>') + useBtn(v, a, '레이더');
+  }
+  if (a.id === 'destinyDraw') {
+    const chosen = v.you.extra.destinyCard;
+    if (chosen) return `<span class="muted">다음 핸드에 ${cardHtml(chosen, { size: 'sm', extra: 'inline' })} 받음</span>`;
+    return `<button class="small primary" data-a="destinyOpen" ${a.usableNow ? '' : 'disabled'} title="${esc(a.hint)}">카드 고르기</button>`;
+  }
+  if (a.id === 'bet') {
+    const pred = v.you.extra.betPrediction;
+    if (pred !== null) return `<span class="muted">예측: ${esc(BET_NAMES[pred])}</span>`;
+    return `<button class="small primary" data-a="betOpen" ${a.usableNow ? '' : 'disabled'} title="${esc(a.hint)}">족보 예측</button>`;
+  }
+  if (a.id === 'rumor') {
+    const ids = Object.keys(AUGMENTS) as AugmentId[];
+    return `<select data-rumor>${ids.map((id) => `<option value="${id}" ${id === app.rumor ? 'selected' : ''}>${esc(AUGMENTS[id].name)}</option>`).join('')}</select>${useBtn(v, a, '소문 내기')}`;
+  }
+  if (a.id === 'parity') return `<span class="muted">${a.parity === 'even' ? '짝수 동맹' : '홀수 동맹'} · 자동 발동</span>`;
   if (a.target) {
     const opts = a.targets;
     if (!opts.includes(app.targets[a.id])) app.targets[a.id] = opts[0] ?? '';
@@ -832,9 +874,20 @@ function augControl(v: PlayerView, a: MyAugmentView): string {
     russianRoulette: '러시안 룰렛 선언',
     heavyFog: '짙은 안개 선언',
     deathTax: '죽음과 세금 선언',
+    colorForecast: '다음 카드 무늬 보기',
+    leaderboard: '내 순위 보기',
+    circuitBreaker: '서킷브레이커 선언',
+    ironWall: '철벽 선언',
+    padlock: '자물쇠 선언',
+    bombPot: '다음 핸드 폭탄 팟 선언',
+    underdog: '언더독 선언',
+    highCardDuel: '하이카드 선언',
+    restart: '나 다시 돌아갈래',
   };
   return useBtn(v, a, labels[a.id] ?? '사용');
 }
+
+const BET_NAMES = ['하이카드', '원페어', '투페어', '트리플', '스트레이트', '플러시', '풀하우스', '포카드 이상'];
 
 function renderAugments(v: PlayerView) {
   const list = v.you.augments;
@@ -874,7 +927,7 @@ function countingHtml(v: PlayerView): string {
           .join('')}</div>`,
     )
     .join('');
-  const kindName: Record<string, string> = { burn: '번', fold: '폴드', discard: '버림', rewind: '되감기' };
+  const kindName: Record<string, string> = { burn: '번', fold: '폴드', discard: '버림', rewind: '되감기', shown: '공개 후 버림' };
   const used = c.used.length
     ? c.used.map((u) => `<span class="cu">${cardHtml(u.card, { size: 'sm', extra: 'inline' })}<i>${kindName[u.kind] ?? ''}</i></span>`).join('')
     : '<span class="muted">아직 없음</span>';
@@ -887,13 +940,22 @@ function countingHtml(v: PlayerView): string {
 
 function renderNotes(v: PlayerView) {
   const notes = v.you.notes;
+  const x = v.you.extra;
+  const status = [
+    x.lateLosses !== null ? `왕귀: 쇼다운 패배 ${x.lateLosses}회${x.lateLosses >= 3 ? ' (다음 승리 때 발동)' : ''}` : '',
+    x.betPrediction !== null ? `내기할래? 예측: ${BET_NAMES[x.betPrediction]}` : '',
+    x.destinyCard ? `데스티니 드로우: 다음 핸드 [${x.destinyCard}]` : '',
+    x.ironWall ? '철벽: 이번 핸드 지목 불가' : '',
+    x.blackjackOn ? '블랙잭 발동 중' : '',
+  ].filter(Boolean);
+  const statusHtml = status.length ? `<div class="notes"><h4>내 증강 상태</h4>${status.map((t) => `<div class="note info">${richText(t)}</div>`).join('')}</div>` : '';
   const noteHtml = notes.length
     ? `<div class="notes"><h4>나만 아는 정보</h4>${notes
         .slice(-8)
-        .map((n) => `<div class="note ${n.kind}">${richText(n.text)}${n.hand !== v.handNumber ? ` <span class="muted">(#${n.hand})</span>` : ''}</div>`)
+        .map((n) => `<div class="note k-${n.kind}">${richText(n.text)}${n.hand !== v.handNumber ? ` <span class="muted">(#${n.hand})</span>` : ''}</div>`)
         .join('')}</div>`
     : '';
-  patch($('#g-notes'), noteHtml + countingHtml(v));
+  patch($('#g-notes'), statusHtml + noteHtml + countingHtml(v));
 }
 
 function renderLog(v: PlayerView) {
@@ -902,6 +964,16 @@ function renderLog(v: PlayerView) {
   const html = v.log.map((e) => `<div class="le${e.text.startsWith('──') ? ' sep' : ''}">${richText(e.text)}</div>`).join('');
   if (patch(el, html) && (nearBottom || app.lastLogSeq === 0)) el.scrollTop = el.scrollHeight;
   app.lastLogSeq = v.log.at(-1)?.seq ?? 0;
+}
+
+/** 내기할래? 선택 창: 버튼을 눌렀거나, 프리플랍 내 첫 행동 차례에 아직 예측하지 않았을 때 (건너뛸 수 있음) */
+function betPromptOpen(v: PlayerView): boolean {
+  const bet = v.you.augments.find((a) => a.id === 'bet');
+  if (!bet || !bet.usableNow || v.you.extra.betPrediction !== null) {
+    app.betOpen = false;
+    return false;
+  }
+  return app.betOpen || (!!v.you.legal && v.street === 'preflop' && app.betSkipHand !== v.handNumber);
 }
 
 function renderModal(env: GameEnvelope, v: PlayerView) {
@@ -913,8 +985,15 @@ function renderModal(env: GameEnvelope, v: PlayerView) {
       <h3>증강 선택 <span class="timer-text" data-timer></span></h3>
       <p class="muted">레벨 ${v.level} · 하나를 고르세요. 시간이 지나면 무작위로 선택됩니다.${you.joining ? ` <b>중도 참여 선택 ${you.joining.picksDone + 1}/${you.joining.picksTotal}</b>` : ''}</p>
       <div class="pick-row">${you.pick
-        .map(
-          (a) => `<button class="pick-card s${a.stars}" data-a="pick" data-aug="${a.id}">
+        .map((a) =>
+          a.id === 'parity'
+            ? `<div class="pick-card s${a.stars}">
+          <div class="big-stars">${stars(a.stars)}</div>
+          <div class="pc-name">${esc(a.name)}</div>
+          <div class="pc-cat">${esc(a.category)}</div>
+          <div class="pc-desc">${esc(a.description)}</div>
+          <div class="pc-choice"><button class="small primary" data-a="pick" data-aug="parity" data-parity="even">짝수로</button><button class="small primary" data-a="pick" data-aug="parity" data-parity="odd">홀수로</button></div></div>`
+            : `<button class="pick-card s${a.stars}" data-a="pick" data-aug="${a.id}">
           <div class="big-stars">${stars(a.stars)}</div>
           <div class="pc-name">${esc(a.name)}</div>
           <div class="pc-cat">${esc(a.category)}</div>
@@ -940,12 +1019,13 @@ function renderModal(env: GameEnvelope, v: PlayerView) {
   } else if (you.declare) {
     const opts = you.declare.options;
     const seal = opts.find((o) => o.id === 'seal');
+    const fork = opts.find((o) => o.id === 'lastFork');
     const tax = you.tax ? ` <span class="taxtag">세금 ${fmt(you.tax)}</span>` : '';
     html = `<div class="modal-bg"><div class="modal">
       <h3>선언 기회 (${v.street === 'turn' ? '턴' : '리버'} 공개 직후) <span class="timer-text" data-timer></span></h3>
       <p class="muted">내 카드 ${you.hole.length ? you.hole.map((c) => cardHtml(c, { size: 'sm', extra: 'inline' })).join('') : '(암전)'} · 선언하면 3초 반응 대기 후 적용됩니다.</p>
       ${opts
-        .filter((o) => o.id !== 'seal')
+        .filter((o) => o.id !== 'seal' && o.id !== 'lastFork')
         .map((o) => `<div class="decl-row"><button class="primary" data-a="declare" data-aug="${o.id}">${esc(o.name)} 선언${tax}</button> <span class="muted">${esc(o.description)}</span></div>`)
         .join('')}
       ${
@@ -960,6 +1040,14 @@ function renderModal(env: GameEnvelope, v: PlayerView) {
           .join('')}</div>`
           : ''
       }
+      ${
+        fork
+          ? `<div class="decl-row"><b>마지막 갈림길</b> <span class="muted">공개하고 버릴 홀카드를 고르세요 (새 카드는 나만 봄)</span></div>
+        <div class="choose-row">${(you.hole.length ? you.hole : Array.from({ length: you.holeHidden }, () => ''))
+          .map((c, i) => `<button class="card-btn" data-a="declare" data-aug="lastFork" data-i="${i}">${c ? cardHtml(c, { size: 'lg' }) : cardBack('lg')}<span>버리기${tax}</span></button>`)
+          .join('')}</div>`
+          : ''
+      }
       <button data-a="declare" data-aug="">선언하지 않음</button></div></div>`;
   } else if (you.attach) {
     html = `<div class="modal-bg"><div class="modal">
@@ -968,6 +1056,53 @@ function renderModal(env: GameEnvelope, v: PlayerView) {
       <div class="choose-row">${you.attach.cards
         .map((c, i) => `<button class="card-btn" data-a="attach" data-i="${i}">${cardHtml(c, { size: 'lg' })}<span>가져가기</span></button>`)
         .join('')}</div></div></div>`;
+  } else if (you.extra.lockerChoose) {
+    html = `<div class="modal-bg"><div class="modal">
+      <h3>보관함: 보관할 홀카드 <span class="timer-text" data-timer></span></h3>
+      <p class="muted">다음 핸드 프리플랍에 홀카드 1장과 바꿀 수 있습니다. 고르지 않으면 높은 카드를 보관합니다.</p>
+      <div class="choose-row">${you.extra.lockerChoose
+        .map((c, i) => `<button class="card-btn" data-a="locker" data-i="${i}">${cardHtml(c, { size: 'lg' })}<span>보관</span></button>`)
+        .join('')}</div></div></div>`;
+  } else if (you.extra.showChoose) {
+    html = `<div class="modal-bg"><div class="modal">
+      <h3>쇼맨십: 홀카드를 공개할까요? <span class="timer-text" data-timer></span></h3>
+      <p class="muted">공개하면 마지막으로 폴드한 상대에게서 1BB, 하이카드(블러프)였다면 2BB를 받습니다.</p>
+      <div class="choose-row">${you.hole.map((c) => cardHtml(c, { size: 'lg' })).join('')}</div>
+      <div class="lobby-actions"><button class="primary" data-a="show" data-reveal="1">공개하기</button><button data-a="show" data-reveal="0">공개하지 않음</button></div></div></div>`;
+  } else if (you.extra.eitherOr && you.extra.eitherOr.pick === null && v.street === 'flop') {
+    html = `<div class="modal-bg"><div class="modal">
+      <h3>양자택일: 턴 카드 고르기</h3>
+      <p class="muted">고른 카드가 턴에 공개되고 나머지는 버립니다. 턴이 공개되기 전까지 고르지 않으면 첫 번째 카드입니다.</p>
+      <div class="choose-row">${you.extra.eitherOr.cards
+        .map((c, i) => `<button class="card-btn" data-a="eitherOr" data-i="${i}">${cardHtml(c, { size: 'lg' })}<span>턴으로</span></button>`)
+        .join('')}</div></div></div>`;
+  } else if (app.destinyOpen) {
+    const blocked = new Set(you.extra.destinyBlocked);
+    const grid = ['s', 'h', 'd', 'c']
+      .map(
+        (su) =>
+          `<div class="dd-row">${'AKQJT98765432'
+            .split('')
+            .map((r) => {
+              const c = r + su;
+              return blocked.has(c)
+                ? `<span class="dd-card off" title="고를 수 없는 카드">${cardHtml(c, { size: 'md' })}</span>`
+                : `<button class="dd-card" data-a="destiny" data-card="${c}">${cardHtml(c, { size: 'md' })}</button>`;
+            })
+            .join('')}</div>`,
+      )
+      .join('');
+    html = `<div class="modal-bg"><div class="modal destiny">
+      <h3>데스티니 드로우: 다음 핸드에 받을 카드</h3>
+      <p class="muted">고른 카드는 나만 압니다. 다른 사람이 애착·보관함으로 가져온 카드는 고를 수 없습니다(회색은 내가 이미 가져가는 카드).${you.tax ? ` 세금 ${fmt(you.tax)}` : ''}</p>
+      <div class="dd-grid">${grid}</div>
+      <div class="lobby-actions"><button data-a="destinyClose">닫기</button></div></div></div>`;
+  } else if (betPromptOpen(v)) {
+    html = `<div class="modal-bg"><div class="modal">
+      <h3>내기할래? 이번 핸드의 우승 족보 예측</h3>
+      <p class="muted">쇼다운까지 가서 졌는데 예측이 맞으면 낸 칩의 50%를 팟에서 돌려받습니다. 예측은 나만 봅니다.${you.tax ? ` 세금 ${fmt(you.tax)}` : ''}</p>
+      <div class="bet-row">${BET_NAMES.map((n, i) => `<button class="small primary" data-a="bet" data-choice="${i}">${esc(n)}</button>`).join('')}</div>
+      <div class="lobby-actions"><button data-a="betSkip">건너뛰기</button></div></div></div>`;
   } else if (v.phase === 'gameOver') {
     const ranking = [...v.players].sort((a, b) => (a.place ?? 99) - (b.place ?? 99));
     html = `<div class="modal-bg"><div class="modal">
@@ -1016,7 +1151,7 @@ function renderDebug() {
           <div class="muted">${p.augments
             .map(
               (a) =>
-                `${esc(a.name)}${a.wildRank ? `(${esc(a.wildRank)})` : ''}${a.usesLeft !== null ? `[${a.usesLeft}]` : ''}${a.revealed ? `✓${a.publicName !== a.name ? `→${esc(a.publicName)}` : ''}` : ''}${a.armed ? '⚡' : ''}${a.fakeId ? `(위장:${esc(AUGMENTS[a.fakeId].name)})` : ''}`,
+                `${esc(a.name)}${a.wildRank ? `(${esc(a.wildRank)})` : ''}${a.parity ? `(${a.parity === 'even' ? '짝수' : '홀수'})` : ''}${a.usesLeft !== null ? `[${a.usesLeft}]` : ''}${a.revealed ? `✓${a.publicName !== a.name ? `→${esc(a.publicName)}` : ''}` : ''}${a.armed ? '⚡' : ''}${a.fakeId ? `(위장:${esc(AUGMENTS[a.fakeId].name)})` : ''}`,
             )
             .join(', ')}</div></div>`,
         )
@@ -1034,7 +1169,7 @@ function renderDebug() {
     controls,
     `<div class="dbg-row"><select id="dbg-player">${playerOpts}</select>
       <select id="dbg-aug">${ids.map((id) => `<option value="${id}">${AUGMENTS[id].name} ${stars(AUGMENTS[id].stars)}</option>`).join('')}</select>
-      <input id="dbg-wild" placeholder="편애 숫자 2~14" size="6" />
+      <input id="dbg-wild" placeholder="편애 2~14 / 동맹 짝·홀" size="10" />
       <button class="small" data-a="dbgGive">증강 지급</button></div>
     <div class="dbg-row"><input id="dbg-chips" placeholder="칩" size="6" /><button class="small" data-a="dbgChips">칩 설정</button>
       <button class="small" data-a="dbgLevel">블라인드 레벨 즉시 올리기</button>
@@ -1174,7 +1309,38 @@ document.addEventListener('click', async (ev) => {
       return;
     }
     case 'pick':
-      return act({ type: 'pick', augment: t.dataset.aug });
+      return act({ type: 'pick', augment: t.dataset.aug, parity: t.dataset.parity });
+    case 'immunity':
+      return act({ type: 'immunity' });
+    case 'locker':
+      return act({ type: 'locker', cardIndex: Number(t.dataset.i) });
+    case 'show':
+      return act({ type: 'show', reveal: t.dataset.reveal === '1' });
+    case 'eitherOr':
+      return act({ type: 'eitherOr', pick: Number(t.dataset.i) });
+    case 'destinyOpen':
+      app.destinyOpen = true;
+      if (app.env) renderGame();
+      return;
+    case 'destinyClose':
+      app.destinyOpen = false;
+      if (app.env) renderGame();
+      return;
+    case 'destiny':
+      app.destinyOpen = false;
+      return act({ type: 'useAugment', augment: 'destinyDraw', card: t.dataset.card });
+    case 'betOpen':
+      app.betOpen = true;
+      if (app.env) renderGame();
+      return;
+    case 'betSkip':
+      app.betOpen = false;
+      app.betSkipHand = v?.handNumber ?? -1;
+      if (app.env) renderGame();
+      return;
+    case 'bet':
+      app.betOpen = false;
+      return act({ type: 'useAugment', augment: 'bet', choice: Number(t.dataset.choice) });
     case 'discard':
       return act({ type: 'discard', cardIndex: Number(t.dataset.i) });
     case 'declare': {
@@ -1193,6 +1359,8 @@ document.addEventListener('click', async (ev) => {
       const payload: Record<string, unknown> = { type: 'useAugment', augment: id };
       if (app.targets[id]) payload.targetId = app.targets[id];
       if (t.dataset.i !== undefined) payload.cardIndex = Number(t.dataset.i);
+      if (id === 'radar') payload.boardIndex = Number((($('[data-radar]') as HTMLSelectElement | null)?.value ?? app.radarIdx));
+      if (id === 'rumor') payload.rumor = ($('[data-rumor]') as HTMLSelectElement | null)?.value ?? app.rumor;
       return act(payload);
     }
     case 'shepherdFake': {
@@ -1212,8 +1380,11 @@ document.addEventListener('click', async (ev) => {
       return act({ type: 'useAugment', augment: 'disguise', fakeId: sel?.value ?? app.fake });
     }
     case 'dbgGive': {
-      const wild = Number(($('#dbg-wild') as HTMLInputElement).value);
+      const raw = ($('#dbg-wild') as HTMLInputElement).value.trim();
+      const wild = Number(raw);
+      const parity = /^(even|짝)/.test(raw) ? 'even' : /^(odd|홀)/.test(raw) ? 'odd' : undefined;
       const r = await send('debug:give', {
+        parity,
         playerId: ($('#dbg-player') as HTMLSelectElement).value,
         augment: ($('#dbg-aug') as HTMLSelectElement).value,
         wildRank: wild >= 2 && wild <= 14 ? wild : undefined,
@@ -1287,6 +1458,14 @@ document.addEventListener('change', async (ev) => {
   }
   if (t.hasAttribute('data-fake')) {
     app.fake = (t as HTMLSelectElement).value;
+    return;
+  }
+  if (t.hasAttribute('data-radar')) {
+    app.radarIdx = Number((t as HTMLSelectElement).value);
+    return;
+  }
+  if (t.hasAttribute('data-rumor')) {
+    app.rumor = (t as HTMLSelectElement).value;
     return;
   }
   if (t.hasAttribute('data-fakecard')) {

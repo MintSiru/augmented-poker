@@ -44,7 +44,17 @@ function cloneState(s: GameState): GameState {
 
 function fogHides(s: GameState, viewerId: string, i: number): boolean {
   const e = s.effects;
+  if (e.blindDarted.includes(viewerId) && !e.fogLifted) return true; // 실명 다트: 보드 전체
   return i < 3 && e.fogSeers.length > 0 && !e.fogLifted && !e.fogSeers.includes(viewerId);
+}
+
+function ownVisible(s: GameState, me: GameState['players'][number]): boolean {
+  const e = s.effects;
+  return me.inHand && (me.shown || (e.glass && !e.glassImmune.includes(me.id)) || !e.blackout || e.blackoutImmune.includes(me.id));
+}
+
+function glassShows(s: GameState, p: GameState['players'][number]): boolean {
+  return s.effects.glass && p.inHand && !s.effects.glassImmune.includes(p.id);
 }
 
 /** viewer 에게 숨겨진 모든 것을 무작위로 바꾼 사본 */
@@ -54,10 +64,18 @@ function perturb(s: GameState, viewerId: string, rng: Rng): GameState {
   const glass = c.effects.glass;
   const slots: { get: () => Card; set: (x: Card) => void }[] = [];
   const addArr = (arr: Card[]) => arr.forEach((_, i) => slots.push({ get: () => arr[i], set: (x) => (arr[i] = x) }));
+  void glass;
   for (const q of c.players) {
-    const visible = q.inHand && (q.shown || glass || (q === viewer && !c.effects.blackout));
+    const visible = q.inHand && (q.shown || glassShows(c, q) || (q === viewer && ownVisible(c, q)));
     if (!visible) addArr(q.hole);
     if (q !== viewer) addArr(q.discarded);
+    if (q !== viewer) {
+      const qq = q;
+      if (qq.lockerStored) slots.push({ get: () => qq.lockerStored!, set: (x) => (qq.lockerStored = x) });
+      if (qq.lockerReady) slots.push({ get: () => qq.lockerReady!, set: (x) => (qq.lockerReady = x) });
+      if (qq.destinyCard) slots.push({ get: () => qq.destinyCard!, set: (x) => (qq.destinyCard = x) });
+      if (qq.eitherOr) addArr(qq.eitherOr.cards);
+    }
   }
   addArr(c.deck);
   const burnsUsed = c.used.filter((u) => u.kind === 'burn').length;
@@ -102,6 +120,12 @@ function perturb(s: GameState, viewerId: string, rng: Rng): GameState {
     q.foreseen = rng.int(2) ? [3] : [];
     q.shepherdLied = rng.int(2) === 0;
     q.keptCard = rng.int(2) ? '2c' : null;
+    q.betPrediction = rng.int(2) ? rng.int(8) : null;
+    q.lateLosses = rng.int(5);
+    q.blackjackOn = rng.int(2) === 0;
+    q.lockerPending = rng.int(2) === 0;
+    q.blindsPaid = rng.int(4);
+    if (q.eitherOr) q.eitherOr.pick = rng.int(2) ? rng.int(2) : null;
   }
   // 반응 대기 중인 남의 선언: 이름 숨김 선언의 실제 증강·대상
   for (const d of c.reaction?.queue ?? []) {
@@ -120,17 +144,18 @@ const CARD_RE = /(?<![A-Za-z0-9])[2-9TJQKA][shdc](?![A-Za-z0-9])/g;
 function allowedCards(s: GameState, viewerId: string): Set<Card> {
   const me = s.players.find((p) => p.id === viewerId)!;
   const ok = new Set<Card>([...me.discarded]);
-  if (me.inHand && (me.shown || s.effects.glass || !s.effects.blackout)) me.hole.forEach((c) => ok.add(c));
+  if (ownVisible(s, me)) me.hole.forEach((c) => ok.add(c));
+  for (const c of [me.keptCard, me.lockerStored, me.lockerReady, me.destinyCard]) if (c) ok.add(c);
   s.board.slice(0, s.boardRevealed).forEach((c, i) => {
     if (!fogHides(s, viewerId, i)) ok.add(c);
   });
   for (const p of s.players) {
-    if (p.inHand && (p.shown || s.effects.glass)) p.hole.forEach((c) => ok.add(c));
+    if (p.inHand && (p.shown || glassShows(s, p))) p.hole.forEach((c) => ok.add(c));
     p.shepherdShown.forEach((c) => ok.add(c));
   }
   for (const n of me.notes) if (n.hand === s.handNumber) n.cards?.forEach((c) => ok.add(c));
   if (me.augments.some((a) => a.id === 'counting')) s.used.forEach((u) => ok.add(u.card));
-  s.used.filter((u) => u.kind === 'rewind').forEach((u) => ok.add(u.card));
+  s.used.filter((u) => u.kind === 'rewind' || u.kind === 'shown').forEach((u) => ok.add(u.card));
   s.result?.board.forEach((c) => ok.add(c));
   s.result?.entries.forEach((e) => e.cards.forEach((c) => ok.add(c)));
   return ok;

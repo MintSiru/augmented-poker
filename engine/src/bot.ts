@@ -23,6 +23,9 @@ function myRules(view: PlayerView): EvalRules {
     gapStraight: has('gapStraight'),
     wrapStraight: has('wrapStraight'),
     wildRank: rankFromName(fav?.wildRank ?? null),
+    fourStraight: has('fourStraight'),
+    doubleStep: has('doubleStep'),
+    parity: view.you.augments.find((a) => a.id === 'parity')?.parity ?? null,
   };
 }
 
@@ -111,6 +114,17 @@ export function chooseBotOpportunistic(view: PlayerView, rng: Rng): GameAction |
   if (lie && lie.targets.length && chance(rng, 40)) return use('liedetector', { targetId: lie.targets[0] });
   if (usable(view, 'blackout') && chance(rng, 15)) return use('blackout');
   if (usable(view, 'deathTax') && chance(rng, 15)) return use('deathTax');
+  // 2차: 핸드 사이에 쓰는 공개형·카드 조작
+  if (usable(view, 'bombPot') && chance(rng, 10)) return use('bombPot');
+  if (usable(view, 'underdog') && chance(rng, 10)) return use('underdog');
+  const dd = usable(view, 'destinyDraw');
+  if (dd && chance(rng, 50)) {
+    const blocked = new Set(view.you.extra.destinyBlocked);
+    const aces = fullDeck().filter((c) => c[0] === 'A' && !blocked.has(c));
+    return use('destinyDraw', { card: pickOne(aces, rng) });
+  }
+  if (usable(view, 'padlock') && chance(rng, 8)) return use('padlock');
+  if (usable(view, 'rumor') && chance(rng, 4)) return use('rumor', { rumor: pickOne(ALL_AUGMENT_IDS, rng) });
   return null;
 }
 
@@ -119,9 +133,10 @@ export function chooseBotAction(view: PlayerView, rng: Rng): GameAction | null {
   const you = view.you;
   if (you.out || view.phase === 'gameOver') return null;
 
-  // 반응 대기: 카운터 스펠
+  // 반응 대기: 카운터 스펠, 면역
   if (view.reaction) {
     if (view.reaction.canCounter && chance(rng, view.reaction.anonymous ? 15 : 35)) return { type: 'counter' };
+    if (view.reaction.canImmune && chance(rng, 40)) return { type: 'immunity' };
     return null;
   }
 
@@ -131,6 +146,18 @@ export function chooseBotAction(view: PlayerView, rng: Rng): GameAction | null {
   if (you.attach) {
     const ranks = you.attach.cards.map(rankOf);
     return { type: 'attach', cardIndex: ranks.indexOf(Math.max(...ranks)) };
+  }
+
+  // 보관함: 높은 카드를 보관, 쇼맨십: 항상 공개
+  if (you.extra.lockerChoose) {
+    const ranks = you.extra.lockerChoose.map(rankOf);
+    return { type: 'locker', cardIndex: ranks.indexOf(Math.max(...ranks)) };
+  }
+  if (you.extra.showChoose) return { type: 'show', reveal: true };
+  // 양자택일: 숫자가 높은 후보
+  if (you.extra.eitherOr && you.extra.eitherOr.pick === null) {
+    const [a, b] = you.extra.eitherOr.cards.map(rankOf);
+    return { type: 'eitherOr', pick: b > a ? 1 : 0 };
   }
 
   // 세 번째 손: 남길 2장의 승률이 가장 높은 쪽
@@ -153,6 +180,12 @@ export function chooseBotAction(view: PlayerView, rng: Rng): GameAction | null {
     const opts = you.declare.options.map((o) => o.id);
     const base = estimateEquity(view, rng, { hole: you.hole, board: view.board, excluded: view.sealed }, 80);
     if (opts.includes('flipTable') && you.hand && you.hand.category <= 1 && !view.table.inverted) return { type: 'declare', augment: 'flipTable' };
+    if (opts.includes('blackjack') && you.hand && you.hand.category < 6) return { type: 'declare', augment: 'blackjack' };
+    if (opts.includes('eitherOr') && chance(rng, 60)) return { type: 'declare', augment: 'eitherOr' };
+    if (opts.includes('lastFork') && base < 0.3 && you.hole.length) {
+      const ranks = you.hole.map(rankOf);
+      return { type: 'declare', augment: 'lastFork', boardIndex: ranks.indexOf(Math.min(...ranks)) };
+    }
     if (opts.includes('seal')) {
       let bestIdx: number | null = null;
       let bestEq = base + 0.05;
@@ -187,6 +220,31 @@ export function chooseBotAction(view: PlayerView, rng: Rng): GameAction | null {
 
   const live = view.players.filter((p) => p.id !== you.id && p.hasCards);
   const eq = estimateEquity(view, rng, { hole: you.hole, board: view.board, excluded: view.sealed });
+
+  // 내 차례에 쓰는 증강 (2차)
+  const lr = you.extra.lockerReady;
+  if (lr && you.hole.length) {
+    const ranks = you.hole.map(rankOf);
+    if (rankOf(lr) > Math.min(...ranks)) return { type: 'locker', cardIndex: ranks.indexOf(Math.min(...ranks)) };
+  }
+  if (usable(view, 'bet') && you.extra.betPrediction === null) return use('bet', { choice: 2 });
+  if (usable(view, 'ironWall') && chance(rng, 30)) return use('ironWall');
+  if (usable(view, 'circuitBreaker') && eq < 0.3) return use('circuitBreaker');
+  if (usable(view, 'restart') && view.pot >= you.chips * 0.5 && (!you.hand || you.hand.category <= 1) && chance(rng, 50)) return use('restart');
+  const dart = usable(view, 'blindDart');
+  if (dart && dart.targets.length && chance(rng, 20)) return use('blindDart', { targetId: pickOne(dart.targets, rng) });
+  const out = usable(view, 'getOut');
+  if (out && out.targets.length && eq > 0.3 && chance(rng, 25)) return use('getOut', { targetId: pickOne(out.targets, rng) });
+  if (usable(view, 'highCardDuel') && you.hole.some((c) => c[0] === 'A') && chance(rng, 50)) return use('highCardDuel');
+  const tm = usable(view, 'thermometer');
+  if (tm && tm.targets.length && chance(rng, 20)) return use('thermometer', { targetId: pickOne(tm.targets, rng) });
+  if (usable(view, 'radar') && chance(rng, 15)) return use('radar', { boardIndex: view.board.findIndex((c) => !!c) });
+  if (usable(view, 'colorForecast') && chance(rng, 30)) return use('colorForecast');
+  if (usable(view, 'leaderboard') && chance(rng, 40)) return use('leaderboard');
+  if (usable(view, 'blindDraw') && eq < 0.3 && you.hole.length) {
+    const ranks = you.hole.map(rankOf);
+    return use('blindDraw', { cardIndex: ranks.indexOf(Math.min(...ranks)) });
+  }
 
   // 내 차례에 쓰는 증강
   if (usable(view, 'mulligan') && view.street === 'preflop' && eq < 0.8 / (live.length + 1) && you.chips > view.blinds.bb * 8) {

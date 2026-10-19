@@ -412,3 +412,17 @@ button.aug-btn { background: #2d2346; border-color: #6c4fb0; }
   .settings label { flex-wrap: wrap; }
   .room-list li { padding: 7px 8px; }
 }
+
+/* ───────── 2차 증강 ───────── */
+.pc-choice { display: flex; gap: 6px; justify-content: center; margin-top: 8px; }
+.bet-row { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.locker-row { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font-size: 12px; }
+.modal.destiny { max-width: 820px; }
+.dd-grid { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
+.dd-row { display: flex; flex-wrap: wrap; gap: 3px; }
+.dd-card { padding: 1px; background: transparent; border: 1px solid transparent; border-radius: 6px; }
+.dd-card:hover { border-color: var(--accent); }
+.dd-card.off { opacity: .25; filter: grayscale(1); cursor: not-allowed; }
+@media (max-width: 760px) {
+  .dd-card .card.md { width: 22px; height: 31px; font-size: 10px; }
+}
