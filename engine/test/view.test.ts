@@ -9,6 +9,7 @@ import {
   AUGMENTS,
   applyAction,
   applyTimeouts,
+  canHold,
   createGame,
   debugGiveAugment,
   getPending,
@@ -205,6 +206,8 @@ function allowedCards(s: GameState, viewerId: string): Set<Card> {
   }
   s.effects.shared.forEach((c) => ok.add(c));
   for (const n of me.notes) if (n.hand === s.handNumber) n.cards?.forEach((c) => ok.add(c));
+  // 이번 핸드에 처음 받은 내 홀카드 (나중에 바꿔치기·소매치기 등으로 넘어가도 이미 본 카드)
+  for (const l of s.log) if (l.hand === s.handNumber && l.to?.includes(me.id) && l.text.startsWith('내 홀카드')) l.text.match(CARD_RE)?.forEach((c) => ok.add(c));
   if (me.augments.some((a) => a.id === 'counting')) s.used.forEach((u) => ok.add(u.card));
   s.used.filter((u) => u.kind === 'rewind' || u.kind === 'shown' || u.kind === 'called').forEach((u) => ok.add(u.card));
   s.result?.board.forEach((c) => ok.add(c));
@@ -243,8 +246,12 @@ function checkAllViews(s: GameState, rng: Rng) {
       you: { ...view.you, counting: view.you.counting ? { ...view.you.counting, unseen: [], outCards: [] } : null },
     };
     const ok = allowedCards(s, p.id);
-    for (const m of JSON.stringify(current).match(CARD_RE) ?? []) {
-      if (!ok.has(m)) throw new Error(`${p.id} can see forbidden card ${m} (hand ${s.handNumber}, phase ${s.phase})`);
+    const cur = JSON.stringify(current);
+    for (const m of cur.match(CARD_RE) ?? []) {
+      if (!ok.has(m)) {
+        const at = cur.indexOf(m);
+        throw new Error(`${p.id} can see forbidden card ${m} (hand ${s.handNumber}, phase ${s.phase}) board=${s.board.join(",")}/${s.boardRevealed} fh=${s.players.map((x) => x.forehead).join(",")} holes=${s.players.map((x) => x.hole.join("")).join(",")} …${cur.slice(Math.max(0, at - 300), at + 300)}`);
+      }
     }
     for (const pv of view.players) {
       const real = s.players.find((x) => x.id === pv.id)!;
@@ -273,6 +280,39 @@ describe('플레이어 뷰에 다른 사람의 비공개 정보가 없다', () =
     checkAllViews(s, checkRng);
     expect(steps).toBeGreaterThan(10);
   });
+
+  it.each([
+    [3, 41],
+    [5, 42],
+    [8, 43],
+  ])('%i인 봇 게임, 4차 증강을 잔뜩 준 상태의 모든 단계', (n, seed) => {
+    const rng = seededRng(seed);
+    const checkRng = seededRng(seed + 1000);
+    const s = createGame(makePlayers(n), { rng, handsPerLevel: 2, debug: true });
+    const pool4 = ALL_AUGMENT_IDS.filter((id) => AUGMENTS[id].pool === 4);
+    const giveRng = seededRng(seed + 7);
+    let given = false;
+    let steps = 0;
+    while (s.phase !== 'gameOver' && steps < 2500) {
+      if (!given && s.phase === 'betting') {
+        given = true;
+        for (const p of s.players) {
+          const mine: AugmentId[] = p.augments.map((a) => a.id);
+          for (let k = 0; k < 14; k++) {
+            const id = pool4[giveRng.int(pool4.length)];
+            if (!canHold(mine, id)) continue;
+            mine.push(id);
+            debugGiveAugment(s, p.id, id);
+          }
+        }
+      }
+      checkAllViews(s, checkRng);
+      stepBots(s, rng);
+      steps++;
+    }
+    checkAllViews(s, checkRng);
+    expect(steps).toBeGreaterThan(10);
+  }, 300000);
 
   it('엔진 상태 자체(덱 등)는 뷰에 포함되지 않는다', () => {
     const s = createGame(makePlayers(3), { rng: seededRng(1) });

@@ -46,10 +46,18 @@ export function estimateEquity(view: PlayerView, rng: Rng, input: EquityInput, i
   const inverted = view.table.inverted;
   const hand = view.handNumber;
   const visibleBoard = input.board.filter((c): c is Card => !!c);
-  const known = new Set<Card>([...view.you.hole, ...visibleBoard, ...input.hole]);
+  // 인디언 포커: 내 이마 카드(??)는 모르는 카드로 매번 뽑는다
+  const myKnown = input.hole.filter((c) => c !== '??');
+  const myUnknown = input.hole.length - myKnown.length;
+  const shared = view.table.shared;
+  const known = new Set<Card>([...view.you.hole.filter((c) => c !== '??'), ...visibleBoard, ...myKnown, ...shared]);
   const foreseen = new Map<number, Card>();
   const oppKnown = new Map<string, Card[]>();
-  for (const p of opponents) if (p.shownCards) oppKnown.set(p.id, [...p.shownCards]);
+  for (const p of opponents) {
+    // 공개된 카드(쇼다운·미끼 공개·이마 카드). 연막탄으로 숨긴 ?? 는 모르는 카드
+    const seen = p.shownCards ? p.shownCards.filter((c) => c !== '??') : [...p.exposed, ...(p.forehead && !p.exposed.includes(p.forehead) ? [p.forehead] : [])];
+    if (seen.length) oppKnown.set(p.id, seen);
+  }
   for (const n of view.you.notes) {
     if (n.hand !== hand || !n.cards) continue;
     if (n.kind === 'mulligan' || n.kind === 'discard') n.cards.forEach((c) => known.add(c));
@@ -69,14 +77,16 @@ export function estimateEquity(view: PlayerView, rng: Rng, input: EquityInput, i
     let k = 0;
     const board: Card[] = [];
     for (let i = 0; i < 5; i++) board.push(input.board[i] ?? foreseen.get(i) ?? deck[k++]);
-    const evalBoard = board.filter((_, i) => !input.excluded.includes(i));
-    const mine = bestHand([...input.hole, ...evalBoard], rules).score;
+    const evalBoard = [...board.filter((_, i) => !input.excluded.includes(i)), ...shared];
+    const myHole = [...myKnown];
+    for (let i = 0; i < myUnknown; i++) myHole.push(deck[k++]);
+    const mine = bestHand([...myHole, ...evalBoard], rules).score;
     let beaten = false;
     let ties = 0;
     for (const o of opponents) {
       const knownCards = oppKnown.get(o.id) ?? [];
       const oh = [...knownCards];
-      while (oh.length < 2) oh.push(deck[k++]);
+      while (oh.length < (shared.length ? 1 : 2)) oh.push(deck[k++]);
       let cmp = compareScores(mine, bestHand([...oh, ...evalBoard]).score);
       if (inverted) cmp = -cmp;
       if (cmp < 0) {
@@ -140,8 +150,34 @@ export function chooseBotOpportunistic(view: PlayerView, rng: Rng): GameAction |
   const ls = usable(view, 'loanShark');
   if (ls && ls.targets.length && chance(rng, 5)) return use('loanShark', { targetId: pickOne(ls.targets, rng) });
   if (usable(view, 'rumor') && chance(rng, 4)) return use('rumor', { rumor: pickOne(ALL_AUGMENT_IDS, rng) });
+  // 4차: 폴드한 뒤 남은 사람에게 걸기
+  for (const id of ['sideBet', 'straw'] as const) {
+    const a = usable(view, id);
+    if (a && a.targets.length && chance(rng, 30)) return use(id, { targetId: pickOne(a.targets, rng) });
+  }
+  // 4차: 그 밖의 증강은 쓸 수 있을 때 가끔 (대상·카드는 무작위, 낮은 카드)
+  const hole = view.you.hole;
+  const low = Math.max(0, hole.indexOf([...hole].filter((c) => c !== '??').sort((a, b) => rankOf(a) - rankOf(b))[0] ?? ''));
+  for (const id of BOT_MISC) {
+    const a = usable(view, id);
+    if (!a || !chance(rng, 6)) continue;
+    if (a.target && !a.targets.length) continue;
+    const params: Record<string, unknown> = {};
+    if (a.targets.length) params.targetId = pickOne(a.targets, rng);
+    params.cardIndex = id === 'nerveTest' || id === 'bait' ? Math.max(0, hole.length - 1 - low) : low;
+    if (id === 'catchThief') params.choice = rng.int(2);
+    return use(id, params);
+  }
   return null;
 }
+
+/** 봇이 가끔 쓰는 4차 증강 (특별한 판단 없이) */
+const BOT_MISC: AugmentId[] = [
+  'reviewNote', 'smell', 'suitCheck', 'ammoCheck', 'blackBox', 'link', 'focus',
+  'showcase', 'envelope', 'prepay', 'coldStorage', 'recycle', 'colorBlind',
+  'wanted', 'nerveTest', 'betCap', 'bait', 'trap',
+  'indianPoker', 'dealerWhim', 'commonWell', 'sharedCard', 'halfSecret', 'switcheroo', 'catchThief',
+];
 
 /** 지금 봇이 할 행동 하나. 할 일이 없으면 null. */
 export function chooseBotAction(view: PlayerView, rng: Rng): GameAction | null {
@@ -162,7 +198,7 @@ export function chooseBotAction(view: PlayerView, rng: Rng): GameAction | null {
   if (rs && rs.needMe && rs.input) {
     const bb = view.blinds.bb;
     const low = () => {
-      const ranks = you.hole.map(rankOf);
+      const ranks = you.hole.map((c) => (c === '??' ? 99 : rankOf(c)));
       return Math.max(0, ranks.indexOf(Math.min(...ranks)));
     };
     const strength = () => estimateEquity(view, rng, { hole: you.hole, board: view.board, excluded: view.sealed }, 60);
@@ -188,9 +224,25 @@ export function chooseBotAction(view: PlayerView, rng: Rng): GameAction | null {
       }
       case 'strongWeak':
         return { type: 'respond', choice: strength() >= 0.5 ? 1 : 0 };
+      case 'pickSwap': {
+        // 후보 중 가장 높은 카드가 내 가장 낮은 카드보다 높으면 바꾼다
+        const off = rs.offered ?? [];
+        if (!off.length) return { type: 'respond', choice: -1 };
+        const ranks = off.map(rankOf);
+        const best = ranks.indexOf(Math.max(...ranks));
+        const mine = you.hole.filter((c) => c !== '??').map(rankOf);
+        return mine.length && ranks[best] > Math.min(...mine) ? { type: 'respond', choice: best, cardIndex: low() } : { type: 'respond', choice: -1 };
+      }
+      case 'cardOrKeep':
+        return strength() < 0.4 ? { type: 'respond', cardIndex: low() } : { type: 'respond', choice: -1 };
     }
   }
 
+  // 대격변: 증강이 4개 이상이고 절반 이상을 다 썼을 때
+  if (usable(view, 'cataclysm')) {
+    const spent = you.augments.filter((a) => a.maxUses !== null && (a.usesLeft ?? 0) <= 0).length;
+    if (you.augments.length >= 4 && spent * 2 >= you.augments.length) return use('cataclysm');
+  }
   // 재충전: ★★★ 증강을 다 썼을 때만
   const rc = you.recharge;
   if (rc?.enabled) {
@@ -274,6 +326,15 @@ export function chooseBotAction(view: PlayerView, rng: Rng): GameAction | null {
     if (opts.includes('twoFates') && base < 0.5) return { type: 'declare', augment: 'twoFates' };
     if (opts.includes('turnRiver') && chance(rng, 60)) return { type: 'declare', augment: 'turnRiver' };
     if (opts.includes('promotion') && you.hand && you.hand.category <= 4) return { type: 'declare', augment: 'promotion' };
+    // 4차 공개형: 강하면 리버 베팅을 막고/체크를 금지, 약하면 마지막 교체
+    if (opts.includes('silentRiver') && base < 0.35) return { type: 'declare', augment: 'silentRiver' };
+    if (opts.includes('timeBomb') && base > 0.6) return { type: 'declare', augment: 'timeBomb' };
+    if (opts.includes('lastChoice') && base < 0.35) return { type: 'declare', augment: 'lastChoice' };
+    if (opts.includes('omahaBlood') && chance(rng, 40)) return { type: 'declare', augment: 'omahaBlood' };
+    if (opts.includes('deadScanner') && chance(rng, 50)) return { type: 'declare', augment: 'deadScanner', choice: rng.int(17) };
+    const pp = you.declare.targets.pickpocket;
+    if (opts.includes('pickpocket') && pp?.length && base < 0.3) return { type: 'declare', augment: 'pickpocket', targetId: pickOne(pp, rng) };
+    if (opts.includes('shadow') && you.declare.shadow.length && chance(rng, 50)) return { type: 'declare', augment: 'shadow', ...pickOne(you.declare.shadow, rng) };
     const pz = you.declare.targets.parasite;
     if (opts.includes('parasite') && pz?.length && base < 0.6) return { type: 'declare', augment: 'parasite', targetId: pickOne(pz, rng) };
     const al = you.declare.alchemy.filter((x) => x.choice === 1);
@@ -313,6 +374,11 @@ export function chooseBotAction(view: PlayerView, rng: Rng): GameAction | null {
     if (rankOf(lr) > Math.min(...ranks)) return { type: 'locker', cardIndex: ranks.indexOf(Math.min(...ranks)) };
   }
   if (usable(view, 'bet') && you.extra.betPrediction === null) return use('bet', { choice: 2 });
+  // 4차: 예약 주문은 내 홀카드 중 높은 숫자
+  const myRanks = you.hole.filter((c) => c !== '??').map(rankOf);
+  if (usable(view, 'reserveOrder') && myRanks.length) return use('reserveOrder', { choice: Math.max(...myRanks) });
+  if (usable(view, 'oneMore') && eq > 0.55 && chance(rng, 30)) return use('oneMore');
+  if (usable(view, 'truce') && eq < 0.35 && chance(rng, 50)) return use('truce');
   if (usable(view, 'ironWall') && chance(rng, 30)) return use('ironWall');
   if (usable(view, 'circuitBreaker') && eq < 0.3) return use('circuitBreaker');
   if (usable(view, 'restart') && view.pot >= you.chips * 0.5 && (!you.hand || you.hand.category <= 1) && chance(rng, 50)) return use('restart');
@@ -404,6 +470,8 @@ export function chooseBotAction(view: PlayerView, rng: Rng): GameAction | null {
 
   if (legal.forced) return legal.check ? { type: 'check' } : call();
   if (legal.check) {
+    // 시한폭탄: 체크하면 폴드이므로 웬만하면 작게라도 베팅
+    if (you.extra.checkFolds && legal.raise && eq > 0.2) return raiseTo(0.3);
     if (legal.raise && eq > strong) return raiseTo(0.5 + rng.int(50) / 100);
     if (legal.raise && bluff) return raiseTo(0.5);
     return { type: 'check' };

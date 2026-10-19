@@ -11,6 +11,7 @@ import {
   counterCandidates,
   currentBlinds,
   declareOptions,
+  timeBombed,
   declareTargets,
   alchemyChoices,
   shadowChoices,
@@ -409,6 +410,8 @@ export interface PlayerView {
       /** 한도 설정: 이번 핸드 상한 / 다음 핸드 예약 */
       betCap: number | null;
       betCapNext: boolean;
+      /** 시한폭탄: 내 체크가 폴드로 처리되는가 */
+      checkFolds: boolean;
       /** 기록관: 상대별 프리플랍 참여율(%)과 쇼다운에서 드러난 블러프 횟수 */
       recorder: Record<string, { hands: number; vpip: number; bluffs: number }> | null;
     };
@@ -472,7 +475,10 @@ function sampleParams(state: GameState, me: PlayerState, id: AugmentId, targets:
     case 'magnet':
     case 'truthGame':
     case 'sealedContract':
+    case 'catchThief':
       return { choice: 0 };
+    case 'reserveOrder':
+      return { choice: 2 };
     case 'freeze':
       return { boardIndex: 0 };
     case 'swapBoard':
@@ -837,6 +843,7 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
         wanted: me.wanted ?? me.wantedNext ? nameById((me.wanted ?? me.wantedNext)!) : null,
         betCap: me.betCap,
         betCapNext: me.betCapNext,
+        checkFolds: seated && timeBombed(state, me),
         recorder: findAug(me, 'recorder')
           ? Object.fromEntries(
               state.players

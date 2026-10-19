@@ -943,7 +943,7 @@ function dealCards(state: GameState): void {
     if (!c || !active(p)) continue;
     const i = pool.indexOf(c);
     if (i >= 0) destiny.set(p.id, pool.splice(i, 1)[0]);
-    else note(state, p, 'info', `데스티니 드로우: ${cardToken(c)}을(를) 받을 수 없어 무작위로 받습니다.`);
+    else note(state, p, 'info', `데스티니 드로우: 고른 카드 ${cardToken(c)}을(를) 받을 수 없어 무작위로 받습니다.`, [c]);
   }
   const fixedBoard = take(deal?.board, 5);
   const fixedBurns = take(deal?.burns, 3);

@@ -711,6 +711,8 @@ function seatPos(k: number, n: number) {
   return { x: 50 + rx * Math.cos(theta), y: 50 + ry * Math.sin(theta) };
 }
 
+const RANKS: Record<number, string> = { 2: '2', 3: '3', 4: '4', 5: '5', 6: '6', 7: '7', 8: '8', 9: '9', 10: '10', 11: 'J', 12: 'Q', 13: 'K', 14: 'A' };
+
 function seatHtml(v: PlayerView, p: PublicPlayerView, k: number, n: number): string {
   const { x, y } = seatPos(k, n);
   const me = p.id === v.you.id;
@@ -721,8 +723,16 @@ function seatHtml(v: PlayerView, p: PublicPlayerView, k: number, n: number): str
     .join('');
   let cards = '';
   if (p.shownCards) cards = p.shownCards.map((c) => cardHtml(c, { size: 'sm', extra: me ? handCardClass(v, c) : '' })).join('');
-  else if (me && v.you.hole.length && !p.folded) cards = v.you.hole.map((c) => cardHtml(c, { size: 'sm', extra: handCardClass(v, c) })).join('');
-  else if (p.hasCards) cards = cardBack('sm') + cardBack('sm');
+  else if (me && v.you.hole.length && !p.folded)
+    // 인디언 포커: 내 이마 카드는 뒷면
+    cards = v.you.hole.map((c) => (c === '??' ? `<span class="card back sm forehead" title="이마 카드: 나만 못 봄"></span>` : cardHtml(c, { size: 'sm', extra: handCardClass(v, c) }))).join('');
+  else if (p.hasCards) {
+    // 공개된 카드(미끼 공개·반쪽짜리 비밀·배짱 시험)와 이마 카드는 앞면, 나머지는 뒷면
+    const known = [...p.exposed, ...(p.forehead && !p.exposed.includes(p.forehead) ? [p.forehead] : [])];
+    cards =
+      known.map((c) => cardHtml(c, { size: 'sm', extra: c === p.forehead ? 'forehead' : 'exposed' })).join('') +
+      Array.from({ length: Math.max(0, 2 - known.length) }, () => cardBack('sm')).join('');
+  }
   const status = p.kicked
     ? '추방됨'
     : p.dormant !== null
@@ -760,7 +770,7 @@ function seatHtml(v: PlayerView, p: PublicPlayerView, k: number, n: number): str
         const r = v.you.extra.recorder?.[p.id];
         return r && r.hands ? `<div class="seat-rec" title="기록관: 프리플랍 참여율 · 쇼다운에서 드러난 블러프 (${r.hands}핸드)">📒 VPIP ${r.vpip}% · 블러프 ${r.bluffs}</div>` : '';
       })()}
-      <div class="seat-augs"><span class="cnt" title="보유 증강 수">증강 ${p.augmentCount}</span>${p.streak ? `<span class="streak" title="폭주기관차 연승">🔥${p.streak}연승</span>` : ''}${revealed}</div>
+      <div class="seat-augs"><span class="cnt" title="보유 증강 수">증강 ${p.augmentCount}</span>${p.streak ? `<span class="streak" title="연승 (폭주기관차·연승 수당)">🔥${p.streak}연승</span>` : ''}${p.reserveRank ? `<span class="reserve" title="예약 주문: 이 숫자가 플랍에 나오면 1BB">🎯${RANKS[p.reserveRank]}</span>` : ''}${me && v.you.extra.trapArmed ? '<span class="trap" title="덫 설치됨 (나만 보임)">🪤</span>' : ''}${revealed}</div>
     </div>
     ${p.streetBet > 0 ? `<div class="bet" style="left:${bx}%;top:${by}%">${fmt(p.streetBet)}</div>` : ''}`;
 }
@@ -851,6 +861,8 @@ function renderTable(v: PlayerView) {
     `<div class="felt-mark">♠ 증강 홀덤 <span>레벨 ${v.level} · ${fmt(v.blinds.sb)}/${fmt(v.blinds.bb)}</span></div>
      ${notes ? `<div class="tnotes">${notes}</div>` : ''}
      <div class="board">${slots}</div>${board2}
+     ${v.table.shared.length ? `<div class="shared" title="공용 카드: 모두가 보드처럼 씁니다">공용 ${v.table.shared.map((c) => cardHtml(c, { size: 'md', extra: handCardClass(v, c) })).join('')}</div>` : ''}
+     ${v.table.reversed ? `<div class="whim" title="딜러의 변덕">↺ 반시계 · 남은 ${v.table.whimHands}핸드</div>` : ''}
      ${reserved.length ? `<div class="reserved">${reserved.map((r) => `<span class="res-card" title="${esc(r.label)}">${cardHtml(r.card, { size: 'sm', extra: 'inline' })} 예약</span>`).join('')}</div>` : ''}
      <div class="pot"><span class="pot-chips"></span>팟 ${v.potApprox ? '약 ' : ''}${fmt(v.pot)}</div>
      ${feed ? `<div class="feed">${feed}</div>` : ''}
@@ -956,7 +968,7 @@ function renderActions(v: PlayerView) {
     ${l.forced ? '<div class="warn">강제 집행: 이번에는 폴드할 수 없고 콜해야 합니다</div>' : ''}
     <div class="btns">
       ${l.fold ? '<button class="fold" data-a="fold">폴드</button>' : ''}
-      ${l.check ? '<button data-a="check">체크</button>' : ''}
+      ${l.check ? (v.you.extra.checkFolds ? '<button data-a="check" class="danger" title="시한폭탄: 체크하면 폴드됩니다">체크 = 폴드 💣</button>' : '<button data-a="check">체크</button>') : ''}
       ${l.call ? `<button data-a="call">콜 ${fmt(l.callAmount)}${l.callAmount >= v.you.chips ? ' (올인)' : ''}</button>` : ''}
       ${l.freeRide ? `<button class="aug-btn" data-a="freeRide" title="콜 금액의 절반만 내고 콜한 것으로 처리 (3초 반응 대기)">무임승차 콜 ${fmt(l.freeRideAmount)}${tax}</button>` : ''}
       ${l.raise ? `<button class="primary" data-a="raise">${raiseLabel} <span data-raise-label></span></button>` : ''}
@@ -997,9 +1009,12 @@ function augControl(v: PlayerView, a: MyAugmentView): string {
   const nameOfId = (id: string) => nameOf(v, id);
   switch (a.trigger) {
     case 'passive':
+      // 본인만 보는 적립·대상 정보
+      if (a.id === 'savings') return `<span class="muted">자동 발동 · 적립 ${fmt(v.you.extra.savings)}칩 (나만 보임)</span>`;
+      if (a.id === 'revenge') return `<span class="muted">자동 발동 · 복수 대상: ${esc(v.you.extra.nemesis ?? '없음')} (나만 보임)</span>`;
       return '<span class="muted">자동 발동</span>';
     case 'window':
-      return `<span class="muted" title="${esc(a.hint)}">${a.usesLeft ? '턴·리버 공개 직후 선언 기회에' : '사용함'}</span>`;
+      return `<span class="muted" title="${esc(a.hint)}">${a.usesLeft ? `${esc(a.hint)} 선언 기회에` : '사용함'}</span>`;
     case 'call':
       return `<span class="muted" title="${esc(a.hint)}">${a.usesLeft ? '레이즈·올인에 콜할 때 "무임승차 콜" 버튼' : '사용함'}</span>`;
     case 'reaction':
@@ -1072,6 +1087,25 @@ function augControl(v: PlayerView, a: MyAugmentView): string {
     if (v.you.extra.contract !== null) return `<span class="muted">계약: ${v.you.extra.contract ? '한 명 이상 콜' : '전원 폴드'} (나만 보임)</span>`;
     return `<button class="small primary" data-a="use" data-aug="sealedContract" data-choice="0" ${dis} ${tip}>전원 폴드</button><button class="small primary" data-a="use" data-aug="sealedContract" data-choice="1" ${dis} ${tip}>한 명 이상 콜</button>`;
   }
+  // 4차: 홀카드를 골라 쓰는 증강
+  const holePick: Partial<Record<AugmentId, string>> = { prepay: '교환', coldStorage: '냉동', nerveTest: '공개', bait: '공개' };
+  if (holePick[a.id]) {
+    if (!v.you.hole.length || !a.usableNow) return useBtn(v, a, `카드 ${holePick[a.id]}`);
+    return v.you.hole
+      .map((c, i) => `<button class="small" data-a="use" data-aug="${a.id}" data-i="${i}" ${tip}>${c === '??' ? cardBack('sm') : cardHtml(c, { size: 'sm', extra: 'inline' })} ${holePick[a.id]}</button>`)
+      .join('');
+  }
+  if (a.id === 'reserveOrder') {
+    if (!a.usableNow) return useBtn(v, a, '숫자 고르기');
+    return [14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2].map((r) => `<button class="small" data-a="use" data-aug="reserveOrder" data-choice="${r}" ${tip}>${RANKS[r]}</button>`).join('');
+  }
+  if (a.id === 'catchThief') {
+    return `<button class="small primary" data-a="use" data-aug="catchThief" data-choice="0" ${dis} ${tip}>← 왼쪽으로</button><button class="small primary" data-a="use" data-aug="catchThief" data-choice="1" ${dis} ${tip}>오른쪽으로 →</button>`;
+  }
+  if (a.id === 'sideBet' && v.you.extra.sideBetOn) return `<span class="muted">예측: ${esc(v.you.extra.sideBetOn)} (나만 보임)</span>`;
+  if (a.id === 'straw' && v.you.extra.strawOn) return `<span class="muted">지목: ${esc(v.you.extra.strawOn)} (나만 보임)</span>`;
+  if (a.id === 'wanted' && v.you.extra.wanted) return `<span class="muted">현상수배: ${esc(v.you.extra.wanted)}</span>`;
+  if (a.id === 'betCap' && (v.you.extra.betCap || v.you.extra.betCapNext)) return `<span class="muted">${v.you.extra.betCap ? `이번 핸드 상한 ${fmt(v.you.extra.betCap)}` : '다음 핸드 20BB 상한'}</span>`;
   if (a.id === 'magnet') {
     return (['♠', '♥', '♦', '♣'] as const).map((s, i) => `<button class="small" data-a="use" data-aug="magnet" data-choice="${i}" ${dis} ${tip}>${s}</button>`).join('');
   }
@@ -1417,7 +1451,7 @@ function renderModal(env: GameEnvelope, v: PlayerView) {
 }
 
 /** 대상·카드를 골라야 하는 선언 (공동 환승·기생·명추리·연금술) */
-const CUSTOM_DECL = ['seal', 'lastFork', 'jointTransfer', 'parasite', 'nameIt', 'alchemy'];
+const CUSTOM_DECL = ['seal', 'lastFork', 'jointTransfer', 'parasite', 'nameIt', 'alchemy', 'pickpocket', 'shadow', 'deadScanner'];
 
 function declareCustomHtml(v: PlayerView, tax: string): string {
   const d = v.you.declare!;
@@ -1426,7 +1460,21 @@ function declareCustomHtml(v: PlayerView, tax: string): string {
     `<select data-dtarget="${id}">${(d.targets[id as AugmentId] ?? []).map((t) => `<option value="${esc(t)}">${esc(nameOf(v, t))}</option>`).join('')}</select>`;
   const desc = (id: string) => esc(d.options.find((o) => o.id === id)!.description);
   let html = '';
-  for (const id of ['jointTransfer', 'parasite'] as const) {
+  if (ids.includes('shadow')) {
+    html += `<div class="decl-row"><b>그림자 분신</b> <span class="muted">${desc('shadow')}</span></div><div class="choose-row">${d.shadow
+      .map(
+        (x) =>
+          `<button class="small primary" data-a="declare" data-aug="shadow" data-i="${x.cardIndex}" data-board="${x.boardIndex}">${v.you.hole[x.cardIndex] ? cardHtml(v.you.hole[x.cardIndex], { size: 'sm', extra: 'inline' }) : `${x.cardIndex + 1}번`} → ${v.board[x.boardIndex] ? cardHtml(v.board[x.boardIndex]!, { size: 'sm', extra: 'inline' }) : ''}${tax}</button>`,
+      )
+      .join('')}</div>`;
+  }
+  if (ids.includes('deadScanner')) {
+    const ranks = 'AKQJT98765432'.split('');
+    html += `<div class="decl-row"><b>데드 카드 스캐너</b> <span class="muted">${desc('deadScanner')}</span></div><div class="choose-row">${ranks
+      .map((r) => `<button class="small" data-a="declare" data-aug="deadScanner" data-choice="${14 - 'AKQJT98765432'.indexOf(r) - 2}">${r === 'T' ? '10' : r}</button>`)
+      .join('')}${['♠', '♥', '♦', '♣'].map((s, i) => `<button class="small" data-a="declare" data-aug="deadScanner" data-choice="${13 + i}">${s}</button>`).join('')}</div>`;
+  }
+  for (const id of ['jointTransfer', 'parasite', 'pickpocket'] as const) {
     if (!ids.includes(id)) continue;
     html += `<div class="decl-row">${sel(id)} <button class="primary" data-a="declare" data-aug="${id}">${esc(AUGMENTS[id].name)} 선언${tax}</button> <span class="muted">${desc(id)}</span></div>`;
   }
@@ -1502,8 +1550,13 @@ function respondModalHtml(v: PlayerView): string {
     case 'accept':
       body = `<div class="lobby-actions"><button class="primary" data-a="respond" data-accept="1">수락</button><button data-a="respond" data-accept="0">거절</button></div>`;
       break;
-    case 'card':
-      body = `<div class="choose-row">${holeBtn('건네기')}</div>`;
+    case 'card': {
+      const label = ({ sharedCard: '공개', halfSecret: '공개', commonWell: '내기', catchThief: '넘기기', selectiveReveal: '보여 주기' } as Record<string, string>)[r.augment ?? ''] ?? '건네기';
+      body = `<div class="choose-row">${holeBtn(label)}</div>`;
+      break;
+    }
+    case 'cardOrKeep':
+      body = `<div class="choose-row">${holeBtn('바꾸기')}</div><div class="lobby-actions"><button class="primary" data-a="respond" data-choice="-1">그대로 두기</button></div>`;
       break;
     case 'bid':
       body = `${bidInput}<div class="lobby-actions"><button class="primary" data-a="respondBid">입찰</button><button data-a="respond" data-bid="0">불참</button></div>`;
@@ -1521,7 +1574,7 @@ function respondModalHtml(v: PlayerView): string {
   return `<div class="modal-bg"><div class="modal respond-modal">
       <h3>${esc(r.name)} <span class="timer-text" data-timer></span></h3>
       <p>${richText(r.text)}</p>
-      <p class="muted small-note">응답은 나만 봅니다. 시간이 지나면 ${r.input === 'accept' ? '거절' : r.input === 'card' || r.input === 'strongWeak' ? '무작위로 정합니다' : '불참'}.</p>
+      <p class="muted small-note">응답은 나만 봅니다. 시간이 지나면 ${r.input === 'accept' ? '거절' : r.input === 'card' || r.input === 'strongWeak' ? '무작위로 정합니다' : r.input === 'cardOrKeep' ? '그대로 둡니다' : '불참'}.</p>
       ${body}</div></div>`;
 }
 
@@ -1821,6 +1874,8 @@ document.addEventListener('click', async (ev) => {
       const i = t.dataset.i !== undefined ? Number(t.dataset.i) : undefined;
       const target = aug ? ($(`[data-dtarget="${aug}"]`) as HTMLSelectElement | null)?.value : undefined;
       if (aug === 'alchemy') return act({ type: 'declare', augment: aug, cardIndex: i, choice: Number(t.dataset.choice) });
+      if (aug === 'shadow') return act({ type: 'declare', augment: aug, cardIndex: i, boardIndex: Number(t.dataset.board) });
+      if (aug === 'deadScanner') return act({ type: 'declare', augment: aug, choice: Number(t.dataset.choice) });
       return act({ type: 'declare', augment: aug, boardIndex: i, targetId: target, card: t.dataset.card });
     }
     case 'attach':

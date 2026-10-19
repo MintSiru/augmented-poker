@@ -1469,6 +1469,9 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
       const boardCard = state.board[bi];
       owner.hole[ci] = boardCard;
       state.board[bi] = mine;
+      // 보드로 나간 카드는 이마·공개 표시가 풀리고, 손에 들어온 보드 카드는 모두가 본 카드
+      cardLeft(owner, mine);
+      if (!state.effects.fogSeers.length && !state.effects.blindDarted.length) state.used.push({ card: boardCard, kind: 'shown' });
       logBoard(state, `맞바꾸기: ${owner.name}이(가) 홀카드 ${cardToken(mine)}와(과) 보드 ${cardToken(boardCard)}를 바꿨습니다`, `맞바꾸기: ${owner.name}이(가) 홀카드 1장과 보드 ${bi + 1}번째 카드를 바꿨습니다`, false);
     },
   },
@@ -2157,7 +2160,7 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
       if (ctx.owner.hole.length < 2) return '홀카드가 2장 이상일 때만 쓸 수 있습니다.';
       return validHoleIndex(ctx.owner, params.cardIndex) ? null : '버릴 홀카드를 고르세요.';
     },
-    detail: (ctx, p) => (typeof p.cardIndex === 'number' && ctx.owner.hole[p.cardIndex] ? `— ${cardToken(ctx.owner.hole[p.cardIndex])} 공개 후 버림` : ''),
+    detail: () => '— 홀카드 1장 공개 후 버림',
     resolve(ctx, params) {
       const { state, owner } = ctx;
       const [c] = owner.hole.splice(params.cardIndex!, 1);
@@ -2292,10 +2295,12 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
       if (!la || la.seq !== state.betActionSeq || la.street !== 'river' || state.players[la.idx] !== owner) return '리버에서 내가 베팅·레이즈한 직후에만 쓸 수 있습니다.';
       return validHoleIndex(owner, params.cardIndex) ? null : '공개할 홀카드를 고르세요.';
     },
-    detail: (ctx, p) => (typeof p.cardIndex === 'number' && ctx.owner.hole[p.cardIndex] ? `— ${cardToken(ctx.owner.hole[p.cardIndex])} 공개` : ''),
+    // 반응 대기 중(카운터 가능)에는 어떤 카드인지 알리지 않는다
+    detail: () => '— 홀카드 1장 공개',
     resolve(ctx, params) {
       const c = ctx.owner.hole[params.cardIndex!];
       if (c && !ctx.owner.exposed.includes(c)) ctx.owner.exposed.push(c);
+      if (c) addLog(ctx.state, `${ctx.owner.name}: 홀카드 ${cardToken(c)} 공개`);
     },
   },
 
@@ -2355,7 +2360,8 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
         const from = AUGMENTS[old.id].stars;
         // ★ → ★★, ★★ → ★★★, ★★★ → 몰?루 상자(별부터 무작위)
         const stars = (from === 1 ? 2 : from === 2 ? 3 : 1 + state.rng.int(3)) as 1 | 2 | 3;
-        const keep = owner.augments.filter((a) => a !== old).map((a) => a.id);
+        // 지금 고르는 중인 선택지에 있는 증강도 피한다 (고른 뒤 겹치지 않게)
+        const keep = [...owner.augments.filter((a) => a !== old).map((a) => a.id), ...(owner.pickOptions ?? [])];
         const id = rollOneAugment(stars, keep, state.rng, takenByOthers(state, owner), pool);
         if (!id) continue;
         const fresh = newOwnedAugment(state, id);
@@ -2376,10 +2382,12 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
 
   bait: {
     check: (ctx, params) => preflopBeforeAct(ctx) ?? (validHoleIndex(ctx.owner, params.cardIndex) ? null : '공개할 홀카드를 고르세요.'),
-    detail: (ctx, p) => (typeof p.cardIndex === 'number' && ctx.owner.hole[p.cardIndex] ? `— ${cardToken(ctx.owner.hole[p.cardIndex])} 공개` : ''),
+    // 반응 대기 중(카운터 가능)에는 어떤 카드인지 알리지 않는다
+    detail: () => '— 홀카드 1장 공개',
     resolve(ctx, params) {
       const c = ctx.owner.hole[params.cardIndex!];
       if (c && !ctx.owner.exposed.includes(c)) ctx.owner.exposed.push(c);
+      if (c) addLog(ctx.state, `${ctx.owner.name}: 홀카드 ${cardToken(c)} 공개`);
       // 쇼다운 정산용 표시 (핸드가 시작되면 지워짐)
       ctx.aug.usedThisHand = true;
     },
@@ -2427,7 +2435,7 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
           const i = p.hole.indexOf(given[k]);
           cardLeft(p, given[k]);
           p.hole[i] = mixed[k];
-          note(state, p, 'info', `공동 우물: ${cardToken(given[k])}을(를) 내고 ${cardToken(mixed[k])}을(를) 받았습니다`, [mixed[k]]);
+          note(state, p, 'info', `공동 우물: ${cardToken(given[k])}을(를) 내고 ${cardToken(mixed[k])}을(를) 받았습니다`, [given[k], mixed[k]]);
         });
         addLog(state, '공동 우물: 낸 카드를 섞어 무작위로 다시 나눴습니다');
         return false;
@@ -2463,7 +2471,7 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
         ps.forEach((p, k) => {
           const from = (((k - step) % n) + n) % n;
           p.hole[slots[k]] = given[from];
-          note(state, p, 'info', `도둑잡기: ${cardToken(given[k])}을(를) ${ps[(k + step + n) % n].name}에게 주고 ${ps[from].name}에게서 ${cardToken(given[from])}을(를) 받았습니다`, [given[from]]);
+          note(state, p, 'info', `도둑잡기: ${cardToken(given[k])}을(를) ${ps[(k + step + n) % n].name}에게 주고 ${ps[from].name}에게서 ${cardToken(given[from])}을(를) 받았습니다`, [given[k], given[from]]);
         });
         addLog(state, '도둑잡기: 고른 카드를 동시에 옆 사람에게 넘겼습니다');
         return false;
@@ -2604,8 +2612,8 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
       owner.forehead = null;
       t.forehead = null;
       addLog(state, `바꿔치기: ${owner.name}와(과) ${t.name}이(가) 홀카드를 통째로 바꿨습니다`);
-      note(state, owner, 'info', `바꿔치기: 새 홀카드 ${cardsText(owner.hole)}`, [...owner.hole]);
-      note(state, t, 'info', `바꿔치기: 새 홀카드 ${cardsText(t.hole)}`, [...t.hole]);
+      note(state, owner, 'info', `바꿔치기: ${cardsText(t.hole)}을(를) 주고 ${cardsText(owner.hole)}을(를) 받았습니다`, [...t.hole, ...owner.hole]);
+      note(state, t, 'info', `바꿔치기: ${cardsText(owner.hole)}을(를) 주고 ${cardsText(t.hole)}을(를) 받았습니다`, [...owner.hole, ...t.hole]);
     },
   },
 
@@ -2649,7 +2657,7 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
           cardLeft(p, old);
           state.used.push({ card: old, kind: 'discard' });
           p.hole[i] = state.deck.shift()!;
-          note(state, p, 'info', `마지막 선택: ${cardToken(old)}을(를) 버리고 ${cardToken(p.hole[i])}을(를) 받았습니다`, [p.hole[i]]);
+          note(state, p, 'info', `마지막 선택: ${cardToken(old)}을(를) 버리고 ${cardToken(p.hole[i])}을(를) 받았습니다`, [old, p.hole[i]]);
         }
         return false;
       },

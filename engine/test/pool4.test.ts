@@ -14,12 +14,13 @@ import {
   canHold,
   AUGMENTS,
   ALL_AUGMENT_IDS,
+  poolIds,
   type AugmentId,
   type DebugDeal,
   type GameAction,
   type GameState,
 } from '../src/index.js';
-import { makePlayers } from './helpers.js';
+import { expectedChips, makePlayers, playGame, totalChips } from './helpers.js';
 
 interface SetupOpts {
   dealer?: number;
@@ -888,4 +889,52 @@ describe('4차 공개형', () => {
     passUntil(s, () => s.street === 'river');
     expect(s.board[4]).toBe('2s');
   });
+});
+
+describe('4차 시뮬레이션 (봇끼리 완주, 칩 보존)', () => {
+  const owned = (s: GameState) => s.players.flatMap((p) => p.augments.map((a) => a.id));
+
+  it('증강 풀 1차만: 1차 증강만 나오고 끝까지 진행', () => {
+    const pool = poolIds('p1');
+    for (const seed of [11, 12]) {
+      const seen = new Set<AugmentId>();
+      const s = playGame(6, seed, { pool, handsPerLevel: 4 }, (st) => owned(st).forEach((id) => seen.add(id)));
+      expect(s.phase).toBe('gameOver');
+      for (const id of seen) expect(pool).toContain(id);
+    }
+  }, 300000);
+
+  it('증강 풀 직접 고름(9개): 고른 증강만 나오고 끝까지 진행', () => {
+    const by = (st: number) => ALL_AUGMENT_IDS.filter((id) => AUGMENTS[id].stars === st && AUGMENTS[id].pool === 4).slice(0, 3);
+    const pool = poolIds('custom', [...by(1), ...by(2), ...by(3)]);
+    expect(pool.length).toBe(9);
+    const seen = new Set<AugmentId>();
+    const s = playGame(5, 21, { pool, handsPerLevel: 3 }, (st) => owned(st).forEach((id) => seen.add(id)));
+    expect(s.phase).toBe('gameOver');
+    for (const id of seen) expect(pool).toContain(id);
+  }, 300000);
+
+  it('8인 전체 풀 + 4차 증강을 잔뜩 준 게임이 승자까지 간다', () => {
+    for (const seed of [31, 32, 33]) {
+      let given = false;
+      const s = playGame(8, seed, { pool: poolIds('all'), handsPerLevel: 4, debug: true }, (st) => {
+        if (given || st.phase !== 'betting') return;
+        given = true;
+        const rng = seededRng(seed);
+        const pool4 = ALL_AUGMENT_IDS.filter((id) => AUGMENTS[id].pool === 4);
+        for (const p of st.players) {
+          const mine: AugmentId[] = p.augments.map((a) => a.id);
+          for (let k = 0; k < 10; k++) {
+            const id = pool4[rng.int(pool4.length)];
+            if (!canHold(mine, id)) continue;
+            mine.push(id);
+            ok(debugGiveAugment(st, p.id, id));
+          }
+        }
+      });
+      expect(s.phase).toBe('gameOver');
+      expect(s.players.filter((p) => !p.out)).toHaveLength(1);
+      expect(totalChips(s)).toBe(expectedChips(s, 8 * 1000));
+    }
+  }, 600000);
 });
