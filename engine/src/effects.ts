@@ -2340,6 +2340,19 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
     },
   },
 
+  // ═════════════════════════ 4차 풀: 심리전형 ═════════════════════════
+
+  bait: {
+    check: (ctx, params) => preflopBeforeAct(ctx) ?? (validHoleIndex(ctx.owner, params.cardIndex) ? null : '공개할 홀카드를 고르세요.'),
+    detail: (ctx, p) => (typeof p.cardIndex === 'number' && ctx.owner.hole[p.cardIndex] ? `— ${cardToken(ctx.owner.hole[p.cardIndex])} 공개` : ''),
+    resolve(ctx, params) {
+      const c = ctx.owner.hole[params.cardIndex!];
+      if (c && !ctx.owner.exposed.includes(c)) ctx.owner.exposed.push(c);
+      // 쇼다운 정산용 표시 (핸드가 시작되면 지워짐)
+      ctx.aug.usedThisHand = true;
+    },
+  },
+
   // ═════════════════════════ 4차 풀: 족보 변형형 ═════════════════════════
 
   shadow: {
@@ -2914,6 +2927,20 @@ export const PASSIVE: Partial<Record<AugmentId, PassiveEffect>> = {
     onHandEnd(ctx) {
       const { state, owner } = ctx;
       if (owner.sideBetOn) addLog(state, `사이드 베팅: ${owner.name}의 예측은 ${nameOf(state, owner.sideBetOn)}이었습니다`);
+    },
+  },
+
+  bait: {
+    onHandEnd(ctx, result) {
+      const { state, owner, aug } = ctx;
+      // 이번 핸드에 미끼를 던졌고 쇼다운에서 이겼으면, 끝까지 따라온 상대마다 1BB
+      if (!aug.usedThisHand || !result.showdown || (result.won[owner.id] ?? 0) <= 0) return;
+      const callers = result.entries.map((e) => playerById(state, e.id)!).filter((p) => p !== owner && (result.won[p.id] ?? 0) <= 0);
+      let got = 0;
+      for (const p of callers) got += transfer(state, p, owner, bbOf(state));
+      if (got <= 0) return;
+      result.extras.push(`${owner.name}: 미끼 공개 — 따라온 상대들에게서 ${got}칩`);
+      addLog(state, result.extras.at(-1)!);
     },
   },
 

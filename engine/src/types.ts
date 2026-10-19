@@ -236,6 +236,8 @@ export interface PlayerState {
   nemesis: string | null;
   /** 연승을 마지막으로 센 핸드 (연승 수당·폭주기관차가 같은 카운터를 쓰므로 한 번만) */
   streakHand: number;
+  /** 연막탄: 공개할 때 끝까지 숨긴 홀카드 (다른 플레이어 뷰·로그에서 '??') */
+  smoked: Card | null;
   /** 색맹: 이번 핸드 색 플러시 */
   colorBlindOn: boolean;
   /** 그림자 분신: 이번 판정에서 무늬를 바꾼 홀카드 */

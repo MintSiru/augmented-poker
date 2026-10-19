@@ -371,7 +371,8 @@ export function publicCards(state: GameState): Card[] {
   const out: Card[] = [];
   for (const p of state.players) {
     if (!p.inHand) continue;
-    if (p.shown || glassShows(state, p)) out.push(...p.hole);
+    // 연막탄으로 숨긴 카드는 공개된 카드가 아니다
+    if (p.shown || glassShows(state, p)) out.push(...p.hole.filter((c) => c !== p.smoked));
     // 미끼 공개·반쪽짜리 비밀 등으로 공개된 홀카드
     else for (const c of p.exposed) if (p.hole.includes(c)) out.push(c);
   }

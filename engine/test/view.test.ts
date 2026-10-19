@@ -69,6 +69,21 @@ function perturb(s: GameState, viewerId: string, rng: Rng): GameState {
     const visible = q.inHand && (q.shown || glassShows(c, q) || (q === viewer && ownVisible(c, q)));
     // 공개된 홀카드(미끼 공개 등)는 그대로 두고 나머지만 바꾼다
     if (!visible) q.hole.forEach((c, i) => !q.exposed.includes(c) && slots.push({ get: () => q.hole[i], set: (x) => (q.hole[i] = x) }));
+    // 연막탄으로 숨긴 카드는 공개된 뒤에도 다른 사람에게는 비공개
+    else if (q !== viewer && q.smoked) {
+      const i = q.hole.indexOf(q.smoked);
+      const qq = q;
+      const entry = c.result?.entries.find((e) => e.id === qq.id);
+      if (i >= 0)
+        slots.push({
+          get: () => qq.hole[i],
+          set: (x) => {
+            if (entry) entry.cards = entry.cards.map((y) => (y === qq.smoked ? x : y));
+            qq.hole[i] = x;
+            qq.smoked = x;
+          },
+        });
+    }
     if (q !== viewer) addArr(q.discarded);
     if (q !== viewer) {
       const qq = q;
@@ -169,7 +184,7 @@ function allowedCards(s: GameState, viewerId: string): Set<Card> {
     if (!fogHides(s, viewerId, i)) ok.add(c);
   });
   for (const p of s.players) {
-    if (p.inHand && (p.shown || glassShows(s, p))) p.hole.forEach((c) => ok.add(c));
+    if (p.inHand && (p.shown || glassShows(s, p))) p.hole.forEach((c) => (p === me || c !== p.smoked) && ok.add(c));
     p.shepherdShown.forEach((c) => ok.add(c));
     if (p.alchemy) [p.alchemy.from, p.alchemy.to].forEach((c) => ok.add(c));
     if (p.inHand) p.exposed.forEach((c) => ok.add(c));

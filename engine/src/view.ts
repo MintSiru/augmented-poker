@@ -531,7 +531,7 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
         return { name: p === me ? d.name : publicAugName(p, a.id), stars: d.stars, description: d.description };
       }),
     // 홀카드는 볼 수 있는 경우에만 (쇼다운·유리 테이블, 본인은 암전이 아닐 때)
-    shownCards: p.inHand && (p.shown || glassShows(state, p)) && holeVisible(state, p, me) ? [...p.hole] : null,
+    shownCards: p.inHand && (p.shown || glassShows(state, p)) && holeVisible(state, p, me) ? p.hole.map((c) => (p !== me && c === p.smoked ? '??' : c)) : null,
     shepherdShown: [...p.shepherdShown],
     connected: true,
     isHost: false,
@@ -561,7 +561,8 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
         return {
           id: x.id,
           name: owner.name,
-          cards: [...x.cards],
+          // 연막탄으로 숨긴 카드는 본인 외에는 ??
+          cards: x.cards.map((c) => (owner !== me && c === owner.smoked ? '??' : c)),
           handName: x.handName,
           bestCards: [...x.bestCards],
           applied: x.applied.map((v) => nameOfAug(VARIANT_AUG[v])),

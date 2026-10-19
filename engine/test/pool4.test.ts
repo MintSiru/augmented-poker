@@ -639,3 +639,40 @@ describe('4차 경제/베팅형', () => {
     expect(counts[3]).toBeGreaterThan(5);
   });
 });
+
+describe('4차 심리전형', () => {
+  it('연막탄: 이긴 쇼다운에서 족보에 안 쓴 홀카드는 다른 사람 뷰·로그에 끝까지 안 보낸다', () => {
+    const s = setup(3, {
+      augs: { p2: ['smokeBomb'] },
+      deal: { board: cards('As Kd Qd 7c 2s'), hands: { p1: cards('9c 8d'), p2: cards('Qc 3h'), p3: cards('9d 6c') } },
+    });
+    toShowdown(s);
+    expect(s.result!.won.p2).toBeGreaterThan(0);
+    const v1 = view(s, 'p1');
+    expect(v1.players.find((p) => p.id === 'p2')!.shownCards).toEqual(['Qc', '??']);
+    expect(v1.result!.entries.find((e) => e.id === 'p2')!.cards).toEqual(['Qc', '??']);
+    expect(JSON.stringify(v1)).not.toContain('3h');
+    // 판정은 정상, 본인은 그대로 본다
+    expect(view(s, 'p2').players.find((p) => p.id === 'p2')!.shownCards).toEqual(['Qc', '3h']);
+    // 다음 핸드로 넘어가도 남지 않는다
+    ok(startNextHand(s));
+    resolveAll(s);
+    expect(JSON.stringify(view(s, 'p1'))).not.toContain('"3h"');
+  });
+
+  it('연막탄: 진 쇼다운에서는 숨기지 않는다', () => {
+    const s = setup(3, { augs: { p1: ['smokeBomb'] }, deal: { board: cards(BOARD), hands: { p1: cards('9c 8d'), p2: cards('Qc Qh'), p3: cards('9d 6c') } } });
+    toShowdown(s);
+    expect(view(s, 'p2').players.find((p) => p.id === 'p1')!.shownCards).toEqual(['9c', '8d']);
+  });
+
+  it('미끼 공개: 첫 행동 전에 1장 공개, 쇼다운에서 이기면 따라온 상대마다 1BB', () => {
+    const s = setup(3, { augs: { p1: ['bait'] }, deal: { board: cards(BOARD), hands: { p1: cards('Qc Qh'), p2: cards('9c 8d'), p3: cards('9d 6c') } } });
+    use(s, 'p1', 'bait', { cardIndex: 0 });
+    resolveAll(s);
+    expect(view(s, 'p2').players.find((p) => p.id === 'p1')!.exposed).toEqual(['Qc']);
+    toShowdown(s);
+    expect(P(s, 'p1').chips).toBe(1000 + 40 + 40);
+    expect(P(s, 'p1').augments[0].usesLeft).toBe(1);
+  });
+});

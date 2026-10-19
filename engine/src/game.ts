@@ -198,6 +198,7 @@ function newPlayer(np: NewPlayer, seat: number, chips: number): PlayerState {
     strawOn: null,
     nemesis: null,
     streakHand: 0,
+    smoked: null,
   };
 }
 
@@ -838,6 +839,7 @@ function resetHandState(state: GameState): void {
     p.wanted = null;
     p.sideBetOn = null;
     p.strawOn = null;
+    p.smoked = null;
     for (const a of p.augments) a.usedThisHand = false;
   }
   state.board = [];
@@ -2276,10 +2278,22 @@ function showdown(state: GameState): void {
   addLog(state, `쇼다운${table.length ? ` — ${table.join(', ')}` : ''}`);
   if (state.effects.fogSeers.length || state.effects.blindDarted.length || state.effects.glasses.length) addLog(state, `보드 공개: ${cardsText(state.board.slice(0, state.boardRevealed))}`);
   if (state.board2) addLog(state, `두 번째 보드: ${cardsText(state.board2.slice(0, state.boardRevealed))}`);
+  const pots = potsOf();
+  // 팟마다 판정 단위별 승자 (명추리 성공자가 참여한 팟은 그 사람이 모두 가져간다)
+  const decisions = pots.map((pot) =>
+    nameIt && pot.eligible.includes(nameIt.id)
+      ? units.map((): PotDecision => ({ winners: [nameIt.id], decidedBy: {} }))
+      : units.map((u) => decidePot(pot.eligible.map((id) => contenders[u.boardIdx].get(id)!).filter(Boolean), { inverted: u.inverted, board: boards[u.boardIdx].cards })),
+  );
+  // 연막탄: 이긴 사람은 족보에 쓰지 않은 홀카드 1장을 끝까지 숨긴다
+  for (const e of entries) {
+    const p = playerById(state, e.id)!;
+    if (decisions.some((d) => d.some((u) => u.winners.includes(p.id)))) smokeCard(state, p, e.bestCards);
+  }
   for (const e of entries) {
     const p = playerById(state, e.id)!;
     const variants = e.applied.map((v) => VARIANT_LABEL[v]);
-    addLog(state, `${p.name}: ${cardsText(e.cards)} — ${e.handName}${variants.length ? ` (${variants.join(', ')})` : ''}${e.alt?.length ? ` / ${e.alt.map((a) => `${a.label} ${a.handName}`).join(', ')}` : ''}`);
+    addLog(state, `${p.name}: ${cardsText(smokedHole(p, e.cards))} — ${e.handName}${variants.length ? ` (${variants.join(', ')})` : ''}${e.alt?.length ? ` / ${e.alt.map((a) => `${a.label} ${a.handName}`).join(', ')}` : ''}`);
     for (const v of e.applied) {
       const aug = findAug(p, VARIANT_AUG[v]);
       if (aug) {
@@ -2288,13 +2302,6 @@ function showdown(state: GameState): void {
       }
     }
   }
-  const pots = potsOf();
-  // 팟마다 판정 단위별 승자 (명추리 성공자가 참여한 팟은 그 사람이 모두 가져간다)
-  const decisions = pots.map((pot) =>
-    nameIt && pot.eligible.includes(nameIt.id)
-      ? units.map((): PotDecision => ({ winners: [nameIt.id], decidedBy: {} }))
-      : units.map((u) => decidePot(pot.eligible.map((id) => contenders[u.boardIdx].get(id)!).filter(Boolean), { inverted: u.inverted, board: boards[u.boardIdx].cards })),
-  );
   const extras: string[] = [];
   // 내기할래?: 쇼다운까지 가서 졌는데 우승 족보 예측이 맞으면 낸 칩의 50%를 팟에서 환급
   const mainWinner = entries.find((e) => decisions[0]?.[0]?.winners.includes(e.id));
@@ -2633,7 +2640,9 @@ function applyShow(state: GameState, p: PlayerState, reveal: boolean): string | 
   const sm = findAug(p, 'showmanship')!;
   p.shown = true;
   const { bb } = currentBlinds(state);
-  const bluff = evaluatePlayerHand(p.hole, evalBoard(state), rulesFor(p)).value.category === Category.HighCard;
+  const shownEval = evaluatePlayerHand(p.hole, evalBoard(state), rulesFor(p)).value;
+  const bluff = shownEval.category === Category.HighCard;
+  smokeCard(state, p, shownEval.cards);
   const folder = playerById(state, state.lastFolderId);
   const amount = folder && folder !== p ? Math.min((bluff ? 2 : 1) * bb, folder.chips) : 0;
   if (folder && amount > 0) {
@@ -2641,7 +2650,7 @@ function applyShow(state: GameState, p: PlayerState, reveal: boolean): string | 
     p.chips += amount;
   }
   countUse(state, 'showmanship');
-  addLog(state, `${p.name}: 홀카드 공개 ${cardsText(p.hole)}${bluff ? ' (블러프!)' : ''}`);
+  addLog(state, `${p.name}: 홀카드 공개 ${cardsText(smokedHole(p, p.hole))}${bluff ? ' (블러프!)' : ''}`);
   announceNamed(state, p, sm, '발동', folder ? `— ${folder.name}에게서 ${amount}칩` : '');
   if (state.result) state.result.extras.push(`${p.name}: 쇼맨십 ${bluff ? '블러프 공개' : '공개'} +${amount}`);
   return null;
@@ -3003,3 +3012,19 @@ export function getPlayer(state: GameState, playerId: string): PlayerState | und
 }
 
 export { basePhase };
+
+// ───────────────────────── 연막탄 ─────────────────────────
+
+/** 연막탄 보유자가 패를 공개할 때 족보에 쓰지 않은(이미 공개되지 않은) 홀카드 1장을 숨긴다 */
+function smokeCard(state: GameState, p: PlayerState, best: Card[]): void {
+  if (!findAug(p, 'smokeBomb')) return;
+  const c = p.hole.find((x) => !best.includes(x) && !p.exposed.includes(x));
+  if (!c) return;
+  p.smoked = c;
+  countUse(state, 'smokeBomb');
+}
+
+/** 공개 로그용: 연막탄으로 숨긴 카드는 ?? */
+function smokedHole(p: PlayerState, cards: Card[]): Card[] {
+  return cards.map((c) => (c === p.smoked ? '??' : c));
+}
