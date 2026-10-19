@@ -1022,7 +1022,7 @@ export const AUGMENTS: Record<AugmentId, AugmentDef> = {
   }),
   pickpocket: D({
     id: 'pickpocket', name: '소매치기', stars: 2, category: '카드 조작형', trigger: 'window', disclosure: 'named', pool: 4,
-    uses: { count: 1, per: 'game' }, conflicts: ['counting'],
+    uses: { count: 1, per: 'game' }, conflicts: ['counting'], target: 'opponent',
     description: '게임 1회. 쇼다운 직전, 이번 핸드에 폴드한 플레이어 1명의 홀카드 2장과 내 홀카드 2장을 통째로 바꾼다. 카운팅과 동시 보유 불가.',
     timing: '리버 베팅이 끝난 뒤 쇼다운 직전 선언 기회에',
   }),

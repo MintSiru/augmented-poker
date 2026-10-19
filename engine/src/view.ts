@@ -123,6 +123,8 @@ export interface PublicPlayerView {
   streak: number | null;
   /** 운명 공동체: 이번 핸드 팀 번호 (팀 색) */
   team: number | null;
+  /** 공개된 홀카드 1장씩 (미끼 공개·반쪽짜리 비밀·배짱 시험 등) */
+  exposed: Card[];
 }
 
 export interface NoteView {
@@ -211,8 +213,10 @@ export interface RespondView {
   participants: string[];
   /** 내가 지금 응답해야 하는가 */
   needMe: boolean;
-  /** 응답 방식: 수락/거절, 입찰, 홀카드 고르기, 입찰+홀카드, 강함/약함 */
-  input: 'accept' | 'bid' | 'card' | 'bidCard' | 'strongWeak' | null;
+  /** 응답 방식: 수락/거절, 입찰, 홀카드 고르기, 입찰+홀카드, 강함/약함, 후보 카드와 홀카드 바꾸기(안 바꿀 수 있음) */
+  input: 'accept' | 'bid' | 'card' | 'bidCard' | 'strongWeak' | 'pickSwap' | null;
+  /** 후보 카드 (교환 진열대·재활용, 응답하는 본인에게만) */
+  offered: Card[] | null;
   /** 나에게 보여 줄 안내 (제안 내용 포함) */
   text: string;
   /** 골라 봐: 선언자 본인에게만, 보여 줄 카드 */
@@ -295,6 +299,8 @@ export interface PlayerView {
   respond: RespondView | null;
   /** 카드 경매로 공개된 카드 (가림 규칙 적용) */
   auctionCard: Card | null;
+  /** 교환 진열대로 공개된 후보 카드 */
+  offerCards: Card[];
   /** 나만 미리 본 앞으로의 보드 카드 (예지·턴과 리버 사이). 보드 칸 위치와 함께 */
   peek: { index: number; card: Card; label: string }[];
   you: {
@@ -376,6 +382,9 @@ export interface PlayerView {
       lurkChoose: boolean;
       /** 덫을 설치해 두었는가 (나에게만) */
       trapArmed: boolean;
+      /** 봉인 봉투의 예비 카드 / 냉동 보관한 카드 (나에게만) */
+      envelope: Card | null;
+      frozen: Card | null;
       /** 기록관: 상대별 프리플랍 참여율(%)과 쇼다운에서 드러난 블러프 횟수 */
       recorder: Record<string, { hands: number; vpip: number; bluffs: number }> | null;
     };
@@ -518,6 +527,7 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     dormant: p.dormant !== null ? Math.max(0, p.dormant - state.handNumber) : null,
     // 연승 수는 공개 정보 (연승을 세는 증강 보유자만 쌓인다)
     streak: p.streak > 0 ? p.streak : null,
+    exposed: p.inHand ? p.exposed.filter((c) => p.hole.includes(c)) : [],
     team: (() => {
       const k = state.teams.findIndex((t) => t.includes(p.id));
       return k >= 0 ? k : null;
@@ -718,6 +728,7 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     reaction,
     respond: respondView(state, me, bb),
     auctionCard: state.auctionCard && !mask.board ? blurCard(state.auctionCard) : null,
+    offerCards: [...state.offerCards],
     peek: seated && !mask.board ? peekCards(state, me).map((x) => ({ ...x, card: blurCard(x.card) })) : [],
     you: {
       id: me.id,
@@ -781,6 +792,8 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
         contract: me.contract,
         lurkChoose: me.lurkChoose,
         trapArmed: !!findAug(me, 'trap')?.armed,
+        envelope: me.envelope,
+        frozen: me.frozen,
         recorder: findAug(me, 'recorder')
           ? Object.fromEntries(
               state.players
@@ -860,6 +873,14 @@ function respondView(state: GameState, me: PlayerState, bb: number): RespondView
       input = 'bidCard';
       text = r.participants.includes(me.id) ? `카드 경매: 낙찰되면 공개된 카드를 고른 홀카드와 바꿉니다 (0 = 불참, 최소 ${bb})` : '카드 경매 입찰 중';
       break;
+    case 'showcase':
+      input = 'pickSwap';
+      text = isOwner ? '교환 진열대: 후보 카드 중 1장과 홀카드 1장을 바꿀 수 있습니다 (거절해도 횟수 소모)' : `${owner}이(가) 교환 진열대에서 고르는 중`;
+      break;
+    case 'recycle':
+      input = 'pickSwap';
+      text = isOwner ? '재활용: 이번 핸드의 번 카드 중 1장과 홀카드 1장을 바꿀 수 있습니다' : `${owner}이(가) 재활용 중`;
+      break;
     case 'infoToll': {
       const augName = AUGMENTS[(r.params.extra?.augment as AugmentId) ?? 'thermal'].name;
       input = 'accept';
@@ -882,7 +903,7 @@ function respondView(state: GameState, me: PlayerState, bb: number): RespondView
   // 정보 통행료·선택적 노출: 누가 누구를 확인하는지는 당사자만 안다
   const privateOffer = (r.augment === 'infoToll' || r.augment === 'selectiveReveal') && !isOwner && !r.participants.includes(me.id);
   if (privateOffer) {
-    return { augment: null, name: '응답 대기', ownerId: '', ownerName: '', participants: [], needMe: false, input: null, text: '응답 대기 중', card: null, myAnswer: null, minBid: bb, maxBid: me.chips };
+    return { augment: null, name: '응답 대기', ownerId: '', ownerName: '', participants: [], needMe: false, input: null, offered: null, text: '응답 대기 중', card: null, myAnswer: null, minBid: bb, maxBid: me.chips };
   }
   return {
     augment: r.augment,
@@ -892,6 +913,7 @@ function respondView(state: GameState, me: PlayerState, bb: number): RespondView
     participants: [...r.participants],
     needMe,
     input: needMe ? input : null,
+    offered: needMe && r.augment === 'showcase' ? [...state.offerCards] : needMe && r.augment === 'recycle' ? state.used.filter((u) => u.kind === 'burn').map((u) => u.card) : null,
     text,
     card: isOwner && r.augment === 'pickMe' && holeVisible(state, me, me) ? (r.params.card ?? null) : null,
     myAnswer: mine ? { accept: mine.accept ?? null, bid: mine.bid ?? null, choice: mine.choice ?? null, cardIndex: mine.cardIndex ?? null } : null,

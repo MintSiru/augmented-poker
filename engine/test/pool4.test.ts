@@ -354,3 +354,98 @@ describe('4차 족보 변형형', () => {
     expect(s.result!.entries.find((e) => e.id === 'p2')!.applied).toContain('shadow');
   });
 });
+
+// ───────────────────────── 카드 조작형 ─────────────────────────
+
+describe('4차 카드 조작형', () => {
+  const HANDS = { p1: cards('9c 8d'), p2: cards('Qc Jh'), p3: cards('3c 5c') };
+
+  it('교환 진열대: 덱에서 2장 공개, 1장과 홀카드를 바꾸거나 거절 (가져간 카드는 공개된 카드)', () => {
+    const s = setup(3, { augs: { p1: ['showcase'] }, deal: { board: cards(BOARD), hands: HANDS, deck: cards('Ah Kh') } });
+    use(s, 'p1', 'showcase');
+    resolveAll(s);
+    expect(view(s, 'p3').offerCards).toEqual(['Ah', 'Kh']);
+    expect(view(s, 'p1').respond).toMatchObject({ input: 'pickSwap', offered: ['Ah', 'Kh'] });
+    respond(s, 'p1', { choice: 0, cardIndex: 1 });
+    expect(P(s, 'p1').hole).toEqual(['9c', 'Ah']);
+    expect(view(s, 'p2').players.find((p) => p.id === 'p1')!.exposed).toEqual(['Ah']);
+    expect(JSON.stringify(view(s, 'p2'))).not.toMatch(/\[8d\]|"8d"/);
+    expect(s.offerCards).toEqual([]);
+    // 거절해도 횟수는 소모 (시간 초과 = 거절)
+    const t = setup(3, { augs: { p1: ['showcase'] }, deal: { hands: HANDS } });
+    use(t, 'p1', 'showcase');
+    resolveAll(t);
+    applyTimeouts(t);
+    expect(P(t, 'p1').hole).toEqual(['9c', '8d']);
+    expect(P(t, 'p1').augments[0].usesLeft).toBe(0);
+  });
+
+  it('봉인 봉투: 예비 카드를 나만 보고 보관, 플랍 라운드 동안 교체 (안 하면 버림)', () => {
+    const s = setup(3, { augs: { p1: ['envelope'] }, deal: { board: cards(BOARD), hands: HANDS, deck: cards('Ah') } });
+    use(s, 'p1', 'envelope');
+    resolveAll(s);
+    expect(view(s, 'p1').you.extra.envelope).toBe('Ah');
+    expect(JSON.stringify(view(s, 'p2'))).not.toMatch(/\[Ah\]|"Ah"/);
+    expect(applyAction(s, 'p1', { type: 'envelope', cardIndex: 0 }).ok).toBe(false); // 플랍 전
+    passUntil(s, () => s.street === 'flop');
+    act(s, 'p1', { type: 'envelope', cardIndex: 1 });
+    expect(P(s, 'p1').hole).toEqual(['9c', 'Ah']);
+    expect(P(s, 'p1').envelope).toBeNull();
+  });
+
+  it('선불 교환: 홀카드 1장을 공개·버리고 1장으로 프리플랍, 플랍 직전에 새 카드', () => {
+    const s = setup(3, { augs: { p1: ['prepay'] }, deal: { board: cards(BOARD), hands: HANDS, deck: cards('Ah') } });
+    use(s, 'p1', 'prepay', { cardIndex: 1 });
+    resolveAll(s);
+    expect(P(s, 'p1').hole).toEqual(['9c']);
+    expect(view(s, 'p2').log.some((e) => e.text.includes('[8d]'))).toBe(true);
+    passUntil(s, () => s.street === 'flop');
+    expect(P(s, 'p1').hole).toEqual(['9c', 'Ah']);
+  });
+
+  it('냉동 보관: 플랍·턴에 홀카드 1장을 보관하고 새 카드, 이후 핸드 프리플랍에 꺼낸다 (보관 중에는 덱에서 제외)', () => {
+    const s = setup(3, { augs: { p1: ['coldStorage'] }, deal: { board: cards(BOARD), hands: HANDS } });
+    passUntil(s, () => s.street === 'flop');
+    use(s, 'p1', 'coldStorage', { cardIndex: 0 });
+    resolveAll(s);
+    expect(P(s, 'p1').frozen).toBe('9c');
+    expect(P(s, 'p1').hole[0]).not.toBe('9c');
+    toShowdown(s);
+    ok(startNextHand(s));
+    const all = [...s.board, ...s.burns, ...s.deck, ...s.players.flatMap((p) => p.hole)];
+    expect(all).not.toContain('9c');
+    expect(view(s, 'p1').you.extra.frozen).toBe('9c');
+    const first = s.players[s.toAct!].id;
+    act(s, 'p1', { type: 'coldStorage', cardIndex: 1 });
+    expect(P(s, 'p1').hole[1]).toBe('9c');
+    expect(P(s, 'p1').frozen).toBeNull();
+    void first;
+  });
+
+  it('재활용: 플랍 후 번 카드를 확인하고 1장을 홀카드와 바꾼다 (버린 카드는 덱으로 안 돌아감)', () => {
+    const s = setup(3, { augs: { p2: ['recycle'] }, deal: { board: cards(BOARD), burns: cards('Ah Th Jd'), hands: HANDS } });
+    passUntil(s, () => s.street === 'flop');
+    use(s, 'p2', 'recycle');
+    resolveAll(s);
+    expect(view(s, 'p2').respond!.offered).toEqual(['Ah']);
+    expect(view(s, 'p1').respond!.offered).toBeNull();
+    respond(s, 'p2', { choice: 0, cardIndex: 1 });
+    expect(P(s, 'p2').hole).toEqual(['Qc', 'Ah']);
+    expect(s.used.some((u) => u.card === 'Ah')).toBe(false);
+    expect(s.used.some((u) => u.card === 'Jh' && u.kind === 'discard')).toBe(true);
+  });
+
+  it('소매치기: 쇼다운 직전 폴드한 사람과 홀카드를 통째로 바꾼다', () => {
+    const s = setup(3, { augs: { p1: ['pickpocket'] }, deal: { board: cards(BOARD), hands: HANDS } });
+    act(s, 'p1', { type: 'call' });
+    act(s, 'p2', { type: 'fold' });
+    toWindow(s, 'preShowdown');
+    expect(view(s, 'p1').you.declare!.targets.pickpocket).toEqual(['p2']);
+    act(s, 'p1', { type: 'declare', augment: 'pickpocket', targetId: 'p2' });
+    resolveAll(s);
+    expect(P(s, 'p1').hole).toEqual(['Qc', 'Jh']);
+    expect(P(s, 'p2').hole).toEqual(['9c', '8d']);
+    toShowdown(s);
+    expect(s.result!.entries.find((e) => e.id === 'p1')!.cards).toEqual(['Qc', 'Jh']);
+  });
+});

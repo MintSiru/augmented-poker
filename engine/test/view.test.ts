@@ -67,7 +67,8 @@ function perturb(s: GameState, viewerId: string, rng: Rng): GameState {
   void glass;
   for (const q of c.players) {
     const visible = q.inHand && (q.shown || glassShows(c, q) || (q === viewer && ownVisible(c, q)));
-    if (!visible) addArr(q.hole);
+    // 공개된 홀카드(미끼 공개 등)는 그대로 두고 나머지만 바꾼다
+    if (!visible) q.hole.forEach((c, i) => !q.exposed.includes(c) && slots.push({ get: () => q.hole[i], set: (x) => (q.hole[i] = x) }));
     if (q !== viewer) addArr(q.discarded);
     if (q !== viewer) {
       const qq = q;
@@ -75,6 +76,8 @@ function perturb(s: GameState, viewerId: string, rng: Rng): GameState {
       if (qq.lockerReady) slots.push({ get: () => qq.lockerReady!, set: (x) => (qq.lockerReady = x) });
       if (qq.destinyCard) slots.push({ get: () => qq.destinyCard!, set: (x) => (qq.destinyCard = x) });
       if (qq.eitherOr) addArr(qq.eitherOr.cards);
+      if (qq.envelope) slots.push({ get: () => qq.envelope!, set: (x) => (qq.envelope = x) });
+      if (qq.frozen) slots.push({ get: () => qq.frozen!, set: (x) => (qq.frozen = x) });
     }
   }
   addArr(c.deck);
@@ -162,6 +165,7 @@ function allowedCards(s: GameState, viewerId: string): Set<Card> {
     if (p.inHand && (p.shown || glassShows(s, p))) p.hole.forEach((c) => ok.add(c));
     p.shepherdShown.forEach((c) => ok.add(c));
     if (p.alchemy) [p.alchemy.from, p.alchemy.to].forEach((c) => ok.add(c));
+    if (p.inHand) p.exposed.forEach((c) => ok.add(c));
   }
   for (const n of me.notes) if (n.hand === s.handNumber) n.cards?.forEach((c) => ok.add(c));
   if (me.augments.some((a) => a.id === 'counting')) s.used.forEach((u) => ok.add(u.card));
@@ -176,6 +180,8 @@ function allowedCards(s: GameState, viewerId: string): Set<Card> {
     });
   }
   if (s.nextHand.freezeCard) ok.add(s.nextHand.freezeCard);
+  s.offerCards.forEach((c) => ok.add(c));
+  for (const c of [me.envelope, me.frozen]) if (c) ok.add(c);
   // 카드 경매로 공개된 카드 (실명 다트 대상 제외)
   if (s.auctionCard && !(s.effects.blindDarted.includes(viewerId) && !s.effects.fogLifted)) ok.add(s.auctionCard);
   s.result?.entries.forEach((e) => e.cards.forEach((c) => ok.add(c)));

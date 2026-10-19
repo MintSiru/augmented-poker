@@ -180,6 +180,10 @@ function newPlayer(np: NewPlayer, seat: number, chips: number): PlayerState {
     colorBlindOn: false,
     shadow: null,
     omaha: false,
+    exposed: [],
+    envelope: null,
+    prepay: false,
+    frozen: null,
   };
 }
 
@@ -285,6 +289,7 @@ export function createGame(players: NewPlayer[], opts: CreateGameOptions = {}): 
     teamsNext: null,
     records: {},
     flopCategory: {},
+    offerCards: [],
     used: [],
     effects: freshEffects(),
     blackoutNext: false,
@@ -744,6 +749,43 @@ function rechargeDefault(p: PlayerState): AugmentId {
   return list.sort((x, y) => y.lost - x.lost)[0].id;
 }
 
+/** 봉인 봉투: 플랍 공개 뒤(플랍 라운드 동안) 보관 카드와 홀카드를 바꾸거나 버린다 */
+function applyEnvelope(state: GameState, p: PlayerState, cardIndex: number | undefined): string | null {
+  if (!p.envelope) return '보관 중인 예비 카드가 없습니다.';
+  if (state.street !== 'flop' || !live(p)) return '플랍이 공개된 뒤 플랍 라운드 동안만 쓸 수 있습니다.';
+  const card = p.envelope;
+  p.envelope = null;
+  if (cardIndex === undefined) {
+    state.used.push({ card, kind: 'discard' });
+    addLog(state, '봉인 봉투: 예비 카드를 버렸습니다', { to: [p.id] });
+    return null;
+  }
+  if (!Number.isInteger(cardIndex) || cardIndex < 0 || cardIndex >= p.hole.length) {
+    p.envelope = card;
+    return '바꿀 홀카드를 고르세요.';
+  }
+  const old = p.hole[cardIndex];
+  p.hole[cardIndex] = card;
+  p.discarded.push(old);
+  state.used.push({ card: old, kind: 'discard' });
+  note(state, p, 'info', `봉인 봉투: ${cardToken(old)} → ${cardToken(card)}`, [old, card]);
+  return null;
+}
+
+/** 냉동 보관: 프리플랍 첫 행동 전에 보관한 카드를 꺼내 홀카드 1장과 바꾼다 (꺼낸 뒤 버린 카드는 버림) */
+function applyColdStorage(state: GameState, p: PlayerState, cardIndex: number): string | null {
+  if (!p.frozen) return '보관한 카드가 없습니다.';
+  if (basePhase(state) !== 'betting' || state.street !== 'preflop' || !live(p) || p.actedPreflop) return '프리플랍 내 첫 행동 전에만 꺼낼 수 있습니다.';
+  if (!Number.isInteger(cardIndex) || cardIndex < 0 || cardIndex >= p.hole.length) return '바꿀 홀카드를 고르세요.';
+  const old = p.hole[cardIndex];
+  p.hole[cardIndex] = p.frozen;
+  note(state, p, 'info', `냉동 보관: ${cardToken(old)} → ${cardToken(p.frozen)} (꺼냄)`, [old, p.frozen]);
+  p.frozen = null;
+  p.discarded.push(old);
+  state.used.push({ card: old, kind: 'discard' });
+  return null;
+}
+
 /** 잠복: 숨길 증강을 고른다 (다음 핸드가 시작되기 전까지 바꿀 수 있음, 보유 수는 그대로) */
 function applyLurk(state: GameState, p: PlayerState, id: AugmentId): string | null {
   if (!p.lurkChoose) return '지금은 숨길 증강을 고를 수 없습니다.';
@@ -797,6 +839,9 @@ function resetHandState(state: GameState): void {
     p.colorBlindOn = false;
     p.shadow = null;
     p.omaha = false;
+    p.exposed = [];
+    p.envelope = null;
+    p.prepay = false;
     for (const a of p.augments) a.usedThisHand = false;
   }
   state.board = [];
@@ -813,6 +858,7 @@ function resetHandState(state: GameState): void {
   state.nameItWinner = null;
   state.teams = [];
   state.flopCategory = {};
+  state.offerCards = [];
   state.burns = [];
   state.boardRevealed = 0;
   state.deck = [];
@@ -859,6 +905,8 @@ function dealCards(state: GameState): void {
     }
     p.keptCard = null;
     p.lockerReady = null;
+    // 냉동 보관한 카드는 이후 모든 핸드의 덱에서 뺀다
+    if (p.frozen) reserved.add(p.frozen);
     if (p.lockerStored) {
       reserved.add(p.lockerStored);
       if (active(p)) {
@@ -1205,6 +1253,15 @@ function closeRound(state: GameState): void {
   switch (state.street) {
     case 'preflop':
       state.street = 'flop';
+      // 선불 교환: 살아남았으면 플랍 직전에 새 카드 1장
+      for (const p of state.players) {
+        if (!p.prepay) continue;
+        p.prepay = false;
+        if (!live(p) || !state.deck.length) continue;
+        const c = state.deck.shift()!;
+        p.hole.push(c);
+        note(state, p, 'info', `선불 교환: 새 카드 ${cardToken(c)}을(를) 받았습니다`, [c]);
+      }
       burnCard(state, 0);
       // 보관함: 바꾸지 않은 보관 카드는 사라진다
       for (const p of state.players) {
@@ -1219,6 +1276,13 @@ function closeRound(state: GameState): void {
       if (startDeclareWindow(state, 'flop')) return;
       break;
     case 'flop':
+      // 봉인 봉투: 플랍 라운드가 끝날 때까지 바꾸지 않았으면 버린다
+      for (const p of state.players) {
+        if (!p.envelope) continue;
+        state.used.push({ card: p.envelope, kind: 'discard' });
+        addLog(state, '봉인 봉투: 예비 카드를 버렸습니다', { to: [p.id] });
+        p.envelope = null;
+      }
       applyTurnRiver(state);
       applyEitherOr(state);
       state.street = 'turn';
@@ -2719,6 +2783,12 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       break;
     case 'recharge':
       err = action.augment === undefined || isAugmentId(action.augment) ? applyRecharge(state, p, action.augment) : '알 수 없는 증강입니다.';
+      break;
+    case 'envelope':
+      err = applyEnvelope(state, p, action.cardIndex);
+      break;
+    case 'coldStorage':
+      err = applyColdStorage(state, p, action.cardIndex);
       break;
     case 'lurk':
       err = isAugmentId(action.augment) ? applyLurk(state, p, action.augment) : '알 수 없는 증강입니다.';

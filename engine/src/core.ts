@@ -331,7 +331,12 @@ export function glassShows(state: GameState, owner: PlayerState): boolean {
 /** 보는 사람에게 보이는 공개 카드 (쇼다운·유리 테이블로 공개된 다른 사람 카드) */
 export function publicCards(state: GameState): Card[] {
   const out: Card[] = [];
-  for (const p of state.players) if (p.inHand && (p.shown || glassShows(state, p))) out.push(...p.hole);
+  for (const p of state.players) {
+    if (!p.inHand) continue;
+    if (p.shown || glassShows(state, p)) out.push(...p.hole);
+    // 미끼 공개·반쪽짜리 비밀 등으로 공개된 홀카드
+    else for (const c of p.exposed) if (p.hole.includes(c)) out.push(c);
+  }
   return out;
 }
 

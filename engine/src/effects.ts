@@ -454,6 +454,26 @@ function publicSeen(state: GameState, viewer: PlayerState): Card[] {
   ];
 }
 
+/** 프리플랍, 내 첫 행동 전 (교환 진열대·봉인 봉투·선불 교환·미끼 공개) */
+function preflopBeforeAct(ctx: Ctx): string | null {
+  const { state, owner } = ctx;
+  if (basePhase(state) !== 'betting' || state.street !== 'preflop') return '프리플랍에만 쓸 수 있습니다.';
+  if (!live(owner) || owner.actedPreflop) return '프리플랍 내 첫 행동 전에만 쓸 수 있습니다.';
+  return null;
+}
+
+/** 이번 핸드에 쓰인 번 카드 (재활용) */
+function usedBurns(state: GameState): Card[] {
+  return state.used.filter((u) => u.kind === 'burn').map((u) => u.card);
+}
+
+/** 후보 카드와 홀카드 바꾸기 응답 검증 (choice -1 = 바꾸지 않음) */
+function swapPickError(p: PlayerState, a: RespondAnswer, n: number): string | null {
+  if (a.choice === -1) return null;
+  if (!isInt(a.choice) || a.choice < 0 || a.choice >= n) return '후보 카드를 고르세요.';
+  return validHoleIndex(p, a.cardIndex) ? null : '바꿀 홀카드를 고르세요.';
+}
+
 // ───────────────────────── 제안·응답 공통 ─────────────────────────
 
 function bbOf(state: GameState): number {
@@ -2010,6 +2030,163 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
       const { state, owner } = ctx;
       const flop = state.board.slice(0, flopCount(state)).map(rankOf);
       note(state, owner, 'info', `초점: 이번 플랍의 가장 높은 숫자 ${rankName(Math.max(...flop))}, 가장 낮은 숫자 ${rankName(Math.min(...flop))}`);
+    },
+  },
+
+  // ═════════════════════════ 4차 풀: 카드 조작형 ═════════════════════════
+
+  showcase: {
+    check(ctx) {
+      return preflopBeforeAct(ctx) ?? (ctx.state.deck.length < 2 ? '덱에 남은 카드가 부족합니다.' : respondBusy(ctx.state));
+    },
+    resolve(ctx) {
+      const { state, owner } = ctx;
+      const cards = state.deck.splice(0, 2);
+      state.offerCards = cards;
+      addLog(state, `교환 진열대: ${cardsText(cards)} — ${owner.name}이(가) 홀카드 1장과 바꿀지 고릅니다`);
+      ctx.ops.startRespond({ kind: 'collect', augment: 'showcase', ownerId: owner.id, participants: [owner.id], params: {} });
+    },
+    respond: {
+      error: (ctx, _r, p, a) => swapPickError(p, a, ctx.state.offerCards.length),
+      fallback: () => ({ choice: -1 }),
+      done(ctx, r) {
+        const { state, owner } = ctx;
+        const cards = state.offerCards;
+        state.offerCards = [];
+        const a = r.answers[owner.id];
+        const pick = a?.choice ?? -1;
+        if (pick < 0 || !live(owner)) {
+          for (const c of cards) state.used.push({ card: c, kind: 'shown' });
+          addLog(state, `교환 진열대: ${owner.name}이(가) 바꾸지 않았습니다`);
+          return false;
+        }
+        const ci = a!.cardIndex!;
+        const old = owner.hole[ci];
+        owner.hole[ci] = cards[pick];
+        owner.discarded.push(old);
+        state.used.push({ card: old, kind: 'discard' });
+        state.used.push({ card: cards[1 - pick], kind: 'shown' });
+        // 가져간 카드는 모두가 본 카드 (이미 공개된 카드로 취급)
+        owner.exposed.push(cards[pick]);
+        addLog(state, `교환 진열대: ${owner.name}이(가) ${cardToken(cards[pick])}을(를) 가져가고 홀카드 1장을 버렸습니다`);
+        note(state, owner, 'info', `교환 진열대: ${cardToken(old)} → ${cardToken(cards[pick])}`, [old, cards[pick]]);
+        return false;
+      },
+    },
+  },
+
+  envelope: {
+    check(ctx) {
+      return preflopBeforeAct(ctx) ?? (ctx.state.deck.length ? null : '덱에 남은 카드가 없습니다.');
+    },
+    resolve(ctx) {
+      const { state, owner } = ctx;
+      owner.envelope = state.deck.shift()!;
+      note(state, owner, 'info', `봉인 봉투: 예비 카드 ${cardToken(owner.envelope)} — 플랍 라운드 동안 홀카드 1장과 바꾸거나 버립니다`, [owner.envelope]);
+    },
+  },
+
+  prepay: {
+    check(ctx, params) {
+      const err = preflopBeforeAct(ctx);
+      if (err) return err;
+      if (ctx.owner.prepay) return '이미 선불 교환 중입니다.';
+      if (ctx.owner.hole.length < 2) return '홀카드가 2장 이상일 때만 쓸 수 있습니다.';
+      return validHoleIndex(ctx.owner, params.cardIndex) ? null : '버릴 홀카드를 고르세요.';
+    },
+    detail: (ctx, p) => (typeof p.cardIndex === 'number' && ctx.owner.hole[p.cardIndex] ? `— ${cardToken(ctx.owner.hole[p.cardIndex])} 공개 후 버림` : ''),
+    resolve(ctx, params) {
+      const { state, owner } = ctx;
+      const [c] = owner.hole.splice(params.cardIndex!, 1);
+      owner.discarded.push(c);
+      state.used.push({ card: c, kind: 'shown' });
+      owner.prepay = true;
+      addLog(state, `선불 교환: ${owner.name}이(가) ${cardToken(c)}을(를) 버리고 홀카드 1장으로 프리플랍을 진행합니다 (플랍 직전에 1장 받음)`);
+    },
+  },
+
+  coldStorage: {
+    check(ctx, params) {
+      const { state, owner } = ctx;
+      if (basePhase(state) !== 'betting' || (state.street !== 'flop' && state.street !== 'turn')) return '플랍·턴 베팅 라운드에서만 쓸 수 있습니다.';
+      if (owner.frozen) return '이미 보관한 카드가 있습니다.';
+      if (!state.deck.length) return '덱에 남은 카드가 없습니다.';
+      return needLive(ctx) ?? (validHoleIndex(owner, params.cardIndex) ? null : '보관할 홀카드를 고르세요.');
+    },
+    resolve(ctx, params) {
+      const { state, owner } = ctx;
+      const ci = params.cardIndex!;
+      const old = owner.hole[ci];
+      const fresh = state.deck.shift()!;
+      owner.hole[ci] = fresh;
+      owner.frozen = old;
+      addLog(state, `냉동 보관: ${owner.name}이(가) 홀카드 1장을 보관하고 새 카드를 받았습니다`);
+      note(state, owner, 'info', `냉동 보관: ${cardToken(old)} 보관, 새 카드 ${cardToken(fresh)} — 이후 원하는 핸드의 프리플랍 첫 행동 전에 꺼낼 수 있습니다`, [old, fresh]);
+    },
+  },
+
+  recycle: {
+    check(ctx) {
+      const { state } = ctx;
+      if (basePhase(state) !== 'betting' || state.street === 'preflop') return '플랍 이후 베팅 라운드에서만 쓸 수 있습니다.';
+      if (!usedBurns(state).length) return '확인할 번 카드가 없습니다.';
+      return needLive(ctx) ?? respondBusy(state);
+    },
+    resolve(ctx) {
+      const { state, owner } = ctx;
+      const burns = usedBurns(state);
+      note(state, owner, 'info', `재활용: 이번 핸드의 번 카드 ${cardsText(burns)}`, burns);
+      ctx.ops.startRespond({ kind: 'collect', augment: 'recycle', ownerId: owner.id, participants: [owner.id], params: {} });
+    },
+    respond: {
+      error: (ctx, _r, p, a) => swapPickError(p, a, usedBurns(ctx.state).length),
+      fallback: () => ({ choice: -1 }),
+      done(ctx, r) {
+        const { state, owner } = ctx;
+        const a = r.answers[owner.id];
+        const burns = usedBurns(state);
+        if (!a || (a.choice ?? -1) < 0 || !live(owner) || !burns[a.choice!]) {
+          addLog(state, '재활용: 바꾸지 않았습니다', { to: [owner.id] });
+          return false;
+        }
+        const take = burns[a.choice!];
+        const ci = a.cardIndex!;
+        const old = owner.hole[ci];
+        owner.hole[ci] = take;
+        // 번 카드는 내 손으로, 버린 카드는 덱으로 돌아가지 않는다
+        state.used = state.used.filter((u) => !(u.kind === 'burn' && u.card === take));
+        owner.discarded.push(old);
+        state.used.push({ card: old, kind: 'discard' });
+        addLog(state, `재활용: ${owner.name}이(가) 번 카드 1장을 홀카드와 바꿨습니다`);
+        note(state, owner, 'info', `재활용: ${cardToken(old)} → ${cardToken(take)}`, [old, take]);
+        return false;
+      },
+    },
+  },
+
+  pickpocket: {
+    check(ctx, params) {
+      const { state, owner } = ctx;
+      if (basePhase(state) !== 'declare' || state.windowStage !== 'preShowdown') return '쇼다운 직전 선언 기회에만 쓸 수 있습니다.';
+      if (!live(owner)) return '핸드에 참여 중일 때만 쓸 수 있습니다.';
+      const t = targetOf(ctx, params);
+      if (!t || !t.inHand || !t.folded || !t.hole.length || t.kicked) return '이번 핸드에 폴드한 플레이어를 고르세요.';
+      return null;
+    },
+    detail: (ctx, p) => `— 대상: ${nameOf(ctx.state, p.targetId ?? '')}`,
+    resolve(ctx, params) {
+      const { state, owner } = ctx;
+      const t = targetOf(ctx, params)!;
+      const mine = owner.hole;
+      const theirs = t.hole;
+      owner.hole = theirs;
+      t.hole = mine;
+      // 폴드한 카드 기록도 바뀐 카드로
+      state.used = state.used.filter((u) => !(u.kind === 'fold' && theirs.includes(u.card)));
+      for (const c of mine) state.used.push({ card: c, kind: 'fold' });
+      addLog(state, `소매치기: ${owner.name}이(가) 폴드한 ${t.name}과(와) 홀카드를 통째로 바꿨습니다`);
+      note(state, owner, 'info', `소매치기: ${cardsText(mine)} → ${cardsText(theirs)}`, [...mine, ...theirs], t.id);
+      note(state, t, 'info', `소매치기: ${owner.name}이(가) 내 홀카드를 가져가고 ${cardsText(mine)}을(를) 남겼습니다`, [...mine], owner.id);
     },
   },
 

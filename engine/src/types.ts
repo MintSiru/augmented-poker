@@ -19,6 +19,7 @@ export type Phase = 'augmentSelect' | 'betting' | 'discard' | 'declare' | 'react
 export interface RespondAnswer {
   accept?: boolean;
   bid?: number;
+  /** 강함/약함, 교환 진열대·재활용의 고른 후보 카드 번호 (-1 = 바꾸지 않음) 등 */
   choice?: number;
   cardIndex?: number;
 }
@@ -210,6 +211,14 @@ export interface PlayerState {
   /** 재충전: 되돌릴 증강을 고르는 중 / 이번 선택 라운드에서 이미 재충전했는가 */
   rechargePending: boolean;
   rechargeDone: boolean;
+  /** 이번 핸드에 공개된 내 홀카드 (미끼 공개·반쪽짜리 비밀·배짱 시험·교환 진열대 등, 이미 공개된 카드로 취급) */
+  exposed: Card[];
+  /** 봉인 봉투: 보관 중인 예비 카드 (나만 봄, 플랍 라운드 동안 교체 가능) */
+  envelope: Card | null;
+  /** 선불 교환: 플랍 직전에 새 카드 1장을 받는다 */
+  prepay: boolean;
+  /** 냉동 보관: 보관한 카드 (핸드가 바뀌어도 유지, 이후 덱에서 제외) */
+  frozen: Card | null;
   /** 색맹: 이번 핸드 색 플러시 */
   colorBlindOn: boolean;
   /** 그림자 분신: 이번 판정에서 무늬를 바꾼 홀카드 */
@@ -497,6 +506,8 @@ export interface GameState {
   teams: string[][];
   /** 운명 공동체: 다음 핸드에 적용할 팀 */
   teamsNext: string[][] | null;
+  /** 교환 진열대로 모두에게 공개된 후보 카드 */
+  offerCards: Card[];
   /** 복기 노트: 플랍이 공개된 시점에 각자 완성했던 족보 종류 (핸드마다) */
   flopCategory: Record<string, number>;
   /** 기록관: 플레이어별 공개 행동 기록 (참여 핸드 수, 프리플랍 참여 수, 쇼다운에서 드러난 블러프 수) */
@@ -577,6 +588,10 @@ export type GameAction =
   | { type: 'draw'; accept: boolean }
   /** 탈취: 반응 대기 중인 선언을 빼앗고 대상·카드를 다시 고른다 */
   | { type: 'steal'; targetId?: string; boardIndex?: number; cardIndex?: number; choice?: number }
+  /** 봉인 봉투: 보관 카드와 바꿀 홀카드 (생략하면 버림) */
+  | { type: 'envelope'; cardIndex?: number }
+  /** 냉동 보관: 보관한 카드를 꺼내 홀카드와 바꾼다 */
+  | { type: 'coldStorage'; cardIndex: number }
   /** 증강 리롤: 지금 선택지를 새로 뽑는다 */
   | { type: 'reroll' }
   /** 재충전: augment 없이 보내면 재충전 카드를 고른 상태(대상 고르기), augment 를 주면 그 증강을 처음 횟수로 */
