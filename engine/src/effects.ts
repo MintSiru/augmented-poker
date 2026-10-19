@@ -7,7 +7,7 @@
 import { Card, cardToken, fullDeck, isCard, rankOf, rankName, suitOf } from './cards.js';
 import { AUGMENTS, AugmentId, canHold, isActiveAugment, isAugmentId, rollOneAugment } from './augments.js';
 import { blackjackCards, isMadeHand, Category, CATEGORY_NAMES } from './evaluator.js';
-import { pickOne } from './rng.js';
+import { pickOne, shuffle } from './rng.js';
 import { compareContenders } from './showdown.js';
 import { headsUpEquity } from './equity.js';
 import { contenderFor, handEvalFor, standingOf } from './standing.js';
@@ -43,6 +43,7 @@ import {
   publicCards,
   putChips,
   rulesFor,
+  seatOrderFromDealer,
   taxError,
   visibleBoard,
 } from './core.js';
@@ -383,6 +384,37 @@ function turnRiverIdx(state: GameState): number[] {
 
 function realMade(state: GameState, p: PlayerState): boolean {
   return isMadeHand(p.hole, evalBoard(state), rulesFor(p));
+}
+
+// ───────────────────────── 4차 공개형 공통 ─────────────────────────
+
+/** 홀카드를 1장씩 내는 공개형의 참가자: 핸드에 남은 사람 중 면역으로 빠진 사람, 방탄조끼로 막은 사람 제외 */
+function cardJoiners(ctx: Ctx, decl: Declaration, vest: boolean): PlayerState[] {
+  return ctx.state.players.filter((p) => {
+    if (!live(p) || !p.hole.length || decl.immune.includes(p.id)) return false;
+    if (vest && p !== ctx.owner && blocksForcedFold(ctx, p)) return false;
+    return true;
+  });
+}
+
+/** 홀카드 1장 고르기 응답 (시간 초과면 무작위) */
+const pickHoleRespond = {
+  error: (_ctx: Ctx, _r: RespondState, p: PlayerState, a: RespondAnswer) => (validHoleIndex(p, a.cardIndex) ? null : '홀카드를 고르세요.'),
+  fallback: (ctx: Ctx, _r: RespondState, p: PlayerState): RespondAnswer => ({ cardIndex: ctx.state.rng.int(Math.max(1, p.hole.length)) }),
+};
+
+/** 카드가 다른 사람 손으로 옮겨 가면 공개 표시·이마 카드 표시를 정리한다 */
+function cardLeft(p: PlayerState, c: Card): void {
+  p.exposed = p.exposed.filter((x) => x !== c);
+  if (p.forehead === c) p.forehead = null;
+}
+
+/** 베팅 라운드가 시작되고 아무도 행동하기 전 */
+function roundFresh(ctx: Ctx): string | null {
+  const { state } = ctx;
+  if (basePhase(state) !== 'betting') return '베팅 라운드 중에만 쓸 수 있습니다.';
+  if (state.round.actions > 0) return '베팅 라운드가 시작되고 아무도 행동하기 전에만 선언할 수 있습니다.';
+  return needLive(ctx);
 }
 
 // ───────────────────────── 연승 (폭주기관차·연승 수당 공용 카운터) ─────────────────────────
@@ -2350,6 +2382,277 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
       if (c && !ctx.owner.exposed.includes(c)) ctx.owner.exposed.push(c);
       // 쇼다운 정산용 표시 (핸드가 시작되면 지워짐)
       ctx.aug.usedThisHand = true;
+    },
+  },
+
+  // ═════════════════════════ 4차 풀: 공개형 ═════════════════════════
+
+  indianPoker: {
+    check: (ctx) => betweenHandsCheck(ctx) ?? (ctx.state.indianNext ? '이미 다음 핸드가 인디언 포커입니다.' : null),
+    resolve(ctx, _params, decl) {
+      ctx.state.indianNext = true;
+      ctx.state.indianImmuneNext = [...decl.immune];
+      addLog(ctx.state, `인디언 포커: 다음 핸드는 각자 홀카드 1장을 이마에 붙이고 진행합니다 (본인만 못 봄)${immuneText(ctx.state, decl.immune, '두 장 모두 봄')}`);
+    },
+  },
+
+  dealerWhim: {
+    check: (ctx) => betweenHandsCheck(ctx) ?? (ctx.state.whimLeft > 0 ? '이미 딜러의 변덕이 예약되어 있습니다.' : null),
+    resolve(ctx) {
+      ctx.state.whimLeft = 3;
+      addLog(ctx.state, '딜러의 변덕: 다음 핸드부터 3핸드 동안 버튼·블라인드·베팅 순서가 반시계 방향으로 돕니다');
+    },
+  },
+
+  commonWell: {
+    check(ctx) {
+      const { state } = ctx;
+      if (basePhase(state) !== 'betting' || state.street === 'preflop') return '플랍 이후 베팅 라운드에서만 쓸 수 있습니다.';
+      return needLive(ctx) ?? respondBusy(state);
+    },
+    resolve(ctx, _params, decl) {
+      const ids = cardJoiners(ctx, decl, true).map((p) => p.id);
+      if (ids.length < 2) return addLog(ctx.state, `공동 우물: 카드를 낼 사람이 부족합니다${immuneText(ctx.state, decl.immune)}`);
+      addLog(ctx.state, `공동 우물: ${ids.map((id) => nameOf(ctx.state, id)).join(', ')}이(가) 홀카드 1장씩 비공개로 골라 냅니다${immuneText(ctx.state, decl.immune)}`);
+      ctx.ops.startRespond({ kind: 'collect', augment: 'commonWell', ownerId: ctx.owner.id, participants: ids, params: {} });
+    },
+    respond: {
+      ...pickHoleRespond,
+      done(ctx, r) {
+        const { state } = ctx;
+        const ps = r.participants.map((id) => playerById(state, id)!).filter((p) => live(p) && p.hole.length);
+        const given = ps.map((p) => p.hole[Math.min(r.answers[p.id]?.cardIndex ?? 0, p.hole.length - 1)]);
+        const mixed = shuffle([...given], state.rng);
+        ps.forEach((p, k) => {
+          const i = p.hole.indexOf(given[k]);
+          cardLeft(p, given[k]);
+          p.hole[i] = mixed[k];
+          note(state, p, 'info', `공동 우물: ${cardToken(given[k])}을(를) 내고 ${cardToken(mixed[k])}을(를) 받았습니다`, [mixed[k]]);
+        });
+        addLog(state, '공동 우물: 낸 카드를 섞어 무작위로 다시 나눴습니다');
+        return false;
+      },
+    },
+  },
+
+  catchThief: {
+    check(ctx, params) {
+      const err = roundFresh(ctx) ?? respondBusy(ctx.state);
+      if (err) return err;
+      return params.choice === 0 || params.choice === 1 ? null : '방향(왼쪽/오른쪽)을 고르세요.';
+    },
+    detail: (_ctx, p) => (p.choice === 1 ? '— 오른쪽으로' : '— 왼쪽으로'),
+    resolve(ctx, params, decl) {
+      const ids = cardJoiners(ctx, decl, true).map((p) => p.id);
+      if (ids.length < 2) return addLog(ctx.state, `도둑잡기: 카드를 넘길 사람이 부족합니다${immuneText(ctx.state, decl.immune)}`);
+      addLog(ctx.state, `도둑잡기: 각자 홀카드 1장을 골라 ${params.choice === 1 ? '오른쪽' : '왼쪽'} 사람에게 넘깁니다${immuneText(ctx.state, decl.immune)}`);
+      ctx.ops.startRespond({ kind: 'collect', augment: 'catchThief', ownerId: ctx.owner.id, participants: ids, params: { extra: { dir: params.choice } } });
+    },
+    respond: {
+      ...pickHoleRespond,
+      done(ctx, r) {
+        const { state } = ctx;
+        // 좌석 순서(시계 방향), 오른쪽이면 반대로 넘긴다
+        const ps = state.players.filter((p) => r.participants.includes(p.id) && live(p) && p.hole.length);
+        const n = ps.length;
+        if (n < 2) return false;
+        const step = r.params.extra?.dir === 1 ? -1 : 1;
+        const given = ps.map((p) => p.hole[Math.min(r.answers[p.id]?.cardIndex ?? 0, p.hole.length - 1)]);
+        const slots = ps.map((p, k) => p.hole.indexOf(given[k]));
+        ps.forEach((p, k) => cardLeft(p, given[k]));
+        ps.forEach((p, k) => {
+          const from = (((k - step) % n) + n) % n;
+          p.hole[slots[k]] = given[from];
+          note(state, p, 'info', `도둑잡기: ${cardToken(given[k])}을(를) ${ps[(k + step + n) % n].name}에게 주고 ${ps[from].name}에게서 ${cardToken(given[from])}을(를) 받았습니다`, [given[from]]);
+        });
+        addLog(state, '도둑잡기: 고른 카드를 동시에 옆 사람에게 넘겼습니다');
+        return false;
+      },
+    },
+  },
+
+  silentRiver: {
+    check(ctx) {
+      if (basePhase(ctx.state) !== 'declare' || ctx.state.windowStage !== 'turnEnd') return '턴 베팅이 끝난 뒤 선언 기회에만 쓸 수 있습니다.';
+      return ctx.state.effects.silentRiver ? '이미 선언되었습니다.' : null;
+    },
+    resolve(ctx) {
+      ctx.state.effects.silentRiver = true;
+      addLog(ctx.state, '침묵의 리버: 리버를 공개한 뒤 리버 베팅 없이 바로 쇼다운으로 갑니다');
+    },
+  },
+
+  truce: {
+    check(ctx) {
+      const { state, owner } = ctx;
+      if (basePhase(state) !== 'betting' || (state.street !== 'flop' && state.street !== 'turn')) return '플랍·턴 베팅 라운드에서만 쓸 수 있습니다.';
+      if (state.toAct !== idxOf(state, owner.id)) return '내 차례에만 선언할 수 있습니다.';
+      if (state.currentBet > 0) return '이번 라운드에 베팅이 없을 때(체크할 수 있을 때)만 쓸 수 있습니다.';
+      return needLive(ctx);
+    },
+    resolve(ctx) {
+      const { state } = ctx;
+      for (const p of state.players) {
+        if (!canAct(p)) continue;
+        p.acted = true;
+        p.actedLevel = state.currentBet;
+        p.lastAction = '체크';
+      }
+      addLog(state, '휴전: 이번 라운드는 모두 체크한 것으로 처리합니다');
+    },
+  },
+
+  sharedCard: {
+    check(ctx) {
+      const { state } = ctx;
+      if (basePhase(state) !== 'betting' || state.street !== 'preflop') return '프리플랍(플랍이 깔리기 전)에만 쓸 수 있습니다.';
+      if (state.effects.shared.length) return '이번 핸드에는 이미 공용 카드가 있습니다.';
+      return needLive(ctx) ?? respondBusy(state);
+    },
+    resolve(ctx, _params, decl) {
+      const ids = cardJoiners(ctx, decl, false).filter((p) => p.hole.length >= 2).map((p) => p.id);
+      if (!ids.length) return addLog(ctx.state, `공용 카드: 카드를 낼 사람이 없습니다${immuneText(ctx.state, decl.immune)}`);
+      addLog(ctx.state, `공용 카드: 각자 홀카드 1장을 비공개로 골라 공용 카드로 냅니다${immuneText(ctx.state, decl.immune, '카드를 내지 않음')}`);
+      ctx.ops.startRespond({ kind: 'collect', augment: 'sharedCard', ownerId: ctx.owner.id, participants: ids, params: {} });
+    },
+    respond: {
+      ...pickHoleRespond,
+      done(ctx, r) {
+        const { state } = ctx;
+        const shown: string[] = [];
+        for (const id of r.participants) {
+          const p = playerById(state, id)!;
+          if (!live(p) || p.hole.length < 2) continue;
+          const i = Math.min(r.answers[id]?.cardIndex ?? 0, p.hole.length - 1);
+          const c = p.hole[i];
+          cardLeft(p, c);
+          p.hole.splice(i, 1);
+          state.effects.shared.push(c);
+          state.used.push({ card: c, kind: 'shown' });
+          shown.push(`${p.name} ${cardToken(c)}`);
+        }
+        addLog(state, `공용 카드: ${shown.join(', ')} — 모두가 보드처럼 씁니다`);
+        return false;
+      },
+    },
+  },
+
+  halfSecret: {
+    check(ctx) {
+      const { state } = ctx;
+      if (basePhase(state) !== 'betting' || state.street !== 'preflop' || state.round.actions > 0) return '프리플랍 베팅 전(아무도 행동하기 전)에만 쓸 수 있습니다.';
+      return needLive(ctx) ?? respondBusy(state);
+    },
+    resolve(ctx, _params, decl) {
+      const ids = cardJoiners(ctx, decl, false).filter((p) => p.hole.some((c) => !p.exposed.includes(c))).map((p) => p.id);
+      if (!ids.length) return addLog(ctx.state, '반쪽짜리 비밀: 공개할 사람이 없습니다');
+      addLog(ctx.state, `반쪽짜리 비밀: 각자 홀카드 1장을 비공개로 골라 동시에 공개합니다${immuneText(ctx.state, decl.immune, '공개하지 않음')}`);
+      ctx.ops.startRespond({ kind: 'collect', augment: 'halfSecret', ownerId: ctx.owner.id, participants: ids, params: {} });
+    },
+    respond: {
+      ...pickHoleRespond,
+      done(ctx, r) {
+        const { state } = ctx;
+        const shown: string[] = [];
+        for (const id of r.participants) {
+          const p = playerById(state, id)!;
+          if (!p.inHand || !p.hole.length) continue;
+          const c = p.hole[Math.min(r.answers[id]?.cardIndex ?? 0, p.hole.length - 1)];
+          if (!p.exposed.includes(c)) p.exposed.push(c);
+          shown.push(`${p.name} ${cardToken(c)}`);
+        }
+        addLog(state, `반쪽짜리 비밀: ${shown.join(', ')}`);
+        return false;
+      },
+    },
+  },
+
+  oneMore: {
+    check(ctx) {
+      const err = roundFresh(ctx);
+      if (err) return err;
+      return ctx.state.round.raiseCap !== null ? '이번 라운드에는 이미 레이즈 제한이 걸려 있습니다.' : null;
+    },
+    resolve(ctx) {
+      ctx.state.round.raiseCap = 1;
+      ctx.state.round.oneMore = true;
+      addLog(ctx.state, '한 번만 더: 이번 라운드는 첫 베팅 이후 레이즈를 한 번만 허용합니다');
+    },
+  },
+
+  switcheroo: {
+    check(ctx, params) {
+      const { state } = ctx;
+      if (basePhase(state) !== 'betting' || state.street !== 'preflop') return '프리플랍 베팅 중에만 쓸 수 있습니다.';
+      const err = opponentInHand(ctx, params);
+      if (err) return err;
+      return targetable(targetOf(ctx, params)!);
+    },
+    detail: (ctx, p) => `— 대상: ${nameOf(ctx.state, p.targetId ?? '')}`,
+    resolve(ctx, params, decl) {
+      const { state, owner } = ctx;
+      const t = targetOf(ctx, params)!;
+      if (decl.immune.includes(t.id)) return addLog(state, `바꿔치기: ${t.name}의 면역으로 효과가 사라졌습니다`);
+      if (t.ironWall) return addLog(state, `바꿔치기: ${t.name}의 철벽에 막혔습니다`);
+      if (!live(t) || !live(owner)) return;
+      if (blocksForcedFold(ctx, t)) return;
+      const mine = owner.hole;
+      owner.hole = t.hole;
+      t.hole = mine;
+      // 공개된 카드는 카드를 따라 공개 상태 유지, 이마 카드는 풀린다
+      [owner.exposed, t.exposed] = [t.exposed, owner.exposed];
+      owner.forehead = null;
+      t.forehead = null;
+      addLog(state, `바꿔치기: ${owner.name}와(과) ${t.name}이(가) 홀카드를 통째로 바꿨습니다`);
+      note(state, owner, 'info', `바꿔치기: 새 홀카드 ${cardsText(owner.hole)}`, [...owner.hole]);
+      note(state, t, 'info', `바꿔치기: 새 홀카드 ${cardsText(t.hole)}`, [...t.hole]);
+    },
+  },
+
+  timeBomb: {
+    check(ctx) {
+      if (basePhase(ctx.state) !== 'declare' || ctx.state.windowStage !== 'flop') return '플랍 공개 직후 선언 기회에만 쓸 수 있습니다.';
+      return ctx.state.effects.timeBomb ? '이미 선언되었습니다.' : null;
+    },
+    resolve(ctx, _params, decl) {
+      ctx.state.effects.timeBomb = true;
+      ctx.state.effects.timeBombImmune = [...decl.immune];
+      addLog(ctx.state, `시한폭탄: 이번 핸드는 체크하면 즉시 폴드됩니다 (베팅하거나 폴드)${immuneText(ctx.state, decl.immune, '체크 가능')}`);
+    },
+  },
+
+  lastChoice: {
+    check(ctx) {
+      if (basePhase(ctx.state) !== 'declare' || ctx.state.windowStage !== 'turnEnd') return '턴 베팅이 끝난 뒤 선언 기회에만 쓸 수 있습니다.';
+      if (!ctx.state.deck.length) return '덱에 남은 카드가 없습니다.';
+      return respondBusy(ctx.state);
+    },
+    resolve(ctx) {
+      const ids = ctx.state.players.filter((p) => live(p) && p.hole.length).map((p) => p.id);
+      addLog(ctx.state, '마지막 선택: 각자 홀카드를 그대로 둘지 1장 바꿀지 비공개로 고릅니다');
+      ctx.ops.startRespond({ kind: 'collect', augment: 'lastChoice', ownerId: ctx.owner.id, participants: ids, params: {} });
+    },
+    respond: {
+      error: (_ctx, _r, p, a) => (a.choice === -1 || validHoleIndex(p, a.cardIndex) ? null : '바꿀 카드를 고르거나 유지를 고르세요.'),
+      fallback: () => ({ choice: -1 }),
+      done(ctx, r) {
+        const { state } = ctx;
+        const swap = r.participants.map((id) => playerById(state, id)!).filter((p) => r.answers[p.id]?.choice !== -1 && validHoleIndex(p, r.answers[p.id]?.cardIndex));
+        const keep = r.participants.filter((id) => !swap.some((p) => p.id === id)).map((id) => nameOf(state, id));
+        addLog(state, `마지막 선택: 바꿈 — ${swap.map((p) => p.name).join(', ') || '없음'} / 유지 — ${keep.join(', ') || '없음'}`);
+        // 바꾸는 사람은 딜러 왼쪽부터 차례로 새 카드를 받는다
+        const order = seatOrderFromDealer(state).map((i) => state.players[i]).filter((p) => swap.includes(p));
+        for (const p of order) {
+          if (!state.deck.length) break;
+          const i = r.answers[p.id]!.cardIndex!;
+          const old = p.hole[i];
+          cardLeft(p, old);
+          state.used.push({ card: old, kind: 'discard' });
+          p.hole[i] = state.deck.shift()!;
+          note(state, p, 'info', `마지막 선택: ${cardToken(old)}을(를) 버리고 ${cardToken(p.hole[i])}을(를) 받았습니다`, [p.hole[i]]);
+        }
+        return false;
+      },
     },
   },
 

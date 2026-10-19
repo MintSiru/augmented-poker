@@ -64,8 +64,10 @@ export function playerById(state: GameState, id: string | undefined | null): Pla
 /** from 다음 좌석부터 한 바퀴 돌며 조건을 만족하는 첫 인덱스 */
 export function nextIdx(state: GameState, from: number, pred: (p: PlayerState) => boolean): number {
   const n = state.players.length;
+  // 딜러의 변덕: 반시계 방향
+  const dir = state.reversed ? -1 : 1;
   for (let k = 1; k <= n; k++) {
-    const i = (from + k) % n;
+    const i = (((from + dir * k) % n) + n) % n;
     if (pred(state.players[i])) return i;
   }
   return -1;
@@ -74,7 +76,8 @@ export function nextIdx(state: GameState, from: number, pred: (p: PlayerState) =
 /** 딜러 왼쪽부터의 좌석 순서 */
 export function seatOrderFromDealer(state: GameState): number[] {
   const n = state.players.length;
-  return Array.from({ length: n }, (_, k) => (state.dealerIdx + 1 + k) % n);
+  const dir = state.reversed ? -1 : 1;
+  return Array.from({ length: n }, (_, k) => (((state.dealerIdx + dir * (1 + k)) % n) + n) % n);
 }
 
 export function addLog(state: GameState, text: string, opts: { to?: string[]; except?: string[] } = {}): void {
@@ -337,7 +340,8 @@ export function lockError(state: GameState): string | null {
 
 /** 서버 기준 족보 계산용 보드: 공개된 보드에서 봉인된 카드 제외 */
 export function evalBoard(state: GameState): Card[] {
-  return state.board.slice(0, state.boardRevealed).filter((_, i) => !state.effects.sealed.includes(i));
+  // 공용 카드는 모두가 보드처럼 쓴다
+  return [...state.board.slice(0, state.boardRevealed).filter((_, i) => !state.effects.sealed.includes(i)), ...state.effects.shared];
 }
 
 /** 이 플레이어가 볼 수 있는 보드 (짙은 안개로 가려진 플랍은 null) */
@@ -373,8 +377,11 @@ export function publicCards(state: GameState): Card[] {
     if (!p.inHand) continue;
     // 연막탄으로 숨긴 카드는 공개된 카드가 아니다
     if (p.shown || glassShows(state, p)) out.push(...p.hole.filter((c) => c !== p.smoked));
-    // 미끼 공개·반쪽짜리 비밀 등으로 공개된 홀카드
-    else for (const c of p.exposed) if (p.hole.includes(c)) out.push(c);
+    // 미끼 공개·반쪽짜리 비밀 등으로 공개된 홀카드, 인디언 포커의 이마 카드(본인 외에는 공개)
+    else {
+      for (const c of p.exposed) if (p.hole.includes(c)) out.push(c);
+      if (p.forehead && p.hole.includes(p.forehead) && !p.exposed.includes(p.forehead)) out.push(p.forehead);
+    }
   }
   return out;
 }
@@ -414,4 +421,9 @@ export function payTax(state: GameState, p: PlayerState, secret = false): number
 
 export function nameOf(state: GameState, id: string): string {
   return playerById(state, id)?.name ?? '?';
+}
+
+/** 인디언 포커: 본인에게 가려진 이마 카드 (쇼다운 등으로 공개되면 없음) */
+export function foreheadOf(p: PlayerState): Card | null {
+  return p.forehead && !p.shown && p.hole.includes(p.forehead) ? p.forehead : null;
 }

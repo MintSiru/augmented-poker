@@ -199,6 +199,7 @@ function newPlayer(np: NewPlayer, seat: number, chips: number): PlayerState {
     nemesis: null,
     streakHand: 0,
     smoked: null,
+    forehead: null,
   };
 }
 
@@ -226,6 +227,10 @@ export function freshEffects(): TableEffects {
     capitalism: false,
     magnet: null,
     twoFates: false,
+    silentRiver: false,
+    timeBomb: false,
+    timeBombImmune: [],
+    shared: [],
   };
 }
 
@@ -244,6 +249,7 @@ function freshRound(state: GameState | null, firstFrom: number): RoundState {
     startSetter: state?.betSetter ? { ...state.betSetter } : null,
     firstFrom,
     raiseCap: null,
+    oneMore: false,
     locked: false,
     maxPut: null,
     capitalDone: false,
@@ -293,6 +299,10 @@ export function createGame(players: NewPlayer[], opts: CreateGameOptions = {}): 
     fixedIdx: [],
     nextHand: { reverse: false, prophecy: false, freezeCard: null },
     windowStage: null,
+    whimLeft: 0,
+    reversed: false,
+    indianNext: false,
+    indianImmuneNext: [],
     capitalChooser: null,
     respond: null,
     respondSeq: 0,
@@ -840,6 +850,7 @@ function resetHandState(state: GameState): void {
     p.sideBetOn = null;
     p.strawOn = null;
     p.smoked = null;
+    p.forehead = null;
     for (const a of p.augments) a.usedThisHand = false;
   }
   state.board = [];
@@ -1016,10 +1027,21 @@ function beginHand(state: GameState): void {
     state.underdogLeft--;
   }
   const alive = state.players.filter((p) => !p.out);
+  // 딜러의 변덕: 남은 반시계 핸드가 있으면 버튼·블라인드·순서가 반대로 돈다
+  state.reversed = state.whimLeft > 0;
+  if (state.reversed) state.whimLeft--;
   if (state.handNumber > 1 || state.players[state.dealerIdx].out) {
     state.dealerIdx = nextIdx(state, state.dealerIdx, (p) => !p.out);
   }
   dealCards(state);
+  // 인디언 포커: 각자 홀카드 1장을 이마에 (면역이면 빠짐)
+  if (state.indianNext) {
+    for (const p of state.players) {
+      if (p.inHand && p.hole.length >= 2 && !state.indianImmuneNext.includes(p.id)) p.forehead = p.hole[state.rng.int(p.hole.length)];
+    }
+    state.indianNext = false;
+    state.indianImmuneNext = [];
+  }
   const { sb, bb } = currentBlinds(state);
   if (alive.length === 2) {
     state.sbIdx = state.dealerIdx;
@@ -1042,8 +1064,10 @@ function logHandStart(state: GameState): void {
   for (const p of state.players) {
     if (!p.inHand) continue;
     if (ownCardsHidden(state, p)) addLog(state, `내 홀카드: ${p.hole.length}장 (암전 — 볼 수 없음)`, { to: [p.id] });
-    else addLog(state, `내 홀카드: ${cardsText(p.hole)}`, { to: [p.id] });
+    else addLog(state, `내 홀카드: ${cardsText(p.hole.map((c) => (c === p.forehead ? '??' : c)))}${p.forehead ? ' (이마 카드는 볼 수 없음)' : ''}`, { to: [p.id] });
   }
+  if (state.players.some((p) => p.forehead)) addLog(state, '인디언 포커: 각자 홀카드 1장을 이마에 붙였습니다 (본인만 못 봄)');
+  if (state.reversed) addLog(state, `딜러의 변덕: 이번 핸드는 반시계 방향 (이후 ${state.whimLeft}핸드 더)`);
 }
 
 /** 블라인드(폭탄 팟이면 전원 3BB)를 받고 첫 베팅 라운드를 시작한다 */
@@ -1131,6 +1155,11 @@ function needsToAct(state: GameState, p: PlayerState): boolean {
 /** 배수진: 이번 핸드 폴드 불가 (면역이면 폴드 가능) */
 function noFold(state: GameState, p: PlayerState): boolean {
   return state.effects.lastStand && !state.effects.lastStandImmune.includes(p.id);
+}
+
+/** 시한폭탄: 이 사람의 체크가 폴드가 되는가 */
+export function timeBombed(state: GameState, p: PlayerState): boolean {
+  return state.effects.timeBomb && !state.effects.timeBombImmune.includes(p.id);
 }
 
 function canRaise(state: GameState, p: PlayerState): boolean {
@@ -1317,17 +1346,29 @@ function closeRound(state: GameState): void {
       if (startDeclareWindow(state, 'turn')) return;
       break;
     case 'turn':
-      state.street = 'river';
-      burnCard(state, 2);
-      revealTo(state, revealTarget(state, 2), '리버', true);
-      if (startDeclareWindow(state, 'river')) return;
-      break;
+      // 턴 베팅이 끝난 뒤 선언 기회 (침묵의 리버·마지막 선택)
+      if (startDeclareWindow(state, 'turnEnd')) return;
+      return dealRiver(state);
     case 'river':
       // 쇼다운 직전 선언 기회 (명추리·기생)
       if (startDeclareWindow(state, 'preShowdown')) return;
       showdown(state);
       return;
   }
+  startBettingRound(state, state.dealerIdx);
+}
+
+/** 리버 공개 (침묵의 리버면 리버 베팅 없이 쇼다운으로) */
+function dealRiver(state: GameState): void {
+  state.street = 'river';
+  burnCard(state, 2);
+  revealTo(state, revealTarget(state, 2), '리버', true);
+  if (state.effects.silentRiver) {
+    addLog(state, '침묵의 리버: 리버 베팅 없이 쇼다운으로 갑니다');
+    if (startDeclareWindow(state, 'preShowdown')) return;
+    return showdown(state);
+  }
+  if (startDeclareWindow(state, 'river')) return;
   startBettingRound(state, state.dealerIdx);
 }
 
@@ -1392,6 +1433,12 @@ function applyBet(state: GameState, idx: number, a: BetAction): string | null {
       break;
     case 'check':
       if (toCall > 0) return `체크할 수 없습니다. 콜 금액은 ${Math.min(toCall, stackOf(p))}입니다.`;
+      // 시한폭탄: 체크하면 즉시 폴드 (면역이거나 배수진으로 폴드할 수 없으면 체크)
+      if (timeBombed(state, p) && !noFold(state, p)) {
+        addLog(state, `시한폭탄: ${p.name}의 체크는 폴드로 처리됩니다`);
+        doFold(state, p, false);
+        break;
+      }
       p.lastAction = '체크';
       addLog(state, `${p.name}: 체크`);
       break;
@@ -1422,7 +1469,14 @@ function applyBet(state: GameState, idx: number, a: BetAction): string | null {
         addLog(state, `${p.name}: ${p.allIn ? '올인 콜' : '콜'} (${p.streetBet})`);
         break;
       }
-      if (state.round.raiseCap === 0) return '서킷브레이커: 이번 라운드는 레이즈를 1번만 허용합니다 (콜 또는 폴드).';
+      if (state.round.raiseCap === 0 && state.round.oneMore && a.type === 'allin') {
+        // 한 번만 더: 상한을 넘는 올인은 콜에 필요한 금액까지만
+        putChips(p, toCall);
+        p.lastAction = p.allIn ? `올인 ${p.streetBet}` : `콜 ${p.streetBet}`;
+        addLog(state, `${p.name}: ${p.allIn ? '올인 콜' : '콜'} (${p.streetBet}) — 한 번만 더`);
+        break;
+      }
+      if (state.round.raiseCap === 0) return state.round.oneMore ? '한 번만 더: 이번 라운드는 더 이상 레이즈할 수 없습니다 (콜 또는 폴드).' : '서킷브레이커: 이번 라운드는 레이즈를 1번만 허용합니다 (콜 또는 폴드).';
       if (state.effects.lastStand) return '배수진: 이번 핸드는 체크·콜만 할 수 있습니다.';
       if (!canRaise(state, p)) return '완전한 레이즈가 없었으므로 다시 레이즈할 수 없습니다 (콜 또는 폴드).';
       const minTo = state.currentBet + state.minRaise;
@@ -1545,7 +1599,7 @@ function applyEitherOr(state: GameState): void {
 
 // ───────────────────────── 선언 기회 (턴·리버 공개 직후) ─────────────────────────
 
-function startDeclareWindow(state: GameState, stage: 'flop' | 'turn' | 'river' | 'preShowdown'): boolean {
+function startDeclareWindow(state: GameState, stage: 'flop' | 'turn' | 'turnEnd' | 'river' | 'preShowdown'): boolean {
   state.windowStage = stage;
   state.phase = 'declare';
   const ops = opsFor(state);
@@ -1638,6 +1692,7 @@ function advanceDeclare(state: GameState): void {
   const stage = state.windowStage;
   state.windowStage = null;
   if (stage === 'preShowdown') return showdown(state);
+  if (stage === 'turnEnd') return dealRiver(state);
   startBettingRound(state, state.dealerIdx);
 }
 
@@ -2210,7 +2265,7 @@ function judgeUnits(state: GameState): { boards: { label: string; cards: Card[] 
   if (state.board2) {
     const two = state.effects.twoFates;
     boards[0].label = two ? '첫 리버' : '첫 보드';
-    boards.push({ label: two ? '두 번째 리버' : '두 번째 보드', cards: state.board2.slice(0, state.boardRevealed) });
+    boards.push({ label: two ? '두 번째 리버' : '두 번째 보드', cards: [...state.board2.slice(0, state.boardRevealed), ...state.effects.shared] });
   }
   const modes = state.effects.highLow
     ? [

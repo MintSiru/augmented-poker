@@ -238,6 +238,8 @@ export interface PlayerState {
   streakHand: number;
   /** 연막탄: 공개할 때 끝까지 숨긴 홀카드 (다른 플레이어 뷰·로그에서 '??') */
   smoked: Card | null;
+  /** 인디언 포커: 이마에 붙인 홀카드 (본인만 못 봄) */
+  forehead: Card | null;
   /** 색맹: 이번 핸드 색 플러시 */
   colorBlindOn: boolean;
   /** 그림자 분신: 이번 판정에서 무늬를 바꾼 홀카드 */
@@ -367,6 +369,8 @@ export interface RoundState {
   firstFrom: number;
   /** 남은 레이즈 허용 수 (null = 제한 없음). 서킷브레이커 후 1 */
   raiseCap: number | null;
+  /** 한 번만 더: raiseCap 이 이 효과로 걸렸는가 (상한을 넘는 올인은 콜 금액만) */
+  oneMore: boolean;
   /** 자물쇠: 이번 라운드에는 액티브·공개형 증강 사용 불가 */
   locked: boolean;
   /** 자본주의: 이번 라운드에서 가장 크게 베팅·레이즈한 사람과 금액 */
@@ -410,6 +414,13 @@ export interface TableEffects {
   magnet: { suit: string; used: boolean } | null;
   /** 두 번의 운명 (두 번째 보드는 리버만 다름) */
   twoFates: boolean;
+  /** 침묵의 리버: 리버 베팅 없이 쇼다운 */
+  silentRiver: boolean;
+  /** 시한폭탄: 체크 = 폴드 (면역·올인 예외) */
+  timeBomb: boolean;
+  timeBombImmune: string[];
+  /** 공용 카드: 모두가 보드처럼 쓰는 공개 카드 */
+  shared: Card[];
 }
 
 /** 선언된 액티브·공개형 증강 (3초 반응 대기 후 적용) */
@@ -507,7 +518,13 @@ export interface GameState {
   /** 다음 핸드에 적용할 보드 효과 */
   nextHand: { reverse: boolean; prophecy: boolean; freezeCard: Card | null };
   /** 지금 열린 선언 기회의 단계 */
-  windowStage: 'flop' | 'turn' | 'river' | 'preShowdown' | null;
+  windowStage: 'flop' | 'turn' | 'turnEnd' | 'river' | 'preShowdown' | null;
+  /** 딜러의 변덕: 아직 시작하지 않은 반시계 핸드 수, 이번 핸드가 반시계인가 */
+  whimLeft: number;
+  reversed: boolean;
+  /** 인디언 포커: 다음 핸드에 이마 카드를 붙이는가 (면역으로 빠진 사람) */
+  indianNext: boolean;
+  indianImmuneNext: string[];
   /** 자본주의: 보드 추가 여부를 정하는 사람 */
   capitalChooser: string | null;
   /** 진행 중인 제안·입찰 */

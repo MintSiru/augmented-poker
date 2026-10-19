@@ -53,6 +53,11 @@ function ownVisible(s: GameState, me: GameState['players'][number]): boolean {
   return me.inHand && (me.shown || (e.glass && !e.glassImmune.includes(me.id)) || !e.blackout || e.blackoutImmune.includes(me.id));
 }
 
+/** 인디언 포커: 본인에게 가려진 이마 카드 */
+function foreheadOf(p: GameState['players'][number]): Card | null {
+  return p.forehead && !p.shown && p.hole.includes(p.forehead) ? p.forehead : null;
+}
+
 function glassShows(s: GameState, p: GameState['players'][number]): boolean {
   return s.effects.glass && p.inHand && !s.effects.glassImmune.includes(p.id);
 }
@@ -68,7 +73,14 @@ function perturb(s: GameState, viewerId: string, rng: Rng): GameState {
   for (const q of c.players) {
     const visible = q.inHand && (q.shown || glassShows(c, q) || (q === viewer && ownVisible(c, q)));
     // 공개된 홀카드(미끼 공개 등)는 그대로 두고 나머지만 바꾼다
-    if (!visible) q.hole.forEach((c, i) => !q.exposed.includes(c) && slots.push({ get: () => q.hole[i], set: (x) => (q.hole[i] = x) }));
+    // 인디언 포커: 남의 이마 카드는 공개, 내 이마 카드는 나에게 비공개
+    const fh = foreheadOf(q);
+    if (!visible) q.hole.forEach((c, i) => !q.exposed.includes(c) && c !== fh && slots.push({ get: () => q.hole[i], set: (x) => (q.hole[i] = x) }));
+    else if (q === viewer && fh && !q.exposed.includes(fh)) {
+      const i = q.hole.indexOf(fh);
+      const qq = q;
+      slots.push({ get: () => qq.hole[i], set: (x) => { qq.hole[i] = x; qq.forehead = x; } });
+    }
     // 연막탄으로 숨긴 카드는 공개된 뒤에도 다른 사람에게는 비공개
     else if (q !== viewer && q.smoked) {
       const i = q.hole.indexOf(q.smoked);
@@ -178,7 +190,7 @@ const CARD_RE = /(?<![A-Za-z0-9])[2-9TJQKA][shdc](?![A-Za-z0-9])/g;
 function allowedCards(s: GameState, viewerId: string): Set<Card> {
   const me = s.players.find((p) => p.id === viewerId)!;
   const ok = new Set<Card>([...me.discarded]);
-  if (ownVisible(s, me)) me.hole.forEach((c) => ok.add(c));
+  if (ownVisible(s, me)) me.hole.forEach((c) => c !== foreheadOf(me) && ok.add(c));
   for (const c of [me.keptCard, me.lockerStored, me.lockerReady, me.destinyCard]) if (c) ok.add(c);
   s.board.slice(0, s.boardRevealed).forEach((c, i) => {
     if (!fogHides(s, viewerId, i)) ok.add(c);
@@ -188,7 +200,10 @@ function allowedCards(s: GameState, viewerId: string): Set<Card> {
     p.shepherdShown.forEach((c) => ok.add(c));
     if (p.alchemy) [p.alchemy.from, p.alchemy.to].forEach((c) => ok.add(c));
     if (p.inHand) p.exposed.forEach((c) => ok.add(c));
+    const fh = foreheadOf(p);
+    if (fh && p !== me) ok.add(fh);
   }
+  s.effects.shared.forEach((c) => ok.add(c));
   for (const n of me.notes) if (n.hand === s.handNumber) n.cards?.forEach((c) => ok.add(c));
   if (me.augments.some((a) => a.id === 'counting')) s.used.forEach((u) => ok.add(u.card));
   s.used.filter((u) => u.kind === 'rewind' || u.kind === 'shown' || u.kind === 'called').forEach((u) => ok.add(u.card));

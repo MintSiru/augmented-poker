@@ -676,3 +676,216 @@ describe('4차 심리전형', () => {
     expect(P(s, 'p1').augments[0].usesLeft).toBe(1);
   });
 });
+
+describe('4차 공개형', () => {
+  const HANDS = { p1: cards('9c 8d'), p2: cards('Qc Jh'), p3: cards('3c 5c') };
+  const D = { board: cards(BOARD), hands: HANDS };
+  const pub = (s: GameState, viewer: string, id: string) => view(s, viewer).players.find((p) => p.id === id)!;
+
+  it('인디언 포커: 이마 카드는 본인 뷰에서만 빠지고(족보 표시도 숨김) 남에게는 보인다, 면역이면 두 장 다 봄', () => {
+    const s = setup(3, { augs: { p1: ['indianPoker'], p3: ['immunity'] }, deal: D });
+    toShowdown(s);
+    use(s, 'p1', 'indianPoker');
+    act(s, 'p3', { type: 'immunity' });
+    resolveAll(s);
+    ok(debugSetNextDeal(s, D));
+    ok(startNextHand(s));
+    resolveAll(s);
+    const fh = P(s, 'p1').forehead!;
+    expect(cards('9c 8d')).toContain(fh);
+    expect(P(s, 'p3').forehead).toBeNull();
+    const v1 = view(s, 'p1');
+    expect(v1.you.hole).toContain('??');
+    expect(v1.you.hand).toBeNull();
+    expect(JSON.stringify(v1)).not.toContain(`"${fh}"`);
+    expect(pub(s, 'p1', 'p1').hasForehead).toBe(true);
+    expect(pub(s, 'p2', 'p1').forehead).toBe(fh);
+    expect(view(s, 'p3').you.hole).toEqual(cards('3c 5c'));
+    // 쇼다운에서는 모두 공개
+    toShowdown(s);
+    expect(pub(s, 'p1', 'p1').shownCards).toEqual(cards('9c 8d'));
+  });
+
+  it('딜러의 변덕: 3핸드 동안 버튼·블라인드·순서가 반시계, 그 뒤 그 자리에서 다시 시계 방향 (면역 불가)', () => {
+    const s = setup(4, { augs: { p1: ['dealerWhim'], p3: ['immunity'] } });
+    const name = (i: number) => s.players[i].id;
+    toShowdown(s);
+    use(s, 'p1', 'dealerWhim');
+    expect(applyAction(s, 'p3', { type: 'immunity' }).ok).toBe(false);
+    resolveAll(s);
+    const seen: string[][] = [];
+    for (let h = 0; h < 4; h++) {
+      ok(startNextHand(s));
+      resolveAll(s);
+      seen.push([name(s.dealerIdx), name(s.sbIdx), name(s.bbIdx), name(s.toAct!)]);
+      if (h === 0) expect(view(s, 'p2').table.whimHands).toBe(3);
+      toShowdown(s);
+    }
+    // p1 딜러에서 시작: p4 → p3 → p2 (반시계), 그 다음 p3 (시계)
+    expect(seen[0]).toEqual(['p4', 'p3', 'p2', 'p1']);
+    expect(seen[1][0]).toBe('p3');
+    expect(seen[2][0]).toBe('p2');
+    expect(seen[3]).toEqual(['p3', 'p4', 'p1', 'p2']);
+    expect(s.reversed).toBe(false);
+  });
+
+  it('딜러의 변덕: 헤즈업에서도 딜러가 SB', () => {
+    const s = setup(2, { augs: { p1: ['dealerWhim'] } });
+    toShowdown(s);
+    use(s, 'p1', 'dealerWhim');
+    resolveAll(s);
+    for (let h = 0; h < 3; h++) {
+      ok(startNextHand(s));
+      resolveAll(s);
+      expect(s.sbIdx).toBe(s.dealerIdx);
+      toShowdown(s);
+    }
+  });
+
+  it('공동 우물: 낸 카드를 섞어 다시 나눈다 (방탄조끼·면역은 빠짐, 고른 카드는 본인 뷰에만)', () => {
+    const s = setup(4, {
+      augs: { p2: ['commonWell'], p3: ['vest'], p4: ['immunity'] },
+      deal: { board: cards(BOARD), hands: { ...HANDS, p4: cards('Td Ts') } },
+    });
+    passUntil(s, () => s.street === 'flop' && s.phase === 'betting');
+    use(s, 'p2', 'commonWell');
+    act(s, 'p4', { type: 'immunity' });
+    resolveAll(s);
+    expect(s.respond!.participants.sort()).toEqual(['p1', 'p2']);
+    expect(P(s, 'p3').augments[0].usesLeft).toBe(0);
+    respond(s, 'p1', { cardIndex: 0 });
+    expect(view(s, 'p1').respond!.myAnswer!.cardIndex).toBe(0);
+    expect(view(s, 'p2').respond!.myAnswer).toBeNull();
+    respond(s, 'p2', { cardIndex: 1 });
+    const all = [...P(s, 'p1').hole, ...P(s, 'p2').hole].sort();
+    expect(all).toEqual(cards('9c 8d Qc Jh').sort());
+    expect(P(s, 'p3').hole).toEqual(cards('3c 5c'));
+    expect(P(s, 'p4').hole).toEqual(cards('Td Ts'));
+  });
+
+  it('도둑잡기: 고른 카드를 동시에 옆 사람(왼쪽)에게 넘긴다', () => {
+    const s = setup(3, { augs: { p1: ['catchThief'] }, deal: D });
+    use(s, 'p1', 'catchThief', { choice: 0 });
+    resolveAll(s);
+    respond(s, 'p1', { cardIndex: 0 });
+    respond(s, 'p2', { cardIndex: 0 });
+    respond(s, 'p3', { cardIndex: 0 });
+    expect(P(s, 'p2').hole).toEqual(cards('9c Jh'));
+    expect(P(s, 'p3').hole).toEqual(cards('Qc 5c'));
+    expect(P(s, 'p1').hole).toEqual(cards('3c 8d'));
+  });
+
+  it('침묵의 리버: 턴 베팅 뒤 선언, 리버는 공개하지만 리버 베팅 없이 쇼다운', () => {
+    const s = setup(3, { augs: { p1: ['silentRiver'] }, deal: D });
+    toWindow(s, 'turnEnd');
+    act(s, 'p1', { type: 'declare', augment: 'silentRiver' });
+    resolveAll(s);
+    toShowdown(s);
+    expect(s.result!.showdown).toBe(true);
+    expect(s.result!.board.length).toBe(5);
+    expect(s.log.some((l) => l.text.includes('리버 베팅 없이 쇼다운으로 갑니다'))).toBe(true);
+    const riverIdx = s.log.findIndex((l) => l.text.startsWith('리버'));
+    expect(s.log.slice(riverIdx).some((l) => /: (체크|콜|베팅)/.test(l.text))).toBe(false);
+  });
+
+  it('휴전: 플랍·턴에서 베팅이 없을 때 내 차례에 선언하면 모두 체크로 다음 카드', () => {
+    const s = setup(3, { augs: { p2: ['truce'] }, deal: D });
+    passUntil(s, () => s.street === 'flop' && s.phase === 'betting');
+    expect(s.players[s.toAct!].id).toBe('p2');
+    use(s, 'p2', 'truce');
+    resolveAll(s);
+    expect(s.street).toBe('turn');
+  });
+
+  it('공용 카드: 각자 1장을 공개해 모두가 보드처럼 쓰고, 면역이면 카드를 내지 않는다', () => {
+    const s = setup(3, { augs: { p1: ['sharedCard'], p3: ['immunity'] }, deal: D });
+    use(s, 'p1', 'sharedCard');
+    act(s, 'p3', { type: 'immunity' });
+    resolveAll(s);
+    respond(s, 'p1', { cardIndex: 0 });
+    expect(view(s, 'p2').respond!.myAnswer).toBeNull();
+    expect(JSON.stringify(view(s, 'p2'))).not.toContain('"9c"');
+    respond(s, 'p2', { cardIndex: 1 });
+    expect(s.effects.shared).toEqual(cards('9c Jh'));
+    expect(P(s, 'p1').hole).toEqual(['8d']);
+    expect(P(s, 'p3').hole.length).toBe(2);
+    expect(view(s, 'p3').table.shared).toEqual(cards('9c Jh'));
+    toShowdown(s);
+    // p3 는 3c 5c + 보드 A 4 2 = 휠 스트레이트, 공용 9 J 도 함께 판정
+    expect(s.result!.won.p3).toBeGreaterThan(0);
+  });
+
+  it('반쪽짜리 비밀: 각자 고른 1장을 동시에 공개', () => {
+    const s = setup(3, { augs: { p1: ['halfSecret'] }, deal: D });
+    use(s, 'p1', 'halfSecret');
+    resolveAll(s);
+    respond(s, 'p1', { cardIndex: 1 });
+    respond(s, 'p2', { cardIndex: 0 });
+    respond(s, 'p3', { cardIndex: 1 });
+    expect(pub(s, 'p3', 'p1').exposed).toEqual(['8d']);
+    expect(pub(s, 'p1', 'p2').exposed).toEqual(['Qc']);
+    expect(pub(s, 'p2', 'p3').exposed).toEqual(['5c']);
+  });
+
+  it('한 번만 더: 레이즈 1번 뒤에는 콜·폴드만, 상한을 넘는 올인은 콜 금액만 낸다', () => {
+    const s = setup(3, { augs: { p1: ['oneMore'] }, deal: D });
+    use(s, 'p1', 'oneMore');
+    resolveAll(s);
+    act(s, 'p1', { type: 'raise', amount: 60 });
+    expect(applyAction(s, 'p2', { type: 'raise', amount: 120 }).ok).toBe(false);
+    act(s, 'p2', { type: 'allin' } as GameAction);
+    expect(P(s, 'p2').contributed).toBe(60);
+    expect(P(s, 'p2').allIn).toBe(false);
+  });
+
+  it('바꿔치기: 프리플랍에 상대와 홀카드 2장을 통째로 맞교환 (면역이면 무효, 방탄조끼면 막힘)', () => {
+    const s = setup(3, { augs: { p1: ['switcheroo'] }, deal: D });
+    use(s, 'p1', 'switcheroo', { targetId: 'p2' });
+    resolveAll(s);
+    expect(P(s, 'p1').hole).toEqual(cards('Qc Jh'));
+    expect(P(s, 'p2').hole).toEqual(cards('9c 8d'));
+
+    const s2 = setup(3, { augs: { p1: ['switcheroo'], p2: ['immunity'] }, deal: D });
+    use(s2, 'p1', 'switcheroo', { targetId: 'p2' });
+    act(s2, 'p2', { type: 'immunity' });
+    resolveAll(s2);
+    expect(P(s2, 'p1').hole).toEqual(cards('9c 8d'));
+
+    const s3 = setup(3, { augs: { p1: ['switcheroo'], p2: ['vest'] }, deal: D });
+    use(s3, 'p1', 'switcheroo', { targetId: 'p2' });
+    resolveAll(s3);
+    expect(P(s3, 'p1').hole).toEqual(cards('9c 8d'));
+    expect(P(s3, 'p2').augments[0].usesLeft).toBe(0);
+  });
+
+  it('시한폭탄: 플랍 직후 선언, 체크하면 폴드 (면역은 체크 가능)', () => {
+    const s = setup(3, { augs: { p1: ['timeBomb'], p2: ['immunity'] }, deal: D });
+    toWindow(s, 'flop');
+    act(s, 'p1', { type: 'declare', augment: 'timeBomb' });
+    act(s, 'p2', { type: 'immunity' });
+    resolveAll(s);
+    passUntil(s, () => s.phase === 'betting');
+    act(s, 'p2', { type: 'check' });
+    expect(P(s, 'p2').folded).toBe(false);
+    act(s, 'p3', { type: 'check' });
+    expect(P(s, 'p3').folded).toBe(true);
+    expect(view(s, 'p1').table.timeBomb).toBe(true);
+  });
+
+  it('마지막 선택: 턴 베팅 뒤 각자 유지/1장 교체를 비공개로 고르고, 리버는 정상 공개', () => {
+    const s = setup(3, { augs: { p1: ['lastChoice'] }, deal: D });
+    toWindow(s, 'turnEnd');
+    act(s, 'p1', { type: 'declare', augment: 'lastChoice' });
+    resolveAll(s);
+    expect(view(s, 'p1').respond!.input).toBe('cardOrKeep');
+    respond(s, 'p1', { choice: 1, cardIndex: 0 });
+    expect(view(s, 'p2').respond!.myAnswer).toBeNull();
+    respond(s, 'p2', { choice: -1 });
+    respond(s, 'p3', { choice: -1 });
+    expect(P(s, 'p1').hole[0]).not.toBe('9c');
+    expect(P(s, 'p1').hole[1]).toBe('8d');
+    expect(s.used.some((u) => u.card === '9c' && u.kind === 'discard')).toBe(true);
+    passUntil(s, () => s.street === 'river');
+    expect(s.board[4]).toBe('2s');
+  });
+});
