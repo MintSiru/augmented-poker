@@ -1,0 +1,13 @@
+# Render Blueprint (선택 사항). 대시보드에서 직접 만들 경우 README 의 단계를 따르면 된다.
+services:
+  - type: web
+    name: augmented-holdem
+    runtime: node
+    plan: free
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # DEBUG 는 설정하지 않는다 (배포 환경에서 디버그 기능은 서버 코드에서 완전히 꺼진다)
