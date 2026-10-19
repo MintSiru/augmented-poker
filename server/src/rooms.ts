@@ -799,7 +799,7 @@ export class Room {
       }
       case 'respond':
         // 제안·입찰·비공개 선언: 15초 (응답하지 않으면 기본 응답)
-        base = this.opts.respondSeconds * 1000;
+        base = (this.game?.respond?.seconds ?? this.opts.respondSeconds) * 1000;
         break;
       case 'discard':
       case 'declare':

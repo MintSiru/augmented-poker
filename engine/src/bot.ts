@@ -410,5 +410,6 @@ export function chooseBotAction(view: PlayerView, rng: Rng): GameAction | null {
   if (legal.raise && eq > strong + 0.1 && chance(rng, 70)) return raiseTo(0.75);
   if (eq >= potOdds + (allInCall ? 0.08 : 0.02)) return call();
   if (legal.raise && bluff && chance(rng, 30)) return raiseTo(0.6);
-  return { type: 'fold' };
+  // 폴드할 수 없으면(배수진 등) 콜
+  return legal.fold ? { type: 'fold' } : call();
 }

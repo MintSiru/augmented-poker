@@ -69,8 +69,8 @@ export interface MyAugmentView extends AugmentInfo {
   fakeUsed: boolean | null;
   /** 짝수/홀수 동맹: 고른 쪽 */
   parity: 'even' | 'odd' | null;
-  /** 1차 / 2차 / 3차 풀 */
-  pool: 1 | 2 | 3;
+  /** 1~4차 풀 */
+  pool: 1 | 2 | 3 | 4;
   /** 잠복으로 숨긴 증강 */
   hidden: boolean;
   /** 지금 버튼으로 쓸 수 있는가 (최종 검증은 서버) */
@@ -507,7 +507,8 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     connected: true,
     isHost: false,
     dormant: p.dormant !== null ? Math.max(0, p.dormant - state.handNumber) : null,
-    streak: p.streak > 0 && findAug(p, 'runaway') ? p.streak : null,
+    // 연승 수는 공개 정보 (연승을 세는 증강 보유자만 쌓인다)
+    streak: p.streak > 0 ? p.streak : null,
     team: (() => {
       const k = state.teams.findIndex((t) => t.includes(p.id));
       return k >= 0 ? k : null;

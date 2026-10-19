@@ -132,7 +132,70 @@ export type AugmentId =
   | 'publicHearing'
   // 확률·통계
   | 'recorder'
-  | 'fateThread';
+  | 'fateThread'
+  // ═════ 4차 풀 ═════
+  // 정보형
+  | 'afterimage'
+  | 'reviewNote'
+  | 'smell'
+  | 'suitCheck'
+  | 'wiretap'
+  | 'deadScanner'
+  | 'ammoCheck'
+  | 'blackBox'
+  | 'link'
+  | 'focus'
+  // 카드 조작형
+  | 'showcase'
+  | 'envelope'
+  | 'prepay'
+  | 'coldStorage'
+  | 'recycle'
+  | 'pickpocket'
+  // 족보 변형형
+  | 'shadow'
+  | 'numberMirror'
+  | 'underdogCrown'
+  | 'neighbors'
+  | 'triplets'
+  | 'omahaBlood'
+  | 'royalty'
+  | 'colorBlind'
+  // 경제/베팅형
+  | 'savings'
+  | 'reserveOrder'
+  | 'wanted'
+  | 'nerveTest'
+  | 'sideBet'
+  | 'winBonus'
+  | 'betCap'
+  | 'smallPot'
+  | 'regroup'
+  | 'coHarvest'
+  | 'revenge'
+  | 'straw'
+  | 'cataclysm'
+  // 심리전형
+  | 'smokeBomb'
+  | 'bait'
+  // 방어/카운터형
+  | 'pokerFace'
+  | 'selectiveReveal'
+  | 'infoToll'
+  | 'trap'
+  // 공개형
+  | 'indianPoker'
+  | 'dealerWhim'
+  | 'commonWell'
+  | 'silentRiver'
+  | 'truce'
+  | 'sharedCard'
+  | 'halfSecret'
+  | 'oneMore'
+  | 'switcheroo'
+  | 'catchThief'
+  | 'timeBomb'
+  | 'lastChoice';
 
 export type Stars = 1 | 2 | 3;
 
@@ -185,8 +248,10 @@ export interface AugmentDef {
   stealable?: boolean;
   /** 지목형 (철벽으로 막을 수 있음) */
   targeted?: boolean;
-  /** 1차 / 2차 / 3차 풀 */
-  pool?: 1 | 2 | 3;
+  /** 1차 / 2차 / 3차 / 4차 풀 */
+  pool?: 1 | 2 | 3 | 4;
+  /** 함께 가질 수 없는 증강 (양방향으로 검사) */
+  conflicts?: AugmentId[];
   /** 면역으로 피할 수 없는 공개형 (판 전체 규칙을 바꾸는 것) */
   tableWide?: boolean;
 }
@@ -860,6 +925,341 @@ export const AUGMENTS: Record<AugmentId, AugmentDef> = {
     description: '게임 1회. 플랍 공개 직후 상대 1명을 비공개로 지목해, 리버까지 나와 그 상대만 맞붙는다고 가정한 현재 승률(%)을 나만 확인한다 (증강 효과 반영).',
     timing: '플랍 베팅 라운드, 내가 핸드에 참여하고 있을 때',
   }),
+
+  // ═════════════════════════ 4차 풀 ═════════════════════════
+
+  // ───────── 정보형 ─────────
+  afterimage: D({
+    id: 'afterimage', name: '잔상', stars: 1, category: '정보형', trigger: 'passive', disclosure: 'never', uses: null, pool: 4,
+    conflicts: ['counting'],
+    description: '패시브. 번 카드를 나만 본다. 카운팅과 동시 보유 불가.',
+    timing: '번 카드가 쓰일 때 자동',
+  }),
+  reviewNote: D({
+    id: 'reviewNote', name: '복기 노트', stars: 1, category: '정보형', trigger: 'button', disclosure: 'anonymous', pool: 4,
+    uses: { count: 2, per: 'game' }, target: 'opponent',
+    description: '게임 2회. 핸드 종료 직후 상대 1명을 지정해, 그 사람이 플랍 시점에 완성했던 족보 종류만 확인한다. 카드와 키커는 비공개. 플랍 전에 폴드했다면 "플랍 전 폴드"로 표시하고 횟수는 소모하지 않는다.',
+    timing: '핸드 결과 화면',
+  }),
+  smell: D({
+    id: 'smell', name: '후각', stars: 1, category: '정보형', trigger: 'button', disclosure: 'anonymous', pool: 4,
+    uses: { count: 1, per: 'hand' }, target: 'opponentInHand',
+    description: '매 핸드 1회. 상대 1명의 홀카드가 포켓 페어인지 예/아니오로만 확인한다.',
+    timing: '핸드 진행 중',
+  }),
+  suitCheck: D({
+    id: 'suitCheck', name: '무늬 감별', stars: 1, category: '정보형', trigger: 'button', disclosure: 'anonymous', pool: 4,
+    uses: { count: 3, per: 'game' }, target: 'opponentInHand',
+    description: '게임 3회. 상대 1명의 홀카드가 같은 무늬(수티드)인지 확인한다.',
+    timing: '핸드 진행 중',
+  }),
+  wiretap: D({
+    id: 'wiretap', name: '도청', stars: 1, category: '정보형', trigger: 'passive', disclosure: 'never', uses: null, pool: 4,
+    description: '패시브. 다른 플레이어가 정보형 증강으로 카드나 패 정보를 확인할 때, 같은 결과와 사용한 사람을 나도 본다. 도청 보유자가 여러 명이면 모두 본다.',
+    timing: '자동',
+  }),
+  deadScanner: D({
+    id: 'deadScanner', name: '데드 카드 스캐너', stars: 1, category: '정보형', trigger: 'window', disclosure: 'anonymous', pool: 4,
+    uses: { count: 2, per: 'game' }, conflicts: ['counting'],
+    description: '게임 2회. 프리플랍이 끝난 직후 선언. 폴드한 플레이어들이 버린 카드 중 내가 지정한 무늬나 숫자가 몇 장인지 개수만 확인한다. 카운팅과 동시 보유 불가.',
+    timing: '플랍 공개 직후 선언 기회에',
+  }),
+  ammoCheck: D({
+    id: 'ammoCheck', name: '탄약 조사', stars: 1, category: '정보형', trigger: 'button', disclosure: 'anonymous', pool: 4,
+    uses: { count: 2, per: 'game' }, target: 'opponent',
+    description: '게임 2회. 상대 1명이 보유한 횟수 제한 증강의 남은 사용 횟수 총합만 확인한다. 증강 이름과 각각의 잔여 횟수는 알 수 없다.',
+    timing: '게임 중 언제든',
+  }),
+  blackBox: D({
+    id: 'blackBox', name: '블랙박스', stars: 1, category: '정보형', trigger: 'button', disclosure: 'anonymous', pool: 4,
+    uses: { count: 2, per: 'game' },
+    description: '게임 2회. 핸드가 끝난 직후 발동. 공개되지 않은 남은 보드 카드와, 그 보드가 그대로 깔렸다면 핸드 종료 시점까지 남아 있던 플레이어와 나 중 누가 1등이었는지를 나만 확인한다.',
+    timing: '핸드 결과 화면',
+  }),
+  link: D({
+    id: 'link', name: '연결 고리', stars: 2, category: '정보형', trigger: 'button', disclosure: 'anonymous', pool: 4,
+    uses: { count: 2, per: 'game' }, target: 'opponentInHand',
+    description: '게임 2회. 플랍 또는 턴에서 상대 1명을 지정해, 그 상대가 보드와 숫자가 같은 홀카드를 몇 장(0·1·2) 가졌는지 나만 확인한다. 무늬는 알려 주지 않는다.',
+    timing: '플랍·턴 베팅 라운드',
+  }),
+  focus: D({
+    id: 'focus', name: '초점', stars: 2, category: '정보형', trigger: 'button', disclosure: 'anonymous', pool: 4,
+    uses: { count: 1, per: 'game' },
+    description: '게임 1회. 플랍 공개 전에 발동. 이번 플랍 3장 중 가장 높은 숫자와 가장 낮은 숫자만 나만 미리 확인한다.',
+    timing: '프리플랍 (플랍 공개 전)',
+  }),
+
+  // ───────── 카드 조작형 ─────────
+  showcase: D({
+    id: 'showcase', name: '교환 진열대', stars: 1, category: '카드 조작형', trigger: 'button', disclosure: 'named', pool: 4,
+    uses: { count: 1, per: 'game' },
+    description: '게임 1회. 프리플랍 첫 행동 전에 덱에서 2장을 모두에게 공개한다. 그중 1장과 내 홀카드 1장을 바꿀 수 있고, 내놓은 카드와 남은 후보는 버린다. 거절해도 횟수는 소모.',
+    timing: '프리플랍, 내 첫 행동 전',
+  }),
+  envelope: D({
+    id: 'envelope', name: '봉인 봉투', stars: 1, category: '카드 조작형', trigger: 'button', disclosure: 'named', pool: 4,
+    uses: { count: 1, per: 'game' },
+    description: '게임 1회. 프리플랍 첫 행동 전에 덱에서 예비 카드 1장을 나만 보고 보관한다. 플랍 공개 직후 홀카드 1장과 바꾸거나 버린다. 보관 중인 카드는 덱에서 빠진다.',
+    timing: '프리플랍, 내 첫 행동 전',
+  }),
+  prepay: D({
+    id: 'prepay', name: '선불 교환', stars: 1, category: '카드 조작형', trigger: 'button', disclosure: 'named', pool: 4,
+    uses: { count: 2, per: 'game' },
+    description: '게임 2회. 프리플랍 첫 행동 전에 홀카드 1장을 공개하고 버린다. 프리플랍은 홀카드 1장으로 베팅하고, 살아남으면 플랍 직전에 새 카드 1장을 받는다.',
+    timing: '프리플랍, 내 첫 행동 전',
+  }),
+  coldStorage: D({
+    id: 'coldStorage', name: '냉동 보관', stars: 2, category: '카드 조작형', trigger: 'button', disclosure: 'named', pool: 4,
+    uses: { count: 1, per: 'game' },
+    description: '게임 1회. 플랍이나 턴에서 홀카드 1장을 비공개로 보관하고 덱에서 새 카드 1장을 받는다. 보관한 카드는 이후 원하는 핸드의 프리플랍 첫 행동 전에 홀카드 1장과 바꿔 꺼낼 수 있다. 보관 중인 카드는 이후 모든 핸드의 덱에서 제외.',
+    timing: '플랍·턴 베팅 라운드',
+  }),
+  recycle: D({
+    id: 'recycle', name: '재활용', stars: 2, category: '카드 조작형', trigger: 'button', disclosure: 'named', pool: 4,
+    uses: { count: 2, per: 'game' },
+    description: '게임 2회. 플랍 후 이번 핸드의 번 카드를 확인하고, 원하면 그중 1장을 내 홀카드 1장과 바꾼다. 버린 내 카드는 덱으로 돌아가지 않는다.',
+    timing: '플랍 이후 베팅 라운드',
+  }),
+  pickpocket: D({
+    id: 'pickpocket', name: '소매치기', stars: 2, category: '카드 조작형', trigger: 'window', disclosure: 'named', pool: 4,
+    uses: { count: 1, per: 'game' }, conflicts: ['counting'],
+    description: '게임 1회. 쇼다운 직전, 이번 핸드에 폴드한 플레이어 1명의 홀카드 2장과 내 홀카드 2장을 통째로 바꾼다. 카운팅과 동시 보유 불가.',
+    timing: '리버 베팅이 끝난 뒤 쇼다운 직전 선언 기회에',
+  }),
+
+  // ───────── 족보 변형형 ─────────
+  shadow: D({
+    id: 'shadow', name: '그림자 분신', stars: 1, category: '족보 변형형', trigger: 'window', disclosure: 'named', pool: 4,
+    uses: { count: 1, per: 'game' },
+    description: '게임 1회. 쇼다운 판정 때 사용. 내 홀카드 1장의 무늬를, 같은 숫자인 보드 카드의 무늬로 바꿔 판정한다.',
+    timing: '리버 베팅이 끝난 뒤 쇼다운 직전 선언 기회에',
+  }),
+  numberMirror: D({
+    id: 'numberMirror', name: '숫자 거울', stars: 1, category: '족보 변형형', trigger: 'passive', disclosure: 'onEffect', uses: null, pool: 4,
+    description: '패시브. 6과 9를 같은 숫자로 취급한다. 페어·트리플·포카드 판정에만 적용되고 스트레이트에는 쓸 수 없다.',
+    timing: '쇼다운 자동',
+  }),
+  underdogCrown: D({
+    id: 'underdogCrown', name: '약자의 왕관', stars: 1, category: '족보 변형형', trigger: 'passive', disclosure: 'onEffect', uses: null, pool: 4,
+    description: '패시브. 내 홀카드의 2는 하이카드와 키커 비교에서 A보다 높게 친다. 족보 구성(스트레이트 등)에는 영향 없음.',
+    timing: '쇼다운 자동',
+  }),
+  neighbors: D({
+    id: 'neighbors', name: '이웃사촌', stars: 1, category: '족보 변형형', trigger: 'passive', disclosure: 'onEffect', uses: null, pool: 4,
+    description: '패시브. 숫자가 1 차이 나는 두 장(예: 7-8)을 원페어로 인정한다. 높은 쪽 숫자의 페어로 비교하며, 투페어 이상을 만드는 데는 쓸 수 없다.',
+    timing: '쇼다운 자동',
+  }),
+  triplets: D({
+    id: 'triplets', name: '삼쌍둥이', stars: 1, category: '족보 변형형', trigger: 'passive', disclosure: 'onEffect', uses: null, pool: 4,
+    description: '패시브. 7장에 서로 다른 페어가 3쌍 있으면, 가장 높은 페어를 트리플, 두 번째 페어를 페어로 삼은 풀하우스로 인정한다 (예: KK-99-44-2는 K 풀 오브 9).',
+    timing: '쇼다운 자동',
+  }),
+  omahaBlood: D({
+    id: 'omahaBlood', name: '오마하의 피', stars: 2, category: '족보 변형형', trigger: 'window', disclosure: 'named', pool: 4,
+    uses: { count: 1, per: 'game' },
+    description: '게임 1회. 쇼다운에서 발동을 고른다. 홀카드 2장을 모두 써야 족보가 인정되는 대신, 최종 족보를 한 단계 올린다 (원페어 → 투페어, 트리플 → 스트레이트 등, 최대 풀하우스).',
+    timing: '리버 베팅이 끝난 뒤 쇼다운 직전 선언 기회에',
+  }),
+  royalty: D({
+    id: 'royalty', name: '왕실', stars: 3, category: '족보 변형형', trigger: 'passive', disclosure: 'onEffect', uses: null, pool: 4,
+    description: '패시브. J·Q·K를 같은 숫자로 취급한다 (J-Q-K는 트리플). J·Q·K 중 두 장 이상이 함께 필요한 스트레이트는 성립하지 않는다.',
+    timing: '쇼다운 자동',
+  }),
+  colorBlind: D({
+    id: 'colorBlind', name: '색맹', stars: 3, category: '족보 변형형', trigger: 'button', disclosure: 'named', pool: 4,
+    uses: { count: 2, per: 'game' }, group: 'variant',
+    description: '게임 2회. 배타적 풀. 핸드 시작 시 선언하면 그 1핸드 동안 무늬 대신 색(빨강/검정)으로 플러시를 판정한다. 스트레이트 플러시는 원래 무늬 기준. 색 플러시는 일반 플러시와 같은 등급이며, 완전히 같으면 일반 플러시가 더 높다.',
+    timing: '프리플랍, 내 첫 행동 전',
+  }),
+
+  // ───────── 경제/베팅형 ─────────
+  savings: D({
+    id: 'savings', name: '적금', stars: 1, category: '경제/베팅형', trigger: 'passive', disclosure: 'onEffect', uses: null, pool: 4,
+    description: '패시브. 프리플랍에서 폴드할 때마다 0.1BB를 적립하고, 다음에 팟을 이기면 은행에서 한꺼번에 받는다. 적립액은 나에게만 표시.',
+    timing: '자동',
+  }),
+  reserveOrder: D({
+    id: 'reserveOrder', name: '예약 주문', stars: 1, category: '경제/베팅형', trigger: 'button', disclosure: 'named', pool: 4,
+    uses: { count: 1, per: 'hand' },
+    description: '매 핸드 프리플랍 행동 전에 숫자 하나를 공개 지정한다. 플랍에 그 숫자가 나오고 내가 아직 핸드에 남아 있으면 팟에서 1BB를 바로 가져온다. 여러 장 나와도 한 번.',
+    timing: '프리플랍, 내 첫 행동 전',
+  }),
+  wanted: D({
+    id: 'wanted', name: '현상수배', stars: 1, category: '경제/베팅형', trigger: 'button', disclosure: 'named', pool: 4,
+    uses: { count: 1, per: 'game' }, target: 'opponent', targeted: true,
+    description: '게임 1회. 카드를 나누기 전 상대 1명을 공개 지목한다. 그 상대와 내가 모두 쇼다운에 도달해 내가 이기면 그 상대에게서 5BB를 추가로 받는다 (그 상대의 남은 칩 한도 내). 지목형.',
+    timing: '핸드 사이 (다음 핸드 배분 전)',
+  }),
+  nerveTest: D({
+    id: 'nerveTest', name: '배짱 시험', stars: 1, category: '경제/베팅형', trigger: 'button', disclosure: 'named', pool: 4,
+    uses: { count: 1, per: 'game' },
+    description: '게임 1회. 리버에서 베팅·레이즈한 직후 홀카드 1장을 골라 공개한다. 이후 상대가 전부 폴드하면 마지막으로 폴드한 상대에게서 3BB를 받는다.',
+    timing: '리버에서 내가 베팅·레이즈한 직후',
+  }),
+  sideBet: D({
+    id: 'sideBet', name: '사이드 베팅', stars: 1, category: '경제/베팅형', trigger: 'button', disclosure: 'named', pool: 4,
+    uses: { count: 2, per: 'game' }, target: 'opponentInHand', conflicts: ['straw'],
+    description: '게임 2회. 내가 폴드한 핸드에서, 남은 플레이어 중 누가 이길지 비공개로 예측하고 2BB를 팟에 넣는다. 맞히면 팟을 나누기 전에 4BB를 팟에서 돌려받고, 틀리면 넣은 칩은 승자의 몫이 된다. 빨대 꼽기와 동시 보유 불가.',
+    timing: '내가 폴드한 뒤 (남은 플레이어 2명 이상)',
+  }),
+  winBonus: D({
+    id: 'winBonus', name: '연승 수당', stars: 1, category: '경제/베팅형', trigger: 'passive', disclosure: 'onEffect', uses: null, pool: 4,
+    description: '패시브. 연속으로 팟을 이기면 2연승에 1BB, 3연승에 2BB처럼 1BB씩 늘어난 보너스를, 그 핸드에서 나에게 진 상대들이 나눠 낸다. 연승 수는 모두에게 표시.',
+    timing: '자동',
+  }),
+  betCap: D({
+    id: 'betCap', name: '한도 설정', stars: 1, category: '경제/베팅형', trigger: 'button', disclosure: 'named', pool: 4,
+    uses: { count: 2, per: 'game' },
+    description: '게임 2회. 핸드 시작 전에 이번 핸드에서 낼 최대 칩을 20BB로 묶는다. 20BB에 도달하면 그 이상은 낼 수 없고 올인과 같은 규칙(사이드팟)으로 처리한다.',
+    timing: '핸드 사이 (다음 핸드 배분 전)',
+  }),
+  smallPot: D({
+    id: 'smallPot', name: '소액 전문', stars: 1, category: '경제/베팅형', trigger: 'passive', disclosure: 'onEffect', pool: 4,
+    uses: { count: 5, per: 'game' },
+    description: '패시브. 최종 팟이 6BB 이하인 핸드에서 단독 승리하면(프리플랍 스틸 포함) 은행에서 1BB를 받는다. 게임 전체 최대 5회.',
+    timing: '자동',
+  }),
+  regroup: D({
+    id: 'regroup', name: '재정비', stars: 1, category: '경제/베팅형', trigger: 'passive', disclosure: 'onEffect', pool: 4,
+    uses: { count: 2, per: 'game' },
+    description: '게임 2회, 자동 발동. 쇼다운에서 팟을 전혀 받지 못하고 졌지만 칩이 남아 생존했다면, 핸드 종료 후 은행에서 2BB를 받는다.',
+    timing: '자동',
+  }),
+  coHarvest: D({
+    id: 'coHarvest', name: '공동 수확', stars: 1, category: '경제/베팅형', trigger: 'passive', disclosure: 'onEffect', pool: 4,
+    uses: { count: 3, per: 'game' },
+    description: '게임 3회, 자동 발동. 쇼다운에서 같은 팟을 동점으로 나눠 받으면 은행에서 2BB를 추가로 받는다. 서로 다른 사이드팟을 각자 이긴 경우는 제외, 핸드당 1회.',
+    timing: '자동',
+  }),
+  revenge: D({
+    id: 'revenge', name: '복수', stars: 2, category: '경제/베팅형', trigger: 'passive', disclosure: 'onEffect', uses: null, pool: 4,
+    description: '패시브. 직전 쇼다운에서 나를 이긴 상대를 다음 쇼다운에서 이기면 그 상대에게서 팟의 15%를 추가로 받는다 (그 상대의 남은 칩 한도 내). 복수 대상은 나에게만 표시.',
+    timing: '자동',
+  }),
+  straw: D({
+    id: 'straw', name: '빨대 꼽기', stars: 2, category: '경제/베팅형', trigger: 'button', disclosure: 'named', pool: 4,
+    uses: { count: 2, per: 'game' }, target: 'opponentInHand', conflicts: ['sideBet'],
+    description: '게임 2회. 내가 폴드한 직후, 핸드에 2명 이상 남아 있을 때만 사용. 남은 플레이어 중 1명을 비공개로 지목하고(핸드 종료 후 로그에 공개), 그 사람이 이번 팟을 이기면 이번 핸드에 내가 낸 칩을 승자의 몫에서 전부 돌려받는다. 보험과 함께 발동하면 합쳐서 내가 낸 칩의 100%까지만. 사이드 베팅과 동시 보유 불가.',
+    timing: '내가 폴드한 직후 (남은 플레이어 2명 이상)',
+  }),
+  cataclysm: D({
+    id: 'cataclysm', name: '대격변', stars: 3, category: '경제/베팅형', trigger: 'button', disclosure: 'named', pool: 4,
+    uses: { count: 1, per: 'game' },
+    description: '게임 1회. 핸드와 핸드 사이에 선언. 대격변을 뺀 내 보유 증강을 하나씩 무작위 새 증강으로 바꾼다. ★는 ★★로, ★★는 ★★★로, ★★★는 "몰?루 상자"로 별 개수부터 무작위(★·★★·★★★ 각 1/3)로 정해 그 별의 새 증강으로. 새 증강은 증강 풀 안에서 횟수가 꽉 찬 채로, 보유 규칙을 지켜 뽑는다. 대격변은 쓰고 나면 사라진다. 바뀐 결과는 나만 알고 좌석의 보유 증강 수는 그대로.',
+    timing: '핸드 사이',
+  }),
+
+  // ───────── 심리전형 ─────────
+  smokeBomb: D({
+    id: 'smokeBomb', name: '연막탄', stars: 1, category: '심리전형', trigger: 'passive', disclosure: 'never', uses: null, pool: 4,
+    description: '패시브. 쇼다운에서 이기거나 블러핑 성공 후 패를 공개할 때, 족보에 쓰지 않은 홀카드 1장은 끝까지 비공개로 둘 수 있다. 판정은 서버가 정상적으로 하고, 비공개 카드는 다른 플레이어 뷰에 보내지 않는다.',
+    timing: '자동',
+  }),
+  bait: D({
+    id: 'bait', name: '미끼 공개', stars: 1, category: '심리전형', trigger: 'button', disclosure: 'named', pool: 4,
+    uses: { count: 2, per: 'game' },
+    description: '게임 2회. 프리플랍 첫 행동 전에 홀카드 1장을 골라 공개한다. 이번 핸드를 쇼다운에서 이기면 콜한 상대 각각에게서 1BB를 받는다.',
+    timing: '프리플랍, 내 첫 행동 전',
+  }),
+
+  // ───────── 방어/카운터형 ─────────
+  pokerFace: D({
+    id: 'pokerFace', name: '포커페이스', stars: 1, category: '방어/카운터형', trigger: 'passive', disclosure: 'never', uses: null, pool: 4, group: 'counter',
+    description: '패시브. 탐문, 관찰자, 복기 노트, 도청, 탄약 조사에 내 정보가 잡히지 않는다 (사용자에게는 "정보 없음"으로 표시하고 횟수는 소모).',
+    timing: '자동',
+  }),
+  selectiveReveal: D({
+    id: 'selectiveReveal', name: '선택적 노출', stars: 1, category: '방어/카운터형', trigger: 'passive', disclosure: 'never', pool: 4, group: 'counter',
+    uses: { count: 2, per: 'game' },
+    description: '게임 2회. 상대가 내 홀카드 중 무작위 1장을 확인하는 증강(투시 등)을 쓸 때, 보여 줄 카드를 내가 고른다(제한 시간 10초, 응답 없으면 원래대로 무작위). 두 장 전체 확인이나 포켓 페어 여부 같은 질문형 정보에는 적용되지 않는다.',
+    timing: '상대가 나에게 투시를 쓸 때',
+  }),
+  infoToll: D({
+    id: 'infoToll', name: '정보 통행료', stars: 1, category: '방어/카운터형', trigger: 'passive', disclosure: 'onEffect', pool: 4, group: 'counter',
+    uses: { count: 2, per: 'game' },
+    description: '게임 2회. 상대가 나에게 정보형 증강을 쓰면, 결과 확인 전에 상대가 고른다. 나에게 2BB를 내고 진행하거나, 취소하고 사용 횟수를 돌려받는다(제한 시간 10초, 응답 없으면 취소). 어느 쪽이든 통행료 횟수는 소모된다.',
+    timing: '상대가 나에게 정보형 증강을 쓸 때',
+  }),
+  trap: D({
+    id: 'trap', name: '덫', stars: 1, category: '방어/카운터형', trigger: 'button', disclosure: 'never', pool: 4, group: 'counter',
+    uses: { count: 1, per: 'game' },
+    description: '게임 1회. 미리 비공개로 설치한다. 다음에 나를 대상으로 한 증강(지목형 또는 정보형)은 정상 발동하지만, 그 사용자의 보유 증강 전체(이름과 별)가 나에게 공개된다.',
+    timing: '게임 중 언제든 (비공개 설치)',
+  }),
+
+  // ───────── 공개형 (모두 게임 1회) ─────────
+  indianPoker: D({
+    id: 'indianPoker', name: '인디언 포커', stars: 1, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 4,
+    uses: { count: 1, per: 'game' },
+    description: '카드를 나눠 주기 전에만 선언. 각자 홀카드 2장 중 1장은 이마에 붙인 상태로 받는다. 이마 카드는 본인만 못 보고 나머지는 모두 본다. 그 상태로 베팅 진행.',
+    timing: '핸드 사이 (다음 핸드 배분 전)',
+  }),
+  dealerWhim: D({
+    id: 'dealerWhim', name: '딜러의 변덕', stars: 1, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 4,
+    uses: { count: 1, per: 'game' }, tableWide: true,
+    description: '프리플랍 시작 전 선언. 이번 핸드부터 3핸드 동안 버튼 이동, 블라인드 위치, 베팅 순서가 모두 반시계 방향으로 돈다. 3핸드가 끝나면 그 위치에서 다시 시계 방향으로 돈다.',
+    timing: '핸드 사이 (다음 핸드 배분 전)',
+  }),
+  commonWell: D({
+    id: 'commonWell', name: '공동 우물', stars: 1, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 4,
+    uses: { count: 1, per: 'game' },
+    description: '플랍 후 선언. 남은 플레이어 전원이 홀카드 1장씩 비공개로 골라 가운데에 내고, 섞어서 무작위로 다시 나눈다 (자기 카드를 다시 받을 수도 있음).',
+    timing: '플랍 이후 베팅 라운드',
+  }),
+  silentRiver: D({
+    id: 'silentRiver', name: '침묵의 리버', stars: 1, category: '공개형', trigger: 'window', disclosure: 'named', public: true, pool: 4,
+    uses: { count: 1, per: 'game' }, tableWide: true,
+    description: '턴 베팅이 끝난 뒤 선언. 리버를 공개한 뒤 리버 베팅 없이 바로 쇼다운으로 간다.',
+    timing: '턴 베팅이 끝난 뒤 선언 기회에',
+  }),
+  truce: D({
+    id: 'truce', name: '휴전', stars: 1, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 4,
+    uses: { count: 1, per: 'game' }, tableWide: true,
+    description: '플랍 또는 턴에서 내게 체크할 권리가 있을 때(이번 라운드에 아직 베팅이 없을 때) 선언. 이번 라운드는 모두 체크한 것으로 처리하고 다음 카드를 공개한다.',
+    timing: '플랍·턴, 베팅이 없을 때 내 차례',
+  }),
+  sharedCard: D({
+    id: 'sharedCard', name: '공용 카드', stars: 1, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 4,
+    uses: { count: 1, per: 'game' },
+    description: '플랍 전 선언. 남은 플레이어 전원이 홀카드 1장을 골라 공개하고(제한 시간 내 고르지 않으면 무작위), 공개된 카드는 모두가 보드처럼 쓸 수 있다. 각자 남은 홀카드는 1장.',
+    timing: '프리플랍 (플랍이 깔리기 전)',
+  }),
+  halfSecret: D({
+    id: 'halfSecret', name: '반쪽짜리 비밀', stars: 1, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 4,
+    uses: { count: 1, per: 'game' },
+    description: '프리플랍 베팅 전 선언. 남은 플레이어 전원이 홀카드 1장을 비공개로 골라 동시에 공개하고, 나머지 1장은 숨긴다.',
+    timing: '프리플랍, 아무도 행동하기 전',
+  }),
+  oneMore: D({
+    id: 'oneMore', name: '한 번만 더', stars: 1, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 4,
+    uses: { count: 1, per: 'game' }, tableWide: true,
+    description: '베팅 라운드 시작 전 선언. 이번 라운드는 첫 베팅 이후 레이즈를 한 번만 허용하고, 이후에는 콜·폴드만 가능하다(체크는 정상). 상한을 넘는 올인은 콜에 필요한 금액까지만 낸다.',
+    timing: '베팅 라운드가 시작되고 아무도 행동하기 전',
+  }),
+  switcheroo: D({
+    id: 'switcheroo', name: '바꿔치기', stars: 2, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 4,
+    uses: { count: 1, per: 'game' }, target: 'opponentInHand', targeted: true, stealable: true,
+    description: '프리플랍 전용. 상대 1명을 지목해 내 홀카드 2장과 그 상대의 홀카드 2장을 맞교환한다. 지목형.',
+    timing: '프리플랍 베팅 중',
+  }),
+  catchThief: D({
+    id: 'catchThief', name: '도둑잡기', stars: 2, category: '공개형', trigger: 'button', disclosure: 'named', public: true, pool: 4,
+    uses: { count: 1, per: 'game' },
+    description: '각 베팅 라운드 시작 전 선언. 선언자가 방향(왼쪽/오른쪽)을 정하고, 핸드에 남은 플레이어가 각자 고른 홀카드 1장을 동시에 옆 사람에게 넘긴다(옆 사람은 남은 플레이어 기준).',
+    timing: '베팅 라운드가 시작되고 아무도 행동하기 전',
+  }),
+  timeBomb: D({
+    id: 'timeBomb', name: '시한폭탄', stars: 2, category: '공개형', trigger: 'window', disclosure: 'named', public: true, pool: 4,
+    uses: { count: 1, per: 'game' },
+    description: '플랍 공개 직후 선언. 이번 핸드에서는 체크를 선택하면 즉시 폴드 처리된다 (베팅하거나 폴드해야 함). 칩이 없어 베팅할 수 없는 올인 플레이어는 예외.',
+    timing: '플랍 공개 직후 선언 기회에',
+  }),
+  lastChoice: D({
+    id: 'lastChoice', name: '마지막 선택', stars: 2, category: '공개형', trigger: 'window', disclosure: 'named', public: true, pool: 4,
+    uses: { count: 1, per: 'game' }, tableWide: true,
+    description: '턴 베팅이 끝난 뒤 선언. 남은 전원이 홀카드를 그대로 둘지 1장 바꿀지 비공개로 고르고 동시에 공개한다. 바꾸는 사람은 버릴 카드를 뒷면으로 내고 차례로 새 카드를 받은 뒤, 리버를 정상 공개한다.',
+    timing: '턴 베팅이 끝난 뒤 선언 기회에',
+  }),
 };
 
 export const ALL_AUGMENT_IDS = Object.keys(AUGMENTS) as AugmentId[];
@@ -883,6 +1283,8 @@ export function canHold(owned: readonly AugmentId[], id: AugmentId): boolean {
   if (owned.includes(id)) return false;
   const g = AUGMENTS[id].group;
   if (g && owned.some((o) => AUGMENTS[o].group === g)) return false;
+  // 동시 보유 불가 (카운팅 ↔ 잔상·소매치기·데드 카드 스캐너, 사이드 베팅 ↔ 빨대 꼽기)
+  if (owned.some((o) => AUGMENTS[id].conflicts?.includes(o) || AUGMENTS[o].conflicts?.includes(id))) return false;
   return true;
 }
 

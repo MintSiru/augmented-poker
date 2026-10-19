@@ -43,7 +43,7 @@ import {
   taxError,
   visibleBoard,
 } from './core.js';
-import type { ActiveParams, Declaration, GameState, HandResult, OwnedAugment, PlayerState, RespondAnswer, RespondState, ScheduledTask } from './types.js';
+import type { ActiveParams, Declaration, GameState, HandResult, NoteKind, OwnedAugment, PlayerState, RespondAnswer, RespondState, ScheduledTask } from './types.js';
 
 /** 효과 함수가 게임 흐름을 건드릴 때 쓰는 엔진 기능 (game.ts 가 제공) */
 export interface EngineOps {
@@ -60,7 +60,7 @@ export interface EngineOps {
   /** 베팅 행동 뒤 흐름 진행 (무임승차 콜) */
   afterBet(idx: number): void;
   /** 제안·입찰 시작: 응답이 모두 모이거나 15초가 지나면 효과의 respond.done 이 불린다 */
-  startRespond(spec: Pick<RespondState, 'kind' | 'augment' | 'ownerId' | 'participants' | 'params'>): void;
+  startRespond(spec: Pick<RespondState, 'kind' | 'augment' | 'ownerId' | 'participants' | 'params'> & { seconds?: number }): boolean;
 }
 
 export interface Ctx {
@@ -70,6 +70,10 @@ export interface Ctx {
   aug: OwnedAugment;
   /** 탈취한 선언: 선언 시점 조건(내 차례·내 올인 등)은 보지 않고 대상만 다시 검사 */
   stolen?: boolean;
+  /** 정보 통행료를 내고(또는 선택적 노출 응답 뒤) 다시 처리 중 */
+  tollPaid?: boolean;
+  /** 선택적 노출로 대상이 고른 카드 번호 */
+  pick?: number;
 }
 
 export interface ActiveEffect {
@@ -92,9 +96,26 @@ export interface RespondHooks {
   done(ctx: Ctx, r: RespondState): boolean;
 }
 
-export type InfoKind = 'clairvoyance' | 'thermal' | 'liedetector' | 'thermometer';
+/** 상대의 비공개 정보를 확인하는 증강의 종류 (역정보·거울·역추적·공개 청문회·도청·포커페이스가 반응) */
+export type InfoKind = 'clairvoyance' | 'thermal' | 'liedetector' | 'thermometer' | 'smell' | 'suitCheck' | 'link' | 'inquiry' | 'ammoCheck' | 'reviewNote';
 
-const INFO_NAME: Record<InfoKind, string> = { clairvoyance: '투시', thermal: '열화상 카메라', liedetector: '거짓말 탐지기', thermometer: '온도계' };
+const INFO_NAME: Record<InfoKind, string> = {
+  clairvoyance: '투시',
+  thermal: '열화상 카메라',
+  liedetector: '거짓말 탐지기',
+  thermometer: '온도계',
+  smell: '후각',
+  suitCheck: '무늬 감별',
+  link: '연결 고리',
+  inquiry: '탐문',
+  ammoCheck: '탄약 조사',
+  reviewNote: '복기 노트',
+};
+
+/** 역정보가 가짜 결과를 만들 수 있는 종류 */
+const FAKEABLE: readonly InfoKind[] = ['clairvoyance', 'thermal', 'liedetector', 'thermometer', 'smell', 'suitCheck', 'link'];
+/** 포커페이스가 막는 종류 (관찰자·도청은 따로 처리) */
+const POKER_FACE: readonly InfoKind[] = ['inquiry', 'reviewNote', 'ammoCheck'];
 
 export interface PassiveEffect {
   /** 받는 홀카드 수 */
@@ -185,6 +206,152 @@ function hiLoText(cards: Card[]): string {
   return `하이 ${hi}장, 로우 ${cards.length - hi}장`;
 }
 
+// ───────────────────────── 정보형 결과 전달 ─────────────────────────
+
+export interface InfoResult {
+  /** 이름 뒤에 붙는 문장 ("의 홀카드 — 하이 1장, 로우 1장" 등) */
+  text: string;
+  cards?: Card[];
+}
+
+const yn = (b: boolean) => (b ? '예' : '아니오');
+
+/** p 에 대한 진짜 정보. asker 는 보드 기준(연결 고리), pick 은 선택적 노출로 고른 카드 */
+export function infoAbout(state: GameState, p: PlayerState, kind: InfoKind, asker: PlayerState, pick?: number): InfoResult {
+  switch (kind) {
+    case 'clairvoyance': {
+      const c = pick !== undefined && p.hole[pick] ? p.hole[pick] : pickOne(p.hole, state.rng);
+      return { text: `의 홀카드 중 1장은 ${cardToken(c)}`, cards: [c] };
+    }
+    case 'thermal':
+      return { text: `의 홀카드 — ${hiLoText(p.hole)}` };
+    case 'liedetector':
+      return { text: ` — ${realMade(state, p) ? '메이드 핸드입니다' : '메이드 핸드가 아닙니다'}` };
+    case 'thermometer':
+      return { text: `의 홀카드 숫자 합은 15 ${p.hole.reduce((a, c) => a + rankOf(c), 0) >= 15 ? '이상' : '미만'}` };
+    case 'smell':
+      return { text: `의 홀카드는 포켓 페어인가? ${yn(pocketPair(p))}` };
+    case 'suitCheck':
+      return { text: `의 홀카드는 같은 무늬인가? ${yn(suited(p))}` };
+    case 'link':
+      return { text: `의 홀카드 중 보드와 숫자가 같은 카드: ${linkCount(state, p, asker)}장` };
+    case 'inquiry': {
+      // 잠복으로 숨긴 증강은 빠진다
+      const stars = p.augments.filter((x) => !x.hidden).map((x) => AUGMENTS[x.id].stars).sort((x, y) => y - x);
+      return { text: `의 증강 별 개수 — ${stars.length ? stars.map((s) => '★'.repeat(s)).join(', ') : '증강 없음'}` };
+    }
+    case 'ammoCheck':
+      return { text: `의 횟수 제한 증강 남은 사용 횟수 총합: ${p.augments.reduce((sum, a) => sum + (AUGMENTS[a.id].uses?.per === 'game' ? (a.usesLeft ?? 0) : 0), 0)}회` };
+    case 'reviewNote': {
+      const c = state.flopCategory[p.id];
+      return { text: c === undefined ? ' — 플랍 전 폴드' : `이(가) 플랍 시점에 완성했던 족보: ${CATEGORY_NAMES[c]}` };
+    }
+  }
+}
+
+/** 역정보: 실제와 다른 값 */
+function fakeInfo(state: GameState, p: PlayerState, kind: InfoKind, asker: PlayerState): InfoResult {
+  switch (kind) {
+    case 'clairvoyance': {
+      // 대상이 갖지 않았고 보는 사람이 이미 아는 카드도 아닌 가짜 카드
+      const known = new Set<Card>([...p.hole, ...asker.hole, ...visibleBoard(state, asker).filter((c): c is Card => !!c), ...publicCards(state)]);
+      const c = pickOne(fullDeck().filter((x) => !known.has(x)), state.rng);
+      return { text: `의 홀카드 중 1장은 ${cardToken(c)}`, cards: [c] };
+    }
+    case 'thermal': {
+      const n = p.hole.length;
+      const real = p.hole.filter((c) => rankOf(c) >= 10).length;
+      const h = pickOne(Array.from({ length: n + 1 }, (_, i) => i).filter((x) => x !== real), state.rng);
+      return { text: `의 홀카드 — 하이 ${h}장, 로우 ${n - h}장` };
+    }
+    case 'liedetector':
+      return { text: ` — ${realMade(state, p) ? '메이드 핸드가 아닙니다' : '메이드 핸드입니다'}` };
+    case 'thermometer':
+      return { text: `의 홀카드 숫자 합은 15 ${p.hole.reduce((a, c) => a + rankOf(c), 0) >= 15 ? '미만' : '이상'}` };
+    case 'smell':
+      return { text: `의 홀카드는 포켓 페어인가? ${yn(!pocketPair(p))}` };
+    case 'suitCheck':
+      return { text: `의 홀카드는 같은 무늬인가? ${yn(!suited(p))}` };
+    case 'link': {
+      const real = linkCount(state, p, asker);
+      const n = pickOne([0, 1, 2].filter((x) => x !== real && x <= p.hole.length), state.rng);
+      return { text: `의 홀카드 중 보드와 숫자가 같은 카드: ${n}장` };
+    }
+    default:
+      return infoAbout(state, p, kind, asker);
+  }
+}
+
+function pocketPair(p: PlayerState): boolean {
+  const r = p.hole.map(rankOf);
+  return r.some((x, i) => r.indexOf(x) !== i);
+}
+
+function suited(p: PlayerState): boolean {
+  return p.hole.length >= 2 && p.hole.every((c) => suitOf(c) === suitOf(p.hole[0]));
+}
+
+/** 연결 고리: 보는 사람에게 보이는 보드와 숫자가 같은 홀카드 수 */
+function linkCount(state: GameState, p: PlayerState, asker: PlayerState): number {
+  const ranks = new Set(visibleBoard(state, asker).filter((c): c is Card => !!c).map(rankOf));
+  return p.hole.filter((c) => ranks.has(rankOf(c))).length;
+}
+
+/**
+ * 정보형 증강 결과를 사용자에게 전달한다.
+ * 포커페이스 → 역정보(가짜 결과)·거울·역추적·공개 청문회 → 사용자 노트 → 도청 순서.
+ */
+export function deliverInfo(ctx: Ctx, t: PlayerState, kind: InfoKind, noteKind: NoteKind): void {
+  const { state, owner } = ctx;
+  const name = INFO_NAME[kind];
+  if (POKER_FACE.includes(kind) && findAug(t, 'pokerFace')) {
+    note(state, owner, noteKind, `${name}: ${t.name} — 정보 없음`, undefined, t.id);
+    return;
+  }
+  const fake = exposeInfo(ctx, t, kind) && FAKEABLE.includes(kind);
+  const res = fake ? fakeInfo(state, t, kind, owner) : infoAbout(state, t, kind, owner, ctx.pick);
+  note(state, owner, noteKind, `${name}: ${t.name}${res.text}`, res.cards, t.id);
+  // 도청: 같은 결과와 사용한 사람 (대상이 포커페이스면 잡히지 않음)
+  if (findAug(t, 'pokerFace')) return;
+  for (const w of state.players) {
+    if (w === owner || w === t || !active(w) || !findAug(w, 'wiretap')) continue;
+    countUse(state, 'wiretap');
+    note(state, w, 'info', `도청: ${owner.name}이(가) ${t.name}에게 「${name}」 — ${t.name}${res.text}`, res.cards, t.id);
+  }
+}
+
+/** 정보 통행료: 결과 확인 전에 사용자가 2BB를 내고 진행할지 고른다. 응답을 기다리게 되면 true (결과는 응답 뒤) */
+export function infoGate(ctx: Ctx, params: ActiveParams, t: PlayerState): boolean {
+  const { state, owner, aug } = ctx;
+  if (ctx.tollPaid || t === owner || AUGMENTS[aug.id].category !== '정보형') return false;
+  const toll = findAug(t, 'infoToll');
+  if (!toll || (toll.usesLeft ?? 0) <= 0 || state.respond) return false;
+  toll.usesLeft = (toll.usesLeft ?? 0) - 1;
+  revealPassive({ ...ctx, owner: t, aug: toll }, `— ${owner.name}에게 통행료 요구`);
+  ctx.ops.startRespond({ kind: 'offer', augment: 'infoToll', ownerId: t.id, participants: [owner.id], params: { targetId: owner.id, extra: { augment: aug.id, params } }, seconds: 10 });
+  return true;
+}
+
+/** 선택적 노출: 투시처럼 무작위 1장을 확인할 때 대상이 보여 줄 카드를 고른다. 응답을 기다리게 되면 true */
+function selectGate(ctx: Ctx, params: ActiveParams, t: PlayerState): boolean {
+  const { state, owner } = ctx;
+  if (ctx.pick !== undefined || t === owner) return false;
+  const sr = findAug(t, 'selectiveReveal');
+  if (!sr || (sr.usesLeft ?? 0) <= 0 || state.respond || t.hole.length < 2) return false;
+  sr.usesLeft = (sr.usesLeft ?? 0) - 1;
+  countUse(state, 'selectiveReveal');
+  ctx.ops.startRespond({ kind: 'collect', augment: 'selectiveReveal', ownerId: t.id, participants: [t.id], params: { targetId: owner.id, extra: { params } }, seconds: 10 });
+  return true;
+}
+
+/** 응답이 끝난 뒤 원래 정보형 증강을 이어서 처리 */
+function rerunInfo(ctx: Ctx, looker: PlayerState, augment: AugmentId, params: ActiveParams, pick?: number): void {
+  const aug = findAug(looker, augment);
+  if (!aug || !ACTIVE[augment]) return;
+  const decl = { immune: [] } as unknown as Declaration;
+  ACTIVE[augment]!.resolve({ state: ctx.state, ops: ctx.ops, owner: looker, aug, tollPaid: true, ...(pick !== undefined ? { pick } : {}) }, params, decl);
+}
+
 /** 정보형 증강 노출: 대상의 역정보/거울 훅을 부른다 */
 export function exposeInfo(ctx: Ctx, target: PlayerState, kind: InfoKind): boolean {
   let fake = false;
@@ -273,14 +440,14 @@ export function alchemyTarget(c: Card, up: number): Card | null {
   return `${'23456789TJQKA'[r - 2]}${suitOf(c)}` as Card;
 }
 
-/** 모두에게 공개된 카드 (보드·공개된 홀카드·경매·명추리·청문회 등) */
-function publicSeen(state: GameState): Card[] {
+/** viewer 가 볼 수 있는 공개된 카드 (보드·공개된 홀카드·경매·명추리·청문회 등) */
+function publicSeen(state: GameState, viewer: PlayerState): Card[] {
   return [
-    ...state.board.slice(0, state.boardRevealed),
+    ...visibleBoard(state, viewer).filter((c): c is Card => !!c),
     ...publicCards(state),
     ...state.used.filter((u) => u.kind === 'shown' || u.kind === 'called').map((u) => u.card),
     ...state.players.flatMap((p) => [...p.shepherdShown, ...(p.alchemy ? [p.alchemy.from, p.alchemy.to] : [])]),
-    ...(state.auctionCard ? [state.auctionCard] : []),
+    ...(state.auctionCard && !boardBlind(state, viewer) ? [state.auctionCard] : []),
   ];
 }
 
@@ -378,16 +545,8 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
     detail: (ctx, p) => `— 대상: ${nameOf(ctx.state, p.targetId ?? '')}`,
     resolve(ctx, params) {
       const t = targetOf(ctx, params)!;
-      let text = hiLoText(t.hole);
-      if (exposeInfo(ctx, t, 'thermal')) {
-        // 역정보: 실제와 다른 하이/로우 조합
-        const n = t.hole.length;
-        const real = t.hole.filter((c) => rankOf(c) >= 10).length;
-        const others = Array.from({ length: n + 1 }, (_, i) => i).filter((h) => h !== real);
-        const h = pickOne(others, ctx.state.rng);
-        text = `하이 ${h}장, 로우 ${n - h}장`;
-      }
-      note(ctx.state, ctx.owner, 'thermal', `열화상 카메라: ${t.name}의 홀카드 — ${text}`, undefined, t.id);
+      if (infoGate(ctx, params, t)) return;
+      deliverInfo(ctx, t, 'thermal', 'thermal');
     },
   },
 
@@ -395,15 +554,9 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
     check: opponentInHand,
     detail: (ctx, p) => `— 대상: ${nameOf(ctx.state, p.targetId ?? '')}`,
     resolve(ctx, params) {
-      const { state, owner } = ctx;
       const t = targetOf(ctx, params)!;
-      let card = pickOne(t.hole, state.rng);
-      if (exposeInfo(ctx, t, 'clairvoyance')) {
-        // 역정보: 대상이 갖지 않았고 내가 이미 아는 카드도 아닌 가짜 카드
-        const known = new Set<Card>([...t.hole, ...owner.hole, ...visibleBoard(state, owner).filter((c): c is Card => !!c), ...publicCards(state)]);
-        card = pickOne(fullDeck().filter((c) => !known.has(c)), state.rng);
-      }
-      note(state, owner, 'clairvoyance', `투시: ${t.name}의 홀카드 중 1장은 ${cardToken(card)}`, [card], t.id);
+      if (infoGate(ctx, params, t) || selectGate(ctx, params, t)) return;
+      deliverInfo(ctx, t, 'clairvoyance', 'clairvoyance');
     },
   },
 
@@ -424,9 +577,8 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
     detail: (ctx, p) => `— 대상: ${nameOf(ctx.state, p.targetId ?? '')}`,
     resolve(ctx, params) {
       const t = targetOf(ctx, params)!;
-      let made = realMade(ctx.state, t);
-      if (exposeInfo(ctx, t, 'liedetector')) made = !made;
-      note(ctx.state, ctx.owner, 'liedetector', `거짓말 탐지기: ${t.name} — ${made ? '메이드 핸드입니다' : '메이드 핸드가 아닙니다'}`, undefined, t.id);
+      if (infoGate(ctx, params, t)) return;
+      deliverInfo(ctx, t, 'liedetector', 'liedetector');
     },
   },
 
@@ -457,10 +609,8 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
     detail: (ctx, p) => `— 대상: ${nameOf(ctx.state, p.targetId ?? '')}`,
     resolve(ctx, params) {
       const t = targetOf(ctx, params)!;
-      // 잠복으로 숨긴 증강은 빠진다
-      const stars = t.augments.filter((x) => !x.hidden).map((x) => AUGMENTS[x.id].stars).sort((x, y) => y - x);
-      const text = stars.length ? stars.map((s) => '★'.repeat(s)).join(', ') : '증강 없음';
-      note(ctx.state, ctx.owner, 'inquiry', `탐문: ${t.name}의 증강 별 개수 — ${text}`, undefined, t.id);
+      if (infoGate(ctx, params, t)) return;
+      deliverInfo(ctx, t, 'inquiry', 'inquiry');
     },
   },
 
@@ -738,9 +888,8 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
     detail: (ctx, p) => `— 대상: ${nameOf(ctx.state, p.targetId ?? '')}`,
     resolve(ctx, params) {
       const t = targetOf(ctx, params)!;
-      exposeInfo(ctx, t, 'thermometer');
-      const sum = t.hole.reduce((a, c) => a + rankOf(c), 0);
-      note(ctx.state, ctx.owner, 'thermometer', `온도계: ${t.name}의 홀카드 숫자 합은 15 ${sum >= 15 ? '이상' : '미만'}`, undefined, t.id);
+      if (infoGate(ctx, params, t)) return;
+      deliverInfo(ctx, t, 'thermometer', 'thermometer');
     },
   },
 
@@ -1707,7 +1856,7 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
       if (params.choice !== 0 && params.choice !== 1) return '올릴지 내릴지 고르세요.';
       const to = alchemyTarget(owner.hole[params.cardIndex], params.choice);
       if (!to) return 'A와 2는 이어지지 않습니다.';
-      if (owner.hole.includes(to) || publicSeen(state).includes(to)) return `${cardToken(to)}은(는) 공개된 카드와 같아 바꿀 수 없습니다.`;
+      if (owner.hole.includes(to) || publicSeen(state, owner).includes(to)) return `${cardToken(to)}은(는) 공개된 카드와 같아 바꿀 수 없습니다.`;
       return null;
     },
     resolve(ctx, params) {
@@ -1843,7 +1992,7 @@ export const PASSIVE: Partial<Record<AugmentId, PassiveEffect>> = {
   disinfo: {
     onInfoExposed(ctx, looker, kind) {
       const { state, owner, aug } = ctx;
-      if (kind === 'thermometer' || (aug.usesLeft ?? 0) <= 0) return;
+      if (!FAKEABLE.includes(kind) || (aug.usesLeft ?? 0) <= 0) return;
       aug.usesLeft = 0;
       countUse(state, 'disinfo');
       addLog(state, `역정보 발동: ${looker.name}의 정보형 증강에 가짜 결과를 보여 줬습니다.`, { to: [owner.id] });
@@ -1854,21 +2003,10 @@ export const PASSIVE: Partial<Record<AugmentId, PassiveEffect>> = {
   mirror: {
     onInfoExposed(ctx, looker, kind) {
       const { state, owner } = ctx;
-      if (kind === 'thermometer') return;
+      if (!FAKEABLE.includes(kind) || !looker.hole.length) return;
       countUse(state, 'mirror');
-      let info: string;
-      let cards: Card[] | undefined;
-      if (kind === 'clairvoyance') {
-        if (!looker.hole.length) return;
-        const c = pickOne(looker.hole, state.rng);
-        cards = [c];
-        info = `${looker.name}의 홀카드 중 1장은 ${cardToken(c)}`;
-      } else if (kind === 'thermal') {
-        info = `${looker.name}의 홀카드 — ${hiLoText(looker.hole)}`;
-      } else {
-        info = `${looker.name} — ${realMade(state, looker) ? '메이드 핸드입니다' : '메이드 핸드가 아닙니다'}`;
-      }
-      note(state, owner, 'mirror', `거울: ${looker.name}이(가) 정보형 증강으로 나를 확인했습니다. ${info}`, cards, looker.id);
+      const info = infoAbout(state, looker, kind, owner);
+      note(state, owner, 'mirror', `거울: ${looker.name}이(가) 「${INFO_NAME[kind]}」으로 나를 확인했습니다. ${looker.name}${info.text}`, info.cards, looker.id);
     },
   },
 
@@ -2087,16 +2225,11 @@ export const PASSIVE: Partial<Record<AugmentId, PassiveEffect>> = {
       const { state, aug } = ctx;
       if ((aug.usesLeft ?? 0) <= 0 || !looker.hole.length) return;
       aug.usesLeft = 0;
-      let info: string;
-      if (kind === 'clairvoyance') {
-        const c = pickOne(looker.hole, state.rng);
-        state.used.push({ card: c, kind: 'called' });
-        info = `홀카드 중 1장은 ${cardToken(c)}`;
-      } else if (kind === 'thermal') info = `홀카드 — ${hiLoText(looker.hole)}`;
-      else if (kind === 'liedetector') info = realMade(state, looker) ? '메이드 핸드입니다' : '메이드 핸드가 아닙니다';
-      else info = `홀카드 숫자 합은 15 ${looker.hole.reduce((a, c) => a + rankOf(c), 0) >= 15 ? '이상' : '미만'}`;
+      const info = infoAbout(state, looker, kind, looker);
+      // 공개된 카드는 이미 공개된 카드로 기록 (카운팅·명추리)
+      for (const c of info.cards ?? []) state.used.push({ card: c, kind: 'called' });
       revealPassive(ctx, `— ${looker.name}이(가) 「${INFO_NAME[kind]}」으로 확인함`);
-      addLog(state, `공개 청문회: ${looker.name}의 ${info}`);
+      addLog(state, `공개 청문회: ${looker.name}${info.text}`);
     },
   },
 
@@ -2196,7 +2329,7 @@ export function windowOptions(state: GameState, ops: EngineOps, p: PlayerState):
   if (taxError(state, p)) return out;
   for (const a of p.augments) {
     const def = AUGMENTS[a.id];
-    if (def.trigger !== 'window') continue;
+    if (def.trigger !== 'window' || !ACTIVE[a.id]) continue;
     if (def.uses?.per === 'hand' ? a.usedThisHand : (a.usesLeft ?? 0) <= 0) continue;
     const ctx = { state, ops, owner: p, aug: a };
     if (windowSamples(state, p, a.id).some((params) => !ACTIVE[a.id]?.check(ctx, params, false))) out.push(a.id);

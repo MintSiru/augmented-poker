@@ -281,6 +281,7 @@ export function createGame(players: NewPlayer[], opts: CreateGameOptions = {}): 
     teams: [],
     teamsNext: null,
     records: {},
+    flopCategory: {},
     used: [],
     effects: freshEffects(),
     blackoutNext: false,
@@ -805,6 +806,7 @@ function resetHandState(state: GameState): void {
   state.staredown = null;
   state.nameItWinner = null;
   state.teams = [];
+  state.flopCategory = {};
   state.burns = [];
   state.boardRevealed = 0;
   state.deck = [];
@@ -1205,6 +1207,8 @@ function closeRound(state: GameState): void {
         addLog(state, '보관함: 보관한 카드를 쓰지 않아 사라졌습니다.', { to: [p.id] });
       }
       revealTo(state, revealTarget(state, 0), '플랍', false);
+      // 복기 노트용: 플랍 시점의 족보 종류
+      for (const p of state.players) if (live(p) && p.hole.length) state.flopCategory[p.id] = handEvalFor(state, p).value.category;
       if (startDiscardPhase(state)) return;
       if (startDeclareWindow(state, 'flop')) return;
       break;
@@ -1828,11 +1832,12 @@ export function immunityCandidates(state: GameState): string[] {
 // ───────────────────────── 제안·응답 ─────────────────────────
 
 /** 제안·입찰 시작: 진행 중인 단계를 멈추고 응답을 모은다 (서버는 15초 제한, 턴 타이머는 일시정지) */
-function startRespond(state: GameState, spec: Pick<RespondState, 'kind' | 'augment' | 'ownerId' | 'participants' | 'params'>): void {
-  if (state.respond) return;
+function startRespond(state: GameState, spec: Pick<RespondState, 'kind' | 'augment' | 'ownerId' | 'participants' | 'params'> & { seconds?: number }): boolean {
+  if (state.respond) return false;
   state.respond = { ...spec, answers: {}, stage: 'offer', resume: state.phase, seq: ++state.respondSeq };
   state.phase = 'respond';
   state.decisionSeq++;
+  return true;
 }
 
 /** 아직 응답하지 않은 사람 (추방된 사람은 기다리지 않는다) */
@@ -2650,7 +2655,7 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       err = applyAttach(state, p, action.cardIndex);
       break;
     case 'locker':
-      err = findAug(p, 'locker') || p.lockerReady ? applyLocker(state, p, action.cardIndex) : '보관함이 없습니다.';
+      err = findAug(p, 'locker') || p.lockerReady || p.lockerPending ? applyLocker(state, p, action.cardIndex) : '보관함이 없습니다.';
       break;
     case 'eitherOr':
       err = applyEitherOrPick(p, action.pick);

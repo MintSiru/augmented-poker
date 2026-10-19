@@ -32,7 +32,9 @@ export interface RespondState {
   /** 응답 (결과가 나올 때까지 당사자 뷰에만) */
   answers: Record<string, RespondAnswer>;
   /** 제안 내용 (선언자가 고른 카드 등, 당사자 뷰에만) */
-  params: { targetId?: string; cardIndex?: number; card?: Card };
+  params: { targetId?: string; cardIndex?: number; card?: Card; extra?: Record<string, unknown> };
+  /** 응답 제한 시간 (초, 기본 15) */
+  seconds?: number;
   /** 공동 환승: 수락 후 각자 카드 고르기 단계 */
   stage: 'offer' | 'pick';
   /** 응답이 끝나면 돌아갈 단계 */
@@ -489,6 +491,8 @@ export interface GameState {
   teams: string[][];
   /** 운명 공동체: 다음 핸드에 적용할 팀 */
   teamsNext: string[][] | null;
+  /** 복기 노트: 플랍이 공개된 시점에 각자 완성했던 족보 종류 (핸드마다) */
+  flopCategory: Record<string, number>;
   /** 기록관: 플레이어별 공개 행동 기록 (참여 핸드 수, 프리플랍 참여 수, 쇼다운에서 드러난 블러프 수) */
   records: Record<string, { hands: number; vpip: number; bluffs: number }>;
   used: UsedCard[];
