@@ -12,8 +12,8 @@ describe('표준 족보', () => {
     ['Ac Ad Ah As Kc 2d 3d', [Category.Quads, 14, 13], '포카드 (A)'],
     ['Kc Kd Kh 2s 2c 9d 8h', [Category.FullHouse, 13, 2], '풀하우스 (K / 2)'],
     ['Kc Kd Kh 2s 2c 2d 9h', [Category.FullHouse, 13, 2], '풀하우스 (K / 2)'],
-    ['Ac Jc 9c 6c 3c Kd Qh', [Category.Flush, 1, 14, 11, 9, 6, 3], '플러시 (A 하이)'],
-    ['Ac Jc 9c 6c 3c 2c Qh', [Category.Flush, 1, 14, 11, 9, 6, 3], '플러시 (A 하이)'],
+    ['Ac Jc 9c 6c 3c Kd Qh', [Category.Flush, 1, 14, 11, 9, 6, 3, 1], '플러시 (A 하이)'],
+    ['Ac Jc 9c 6c 3c 2c Qh', [Category.Flush, 1, 14, 11, 9, 6, 3, 1], '플러시 (A 하이)'],
     ['9c 8d 7h 6s 5c Kd 2h', [Category.Straight, 9, 1], '스트레이트 (9 하이)'],
     ['Ac 2d 3h 4s 5c Kd Qh', [Category.Straight, 5, 1], '스트레이트 (5 하이)'],
     ['Ac Kd Qh Js Tc 2d 3h', [Category.Straight, 14, 1], '스트레이트 (A 하이)'],
@@ -145,7 +145,7 @@ describe('편애 (와일드카드)', () => {
   });
   it('와일드가 무늬를 맞춰 플러시 (없는 가장 높은 숫자로)', () => {
     const r = evaluatePlayerHand(h('7c Ah'), h('Kh 9h 4h 2s 3d'), { wildRank: 7 });
-    expect(r.value.score).toEqual([Category.Flush, 1, 14, 13, 12, 9, 4]);
+    expect(r.value.score).toEqual([Category.Flush, 1, 14, 13, 12, 9, 4, 1]);
   });
   it('와일드는 그 숫자 자체로도 쓸 수 있다 (변형 미적용으로 표시)', () => {
     const r = evaluatePlayerHand(h('7c 8d'), h('5h 6d 9s Kc 2h'), { wildRank: 7 });
@@ -161,7 +161,7 @@ describe('편애 (와일드카드)', () => {
     expect(r.applied).toContain('wild');
     // 징검다리 없이 와일드만이면 5장 플러시
     expect(evaluatePlayerHand(h('7c 5h'), h('6h 9h Th Ks 2d'), { wildRank: 7 }).value.score).toEqual([
-      Category.Flush, 1, 14, 10, 9, 6, 5,
+      Category.Flush, 1, 14, 10, 9, 6, 5, 1,
     ]);
     // 와일드 없이 4장 플러시만이면 4장 플러시
     expect(evaluatePlayerHand(h('7c 5h'), h('6h 9h Th Ks 2d'), { fourFlush: true }).value.score[0]).toBe(Category.Flush);

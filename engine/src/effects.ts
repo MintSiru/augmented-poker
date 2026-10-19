@@ -4,14 +4,20 @@
 // 족보 변형(원형·4장 플러시·징검다리·편애)은 core.rulesFor, 동점 처리(키커 장인·절대 키커)는 showdown.ts 에서 처리한다.
 // 새 증강은 augments.ts 에 정의를 추가하고 여기에 효과를 등록하면 된다.
 
-import { Card, cardToken, fullDeck, isCard, rankOf } from './cards.js';
-import { AUGMENTS, AugmentId, isActiveAugment } from './augments.js';
-import { isMadeHand } from './evaluator.js';
+import { Card, cardToken, fullDeck, isCard, rankOf, rankName, suitOf } from './cards.js';
+import { AUGMENTS, AugmentId, isActiveAugment, isAugmentId } from './augments.js';
+import { blackjackCards, isMadeHand } from './evaluator.js';
 import { pickOne } from './rng.js';
+import { standingOf } from './standing.js';
 import {
+  active,
   addLog,
   announceNamed,
   basePhase,
+  boardBlind,
+  boardBlindIds,
+  invertedNow,
+  ownCardsHidden,
   cardsText,
   countUse,
   currentBlinds,
@@ -35,6 +41,12 @@ import type { ActiveParams, Declaration, GameState, HandResult, OwnedAugment, Pl
 export interface EngineOps {
   /** 폴드 처리 (보험 등 폴드 훅 포함). 흐름 진행은 하지 않는다 */
   fold(p: PlayerState, forced: boolean): void;
+  /** 서킷브레이커: 이번 베팅 라운드를 처음부터 다시 */
+  restartRound(): void;
+  /** 하이카드: 핸드를 무효화하고 홀카드 1장 승부 */
+  highCardDuel(): void;
+  /** 나 다시 돌아갈래: 핸드를 프리플랍부터 다시 */
+  restartHand(declarer: PlayerState): void;
   /** 베팅 행동 뒤 흐름 진행 (무임승차 콜) */
   afterBet(idx: number): void;
 }
@@ -57,7 +69,9 @@ export interface ActiveEffect {
   detail?(ctx: Ctx, params: ActiveParams): string;
 }
 
-export type InfoKind = 'clairvoyance' | 'thermal' | 'liedetector';
+export type InfoKind = 'clairvoyance' | 'thermal' | 'liedetector' | 'thermometer';
+
+const INFO_NAME: Record<InfoKind, string> = { clairvoyance: '투시', thermal: '열화상 카메라', liedetector: '거짓말 탐지기', thermometer: '온도계' };
 
 export interface PassiveEffect {
   /** 받는 홀카드 수 */
@@ -92,6 +106,46 @@ function opponentInHand(ctx: Ctx, params: ActiveParams): string | null {
   return null;
 }
 
+/** 보드로 계산되는 정보를 쓰는 증강: 실명 다트 대상은 쓸 수 없다 */
+function needSight(ctx: Ctx): string | null {
+  return boardBlind(ctx.state, ctx.owner) ? '실명 다트: 이번 핸드에는 보드를 볼 수 없어 쓸 수 없습니다.' : null;
+}
+
+/** 프리플랍 베팅 중 내 차례 (실명 다트·너 나가·하이카드) */
+function preflopMyTurn(ctx: Ctx): string | null {
+  const { state, owner } = ctx;
+  if (basePhase(state) !== 'betting' || state.street !== 'preflop' || state.boardRevealed > 0) return '프리플랍 베팅 중에만 선언할 수 있습니다.';
+  if (state.toAct !== idxOf(state, owner.id)) return '내 차례에만 선언할 수 있습니다.';
+  if (!live(owner)) return '핸드에 참여 중일 때만 쓸 수 있습니다.';
+  return null;
+}
+
+/** 지목형 증강(강제 집행·실명 다트·너 나가)의 대상 검사: 철벽이면 지목할 수 없다 */
+function targetable(t: PlayerState): string | null {
+  return t.ironWall ? `${t.name}은(는) 철벽으로 이번 핸드에 지목할 수 없습니다.` : null;
+}
+
+/** 강제 폴드 방어 (방탄조끼) */
+function blocksForcedFold(ctx: Ctx, victim: PlayerState): boolean {
+  for (const a of victim.augments) {
+    const hook = PASSIVE[a.id]?.blockForcedFold;
+    if (hook && hook({ ...ctx, owner: victim, aug: a })) return true;
+  }
+  return false;
+}
+
+/** 핸드 사이 (다음 핸드 배분 전) */
+function betweenHandsCheck(ctx: Ctx): string | null {
+  const b = basePhase(ctx.state);
+  if (b !== 'handEnd' && b !== 'augmentSelect') return '카드를 나눠 주기 전(핸드 사이)에만 선언할 수 있습니다.';
+  if (!active(ctx.owner)) return '게임에 참여하고 있지 않습니다.';
+  return null;
+}
+
+function validHoleIndex(owner: PlayerState, ci: unknown): ci is number {
+  return typeof ci === 'number' && Number.isInteger(ci) && ci >= 0 && ci < owner.hole.length;
+}
+
 function hiLoText(cards: Card[]): string {
   const hi = cards.filter((c) => rankOf(c) >= 10).length;
   return `하이 ${hi}장, 로우 ${cards.length - hi}장`;
@@ -106,6 +160,13 @@ export function exposeInfo(ctx: Ctx, target: PlayerState, kind: InfoKind): boole
   }
   return fake;
 }
+
+/** 면역으로 빠진 사람 표시 */
+function immuneText(state: GameState, ids: string[], what = '효과에서 빠짐'): string {
+  return ids.length ? ` (면역: ${ids.map((id) => nameOf(state, id)).join(', ')} ${what})` : '';
+}
+
+const SUIT_NAME: Record<string, string> = { s: '♠ 스페이드', h: '♥ 하트', d: '♦ 다이아몬드', c: '♣ 클로버' };
 
 function realMade(state: GameState, p: PlayerState): boolean {
   return isMadeHand(p.hole, evalBoard(state), rulesFor(p));
@@ -173,7 +234,7 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
 
   foresight: {
     check(ctx) {
-      const err = needLive(ctx);
+      const err = needLive(ctx) ?? needSight(ctx);
       if (err) return err;
       const { state, owner } = ctx;
       if (state.boardRevealed < 3 || state.boardRevealed > 4) return '플랍 이후, 리버가 나오기 전에만 쓸 수 있습니다.';
@@ -222,7 +283,7 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
       if (owner.actedPreflop) return '프리플랍에 행동하기 전에만 쓸 수 있습니다.';
       const { bb } = currentBlinds(state);
       if (owner.chips <= bb) return `칩이 1BB(${bb})보다 많아야 합니다.`;
-      const blind = state.effects.blackout && !state.effects.glass;
+      const blind = ownCardsHidden(state, owner);
       const ci = params.cardIndex;
       if (!blind && (typeof ci !== 'number' || !Number.isInteger(ci) || ci < 0 || ci >= owner.hole.length)) return '교체할 카드를 고르세요.';
       if (!state.deck.length) return '덱에 남은 카드가 없습니다.';
@@ -235,7 +296,7 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
       owner.chips -= bb;
       owner.mulliganFee += bb;
       state.deadMoney += bb;
-      const blind = state.effects.blackout && !state.effects.glass;
+      const blind = ownCardsHidden(state, owner);
       const ci = blind ? state.rng.int(owner.hole.length) : params.cardIndex!;
       const old = owner.hole[ci];
       const fresh = state.deck.shift()!;
@@ -264,7 +325,10 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
       state.board[i] = fresh;
       state.used.push({ card: old, kind: 'rewind' });
       state.effects.rewinds++;
-      addLog(state, `되감기: ${state.street === 'turn' ? '턴' : '리버'} ${cardToken(old)} 버림 → 새 카드 ${cardToken(fresh)}`);
+      const label = state.street === 'turn' ? '턴' : '리버';
+      const blind = boardBlindIds(state);
+      addLog(state, `되감기: ${label} ${cardToken(old)} 버림 → 새 카드 ${cardToken(fresh)}`, blind.length ? { except: blind } : {});
+      if (blind.length) addLog(state, `되감기: ${label} 카드가 바뀌었습니다`, { to: blind });
     },
   },
 
@@ -284,8 +348,12 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
       const bi = params.boardIndex!;
       state.effects.sealed.push(bi);
       const card = state.board[bi];
-      const fog = state.effects.fogSeers;
-      if (bi < 3 && fog.length && !state.effects.fogLifted) {
+      const blind = boardBlindIds(state);
+      const fog = state.effects.fogSeers.filter((id) => !blind.includes(id));
+      if (blind.length && !(bi < 3 && state.effects.fogSeers.length && !state.effects.fogLifted)) {
+        addLog(state, `봉인: 보드 ${bi + 1}번째 카드가 이번 핸드 족보 계산에서 빠집니다`, { to: blind });
+        addLog(state, `봉인: ${cardToken(card)}가 이번 핸드 족보 계산에서 빠집니다`, { except: blind });
+      } else if (bi < 3 && state.effects.fogSeers.length && !state.effects.fogLifted) {
         // 안개에 가려진 플랍 카드는 볼 수 있는 사람에게만 카드 이름을 보여 준다
         addLog(state, `봉인: 보드 ${bi + 1}번째 카드가 이번 핸드 족보 계산에서 빠집니다`, { except: fog });
         addLog(state, `봉인: 보드 ${bi + 1}번째 카드 ${cardToken(card)}가 이번 핸드 족보 계산에서 빠집니다`, { to: fog });
@@ -329,6 +397,8 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
       if (!live(owner) || !owner.allIn || owner.streetBet <= 0) return '리버에서 내가 올인한 뒤에만 쓸 수 있습니다.';
       const t = targetOf(ctx, params);
       if (!t || !live(t) || t.allIn) return '핸드에 남아 있는 상대를 고르세요.';
+      const wall = targetable(t);
+      if (wall) return wall;
       if (t.chips + t.streetBet <= owner.streetBet) return '나보다 칩이 많은 상대만 지목할 수 있습니다.';
       if (t.streetBet + t.streetShort >= state.currentBet) return '이미 콜한 상대입니다.';
       return null;
@@ -385,17 +455,20 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
       if (b !== 'handEnd' && b !== 'augmentSelect') return '카드를 나눠 주기 전(핸드 사이)에만 선언할 수 있습니다.';
       return null;
     },
-    resolve(ctx) {
+    resolve(ctx, _params, decl) {
       ctx.state.blackoutNext = true;
-      addLog(ctx.state, '암전: 다음 핸드는 모두 자기 홀카드를 보지 못한 채 진행합니다');
+      ctx.state.blackoutBy = ctx.owner.id;
+      ctx.state.blackoutImmuneNext = [...decl.immune];
+      addLog(ctx.state, `암전: 다음 핸드는 모두 자기 홀카드를 보지 못한 채 진행합니다${immuneText(ctx.state, decl.immune)}`);
     },
   },
 
   glassTable: {
     check: (ctx) => (handInProgress(ctx.state) ? null : '핸드가 진행 중일 때만 쓸 수 있습니다.'),
-    resolve(ctx) {
+    resolve(ctx, _params, decl) {
       ctx.state.effects.glass = true;
-      addLog(ctx.state, '유리 테이블: 이번 핸드는 모든 홀카드를 공개한 채 진행합니다');
+      ctx.state.effects.glassImmune = [...decl.immune];
+      addLog(ctx.state, `유리 테이블: 이번 핸드는 모든 홀카드를 공개한 채 진행합니다${immuneText(ctx.state, decl.immune)}`);
     },
   },
 
@@ -405,14 +478,16 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
       if (ctx.state.players.filter(live).length < 3) return '폴드하지 않은 사람이 3명 이상일 때만 쓸 수 있습니다.';
       return null;
     },
-    resolve(ctx) {
+    resolve(ctx, _params, decl) {
       const { state, ops } = ctx;
-      const victim = pickOne(state.players.filter(live), state.rng);
-      addLog(state, `러시안 룰렛: ${victim.name}에게 당첨!`);
-      for (const a of victim.augments) {
-        const hook = PASSIVE[a.id]?.blockForcedFold;
-        if (hook && hook({ ...ctx, owner: victim, aug: a })) return;
+      const pool = state.players.filter((p) => live(p) && !decl.immune.includes(p.id));
+      if (!pool.length) {
+        addLog(state, '러시안 룰렛: 추첨할 사람이 없습니다');
+        return;
       }
+      const victim = pickOne(pool, state.rng);
+      addLog(state, `러시안 룰렛: ${victim.name}에게 당첨!${immuneText(state, decl.immune, '추첨 제외')}`);
+      if (blocksForcedFold(ctx, victim)) return;
       ops.fold(victim, true);
     },
   },
@@ -427,7 +502,7 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
     resolve(ctx) {
       const e = ctx.state.effects;
       e.flips++;
-      addLog(ctx.state, e.flips % 2 ? '밥상 뒤집기: 이번 핸드는 족보가 역전되어 가장 낮은 패가 승리합니다' : '밥상 뒤집기: 족보 역전이 상쇄되어 원래 순위로 돌아갑니다');
+      addLog(ctx.state, invertedNow(ctx.state) ? '밥상 뒤집기: 이번 핸드는 족보가 역전되어 가장 낮은 패가 승리합니다' : '밥상 뒤집기: 족보 역전이 상쇄되어 원래 순위로 돌아갑니다');
     },
   },
 
@@ -438,20 +513,327 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
       if (!live(ctx.owner)) return '핸드에 참여 중일 때만 쓸 수 있습니다.';
       return null;
     },
-    resolve(ctx) {
+    resolve(ctx, _params, decl) {
       const fog = ctx.state.effects.fogSeers;
-      if (!fog.includes(ctx.owner.id)) fog.push(ctx.owner.id);
-      addLog(ctx.state, `짙은 안개: 이번 플랍은 ${ctx.owner.name}만 보고, 다른 사람에게는 쇼다운 때 공개됩니다`);
+      for (const id of [ctx.owner.id, ...decl.immune]) if (!fog.includes(id)) fog.push(id);
+      addLog(ctx.state, `짙은 안개: 이번 플랍은 ${ctx.owner.name}만 보고, 다른 사람에게는 쇼다운 때 공개됩니다${immuneText(ctx.state, decl.immune, '플랍을 봄')}`);
     },
   },
 
   deathTax: {
     check: (ctx) => (ctx.state.taxers.includes(ctx.owner.id) ? '이미 선언했습니다.' : null),
-    resolve(ctx) {
+    resolve(ctx, _params, decl) {
       const { state, owner } = ctx;
       state.taxers.push(owner.id);
+      if (decl.immune.length) state.taxExempt[owner.id] = [...decl.immune];
       addLog(state, `죽음과 세금: 이제부터 게임이 끝날 때까지 ${owner.name}을(를) 뺀 모두가 액티브·공개형 증강을 쓸 때마다 은행에 1BB를 냅니다 (선언자 ${state.taxers.length}명)`);
     },
+  },
+
+  // ═════════════════════════ 2차 풀 ═════════════════════════
+
+  thermometer: {
+    check: opponentInHand,
+    detail: (ctx, p) => `— 대상: ${nameOf(ctx.state, p.targetId ?? '')}`,
+    resolve(ctx, params) {
+      const t = targetOf(ctx, params)!;
+      exposeInfo(ctx, t, 'thermometer');
+      const sum = t.hole.reduce((a, c) => a + rankOf(c), 0);
+      note(ctx.state, ctx.owner, 'thermometer', `온도계: ${t.name}의 홀카드 숫자 합은 15 ${sum >= 15 ? '이상' : '미만'}`, undefined, t.id);
+    },
+  },
+
+  radar: {
+    check(ctx, params) {
+      const err = needLive(ctx) ?? needSight(ctx);
+      if (err) return err;
+      const bi = params.boardIndex;
+      const vis = visibleBoard(ctx.state, ctx.owner);
+      if (typeof bi !== 'number' || !Number.isInteger(bi) || !vis[bi]) return '내가 볼 수 있는 보드 카드를 고르세요.';
+      return null;
+    },
+    resolve(ctx, params) {
+      const { state, owner } = ctx;
+      const card = state.board[params.boardIndex!];
+      const r = rankOf(card);
+      const n = state.players.filter((p) => p !== owner && live(p) && p.hole.some((c) => rankOf(c) === r)).length;
+      note(state, owner, 'radar', `레이더: ${cardToken(card)}와 같은 숫자(${rankName(r)})의 홀카드를 가진 상대 ${n}명`, [card]);
+    },
+  },
+
+  colorForecast: {
+    check(ctx) {
+      const err = needLive(ctx) ?? needSight(ctx);
+      if (err) return err;
+      const { state, owner } = ctx;
+      if (basePhase(state) !== 'betting' || (state.street !== 'flop' && state.street !== 'turn')) return '플랍·턴 베팅 라운드에서만 쓸 수 있습니다.';
+      if (state.toAct !== idxOf(state, owner.id)) return '내 차례(행동 전)에만 쓸 수 있습니다.';
+      return null;
+    },
+    resolve(ctx) {
+      const { state, owner } = ctx;
+      const card = state.board[state.boardRevealed];
+      note(state, owner, 'forecast', `색채 예보: 다음 보드 카드(${state.boardRevealed === 3 ? '턴' : '리버'})의 무늬는 ${SUIT_NAME[suitOf(card)]}`);
+    },
+  },
+
+  leaderboard: {
+    check(ctx) {
+      const err = needLive(ctx) ?? needSight(ctx);
+      if (err) return err;
+      if (ctx.state.boardRevealed < 4) return '턴이 공개된 뒤에만 쓸 수 있습니다.';
+      return null;
+    },
+    resolve(ctx) {
+      const { rank, of } = standingOf(ctx.state, ctx.owner);
+      note(ctx.state, ctx.owner, 'leaderboard', `순위표: 남은 ${of}명 중 ${rank}등`);
+    },
+  },
+
+  destinyDraw: {
+    check(ctx, params) {
+      const err = betweenHandsCheck(ctx);
+      if (err) return err;
+      const { state, owner } = ctx;
+      if (owner.destinyCard) return '이미 다음 핸드 카드를 골랐습니다.';
+      const c = params.card;
+      if (!isCard(c)) return '받을 카드를 고르세요.';
+      if (owner.keptCard === c || owner.lockerStored === c) return '이미 내가 가져가는 카드입니다.';
+      if (state.players.some((p) => p !== owner && (p.keptCard === c || p.lockerStored === c || p.destinyCard === c))) return '다른 사람이 가져온 카드라 고를 수 없습니다.';
+      return null;
+    },
+    resolve(ctx, params) {
+      ctx.owner.destinyCard = params.card!;
+      note(ctx.state, ctx.owner, 'info', `데스티니 드로우: 다음 핸드에 ${cardToken(params.card!)}을(를) 홀카드로 받습니다.`, [params.card!]);
+    },
+  },
+
+  blindDraw: {
+    check(ctx, params) {
+      const err = needLive(ctx);
+      if (err) return err;
+      const { state, owner } = ctx;
+      if (basePhase(state) !== 'betting' || state.boardRevealed < 4) return '턴 공개 이후 베팅 라운드에서만 쓸 수 있습니다.';
+      if (!ownCardsHidden(state, owner) && !validHoleIndex(owner, params.cardIndex)) return '버릴 카드를 고르세요.';
+      if (!state.deck.length) return '덱에 남은 카드가 없습니다.';
+      return null;
+    },
+    detail: () => '— 홀카드 1장을 덱 맨 위 카드로 교체',
+    resolve(ctx, params) {
+      const { state, owner } = ctx;
+      const hidden = ownCardsHidden(state, owner);
+      const ci = hidden || !validHoleIndex(owner, params.cardIndex) ? state.rng.int(owner.hole.length) : params.cardIndex!;
+      const old = owner.hole[ci];
+      const fresh = state.deck.shift()!;
+      owner.hole[ci] = fresh;
+      owner.discarded.push(old);
+      state.used.push({ card: old, kind: 'discard' });
+      if (hidden) note(state, owner, 'info', '블라인드 드로우: 암전 중이라 무작위 1장을 교체했습니다.');
+      else note(state, owner, 'info', `블라인드 드로우: ${cardToken(old)} → ${cardToken(fresh)}`, [old, fresh]);
+    },
+  },
+
+  eitherOr: {
+    check(ctx) {
+      const { state, owner } = ctx;
+      if (basePhase(state) !== 'declare' || state.street !== 'flop') return '플랍 공개 직후 선언 기회에만 쓸 수 있습니다.';
+      if (!live(owner)) return '핸드에 참여 중일 때만 쓸 수 있습니다.';
+      const err = needSight(ctx);
+      if (err) return err;
+      if (state.players.some((p) => p.eitherOr)) return '이번 턴은 이미 양자택일 중입니다.';
+      if (!state.deck.length) return '덱에 남은 카드가 없습니다.';
+      return null;
+    },
+    resolve(ctx) {
+      const { state, owner } = ctx;
+      const cards = [state.board[3], state.deck.shift()!];
+      owner.eitherOr = { cards, pick: null };
+      note(state, owner, 'info', `양자택일: 턴 후보 ${cardsText(cards)} — 턴이 공개되기 전에 하나를 고르세요 (고르지 않으면 첫 번째)`, cards);
+    },
+  },
+
+  lastFork: {
+    check(ctx, params) {
+      const { state, owner } = ctx;
+      if (basePhase(state) !== 'declare' || state.street !== 'river') return '리버 공개 직후 선언 기회에만 쓸 수 있습니다.';
+      if (!live(owner)) return '핸드에 참여 중일 때만 쓸 수 있습니다.';
+      if (!ownCardsHidden(state, owner) && !validHoleIndex(owner, params.cardIndex)) return '버릴 카드를 고르세요.';
+      if (!state.deck.length) return '덱에 남은 카드가 없습니다.';
+      return null;
+    },
+    resolve(ctx, params) {
+      const { state, owner } = ctx;
+      const ci = validHoleIndex(owner, params.cardIndex) ? params.cardIndex! : state.rng.int(owner.hole.length);
+      const old = owner.hole[ci];
+      const fresh = state.deck.shift()!;
+      owner.hole[ci] = fresh;
+      state.used.push({ card: old, kind: 'shown' });
+      addLog(state, `마지막 갈림길: ${owner.name}이(가) 홀카드 ${cardToken(old)}을(를) 공개하고 버린 뒤 새 카드 1장을 받았습니다`);
+      if (ownCardsHidden(state, owner)) note(state, owner, 'info', '마지막 갈림길: 새 카드를 받았습니다 (암전 중)');
+      else note(state, owner, 'info', `마지막 갈림길: 새 카드 ${cardToken(fresh)}`, [fresh]);
+    },
+  },
+
+  blackjack: {
+    check(ctx) {
+      const { state, owner } = ctx;
+      if (basePhase(state) !== 'declare' || state.street !== 'river') return '리버 공개 직후(리버 베팅 전)에만 쓸 수 있습니다.';
+      if (!live(owner)) return '핸드에 참여 중일 때만 쓸 수 있습니다.';
+      const err = needSight(ctx);
+      if (err) return err;
+      if (owner.blackjackOn) return '이미 발동했습니다.';
+      if (!blackjackCards([...owner.hole, ...evalBoard(state)])) return '지금 카드로는 21을 만들 수 없습니다.';
+      return null;
+    },
+    resolve(ctx) {
+      ctx.owner.blackjackOn = true;
+      const bj = blackjackCards([...ctx.owner.hole, ...evalBoard(ctx.state)])!;
+      note(ctx.state, ctx.owner, 'info', `블랙잭: ${cardsText(bj)} = 21 — 가장 낮은 풀하우스와 동급으로 인정됩니다 (원래 족보가 더 높으면 원래 족보)`, bj);
+    },
+  },
+
+  circuitBreaker: {
+    check(ctx) {
+      const { state, owner } = ctx;
+      if (basePhase(state) !== 'betting' || state.toAct !== idxOf(state, owner.id)) return '내 차례에만 선언할 수 있습니다.';
+      if (!live(owner)) return '핸드에 참여 중일 때만 쓸 수 있습니다.';
+      if (state.round.raiseCap !== null) return '이미 다시 시작한 라운드입니다.';
+      if (state.round.raises < 3) return `이번 라운드 레이즈가 3번 이상이어야 합니다 (지금 ${state.round.raises}번).`;
+      return null;
+    },
+    resolve: (ctx) => ctx.ops.restartRound(),
+  },
+
+  bet: {
+    check(ctx, params) {
+      const { state, owner } = ctx;
+      if (basePhase(state) !== 'betting' || state.street !== 'preflop' || state.effects.bomb) return '프리플랍에만 쓸 수 있습니다.';
+      if (!live(owner)) return '핸드에 참여 중일 때만 쓸 수 있습니다.';
+      if (owner.actedPreflop) return '프리플랍 내 첫 행동 전에만 쓸 수 있습니다.';
+      const c = params.choice;
+      if (typeof c !== 'number' || !Number.isInteger(c) || c < 0 || c > 7) return '예측할 족보 종류를 고르세요.';
+      return null;
+    },
+    resolve(ctx, params) {
+      const names = ['하이카드', '원페어', '투페어', '트리플', '스트레이트', '플러시', '풀하우스', '포카드 이상'];
+      ctx.owner.betPrediction = params.choice!;
+      note(ctx.state, ctx.owner, 'bet', `내기할래?: 이번 핸드 우승 족보를 「${names[params.choice!]}」(으)로 예측했습니다.`);
+    },
+  },
+
+  rumor: {
+    check(ctx, params) {
+      if (!active(ctx.owner)) return '게임에 참여하고 있지 않습니다.';
+      return isAugmentId(params.augment) ? null : '소문낼 증강을 고르세요.';
+    },
+    detail: (_ctx, p) => (p.augment ? `— 「${AUGMENTS[p.augment].name}」` : ''),
+    resolve(ctx, params) {
+      addLog(ctx.state, `📢 소문: 이 테이블 누군가 「${AUGMENTS[params.augment!].name}」 증강을 가지고 있다`);
+    },
+  },
+
+  ironWall: {
+    check(ctx) {
+      const { state, owner } = ctx;
+      if (basePhase(state) !== 'betting' || state.street !== 'preflop') return '핸드 시작 시(프리플랍)에만 선언할 수 있습니다.';
+      if (!live(owner)) return '핸드에 참여 중일 때만 쓸 수 있습니다.';
+      if (owner.actedPreflop) return '프리플랍 내 첫 행동 전에만 선언할 수 있습니다.';
+      if (owner.ironWall) return '이미 선언했습니다.';
+      return null;
+    },
+    resolve(ctx) {
+      ctx.owner.ironWall = true;
+      addLog(ctx.state, `철벽: ${ctx.owner.name}은(는) 이번 핸드 동안 지목형 증강의 대상이 될 수 없습니다`);
+    },
+  },
+
+  padlock: {
+    check(ctx) {
+      const { state } = ctx;
+      if (basePhase(state) !== 'betting') return '베팅 라운드 중에만 쓸 수 있습니다.';
+      if (state.round.locked) return '이미 잠긴 라운드입니다.';
+      if (state.round.actions > 0) return '베팅 라운드가 시작되고 아무도 행동하기 전에만 선언할 수 있습니다.';
+      if (!active(ctx.owner)) return '게임에 참여하고 있지 않습니다.';
+      return null;
+    },
+    resolve(ctx) {
+      ctx.state.round.locked = true;
+      addLog(ctx.state, '자물쇠: 이번 베팅 라운드 동안 모두 액티브·공개형 증강을 쓸 수 없습니다 (카운터 스펠 포함)');
+    },
+  },
+
+  bombPot: {
+    check(ctx) {
+      return betweenHandsCheck(ctx) ?? (ctx.state.bombNext ? '이미 다음 핸드가 폭탄 팟입니다.' : null);
+    },
+    resolve(ctx) {
+      ctx.state.bombNext = true;
+      addLog(ctx.state, `폭탄 팟: 다음 핸드는 블라인드 대신 전원이 3BB를 내고 바로 플랍부터 시작합니다`);
+    },
+  },
+
+  underdog: {
+    check: betweenHandsCheck,
+    resolve(ctx) {
+      ctx.state.underdogLeft += 3;
+      addLog(ctx.state, '언더독: 다음 핸드부터 3핸드 동안 족보 순위가 뒤바뀌어 가장 낮은 패가 승리합니다');
+    },
+  },
+
+  blindDart: {
+    check(ctx, params) {
+      const err = preflopMyTurn(ctx);
+      if (err) return err;
+      const t = targetOf(ctx, params);
+      if (!t || !live(t)) return '핸드에 남아 있는 상대를 고르세요.';
+      return targetable(t);
+    },
+    detail: (ctx, p) => `— 대상: ${nameOf(ctx.state, p.targetId ?? '')}`,
+    resolve(ctx, params, decl) {
+      const { state } = ctx;
+      const t = targetOf(ctx, params)!;
+      if (decl.immune.includes(t.id)) return addLog(state, `실명 다트: ${t.name}이(가) 면역으로 막았습니다`);
+      if (t.ironWall) return addLog(state, `실명 다트: ${t.name}의 철벽에 막혔습니다`);
+      state.effects.blindDarted.push(t.id);
+      addLog(state, `실명 다트: ${t.name}은(는) 이번 핸드 동안 보드를 볼 수 없습니다 (쇼다운 때 공개)`);
+    },
+  },
+
+  getOut: {
+    check(ctx, params) {
+      const err = preflopMyTurn(ctx);
+      if (err) return err;
+      if (ctx.state.players.filter(live).length < 3) return '핸드에 3명 이상 남아 있을 때만 쓸 수 있습니다.';
+      const t = targetOf(ctx, params);
+      if (!t || !live(t)) return '핸드에 남아 있는 상대를 고르세요.';
+      return targetable(t);
+    },
+    detail: (ctx, p) => `— 대상: ${nameOf(ctx.state, p.targetId ?? '')}`,
+    resolve(ctx, params, decl) {
+      const { state, ops } = ctx;
+      const t = targetOf(ctx, params)!;
+      if (decl.immune.includes(t.id)) return addLog(state, `너 나가: ${t.name}이(가) 면역으로 막았습니다`);
+      if (t.ironWall) return addLog(state, `너 나가: ${t.name}의 철벽에 막혔습니다`);
+      addLog(state, `너 나가: ${t.name}을(를) 이번 핸드에서 내보냅니다`);
+      if (blocksForcedFold(ctx, t)) return;
+      ops.fold(t, true);
+    },
+  },
+
+  highCardDuel: {
+    check: preflopMyTurn,
+    resolve: (ctx) => ctx.ops.highCardDuel(),
+  },
+
+  restart: {
+    check(ctx) {
+      const { state, owner } = ctx;
+      if (basePhase(state) !== 'betting' || state.toAct !== idxOf(state, owner.id)) return '쇼다운 전, 베팅 중 내 차례에만 선언할 수 있습니다.';
+      if (!live(owner)) return '핸드에 참여 중일 때만 쓸 수 있습니다.';
+      if (state.effects.restarted) return '다시 시작한 핸드에서는 쓸 수 없습니다.';
+      return null;
+    },
+    resolve: (ctx) => ctx.ops.restartHand(ctx.owner),
   },
 
   // 면제권: 블라인드 차례에 엔진이 자동으로 선언한다
@@ -464,7 +846,9 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
     },
     onCountered(ctx, params) {
       const { bb, sb } = currentBlinds(ctx.state);
-      putChips(ctx.owner, params.blind === 'SB' ? sb : bb);
+      const paid = putChips(ctx.owner, params.blind === 'SB' ? sb : bb);
+      ctx.owner.blindPosted += paid;
+      ctx.state.round.startBets[ctx.owner.id] = ctx.owner.streetBet;
       ctx.owner.lastAction = `${params.blind} ${ctx.owner.streetBet}`;
     },
   },
@@ -557,9 +941,9 @@ export const PASSIVE: Partial<Record<AugmentId, PassiveEffect>> = {
   },
 
   disinfo: {
-    onInfoExposed(ctx, looker) {
+    onInfoExposed(ctx, looker, kind) {
       const { state, owner, aug } = ctx;
-      if ((aug.usesLeft ?? 0) <= 0) return;
+      if (kind === 'thermometer' || (aug.usesLeft ?? 0) <= 0) return;
       aug.usesLeft = 0;
       countUse(state, 'disinfo');
       addLog(state, `역정보 발동: ${looker.name}의 정보형 증강에 가짜 결과를 보여 줬습니다.`, { to: [owner.id] });
@@ -570,6 +954,7 @@ export const PASSIVE: Partial<Record<AugmentId, PassiveEffect>> = {
   mirror: {
     onInfoExposed(ctx, looker, kind) {
       const { state, owner } = ctx;
+      if (kind === 'thermometer') return;
       countUse(state, 'mirror');
       let info: string;
       let cards: Card[] | undefined;
@@ -584,6 +969,76 @@ export const PASSIVE: Partial<Record<AugmentId, PassiveEffect>> = {
         info = `${looker.name} — ${realMade(state, looker) ? '메이드 핸드입니다' : '메이드 핸드가 아닙니다'}`;
       }
       note(state, owner, 'mirror', `거울: ${looker.name}이(가) 정보형 증강으로 나를 확인했습니다. ${info}`, cards, looker.id);
+    },
+  },
+
+  traceback: {
+    onInfoExposed(ctx, looker, kind) {
+      countUse(ctx.state, 'traceback');
+      note(ctx.state, ctx.owner, 'traceback', `역추적: ${looker.name}이(가) 나에게 「${INFO_NAME[kind]}」을(를) 썼습니다.`, undefined, looker.id);
+    },
+  },
+
+  locker: {
+    onFold(ctx) {
+      if (ctx.owner.hole.length) {
+        ctx.owner.lockerPending = true;
+        addLog(ctx.state, '보관함: 핸드가 끝나면 보관할 홀카드 1장을 고르세요.', { to: [ctx.owner.id] });
+      }
+    },
+  },
+
+  lateBloomer: {
+    onHandEnd(ctx, result) {
+      const { state, owner } = ctx;
+      if (!active(owner)) return;
+      const won = result.won[owner.id] ?? 0;
+      if (won <= 0) {
+        if (result.showdown && result.entries.some((e) => e.id === owner.id)) owner.lateLosses++;
+        return;
+      }
+      if (owner.lateLosses < 3) {
+        owner.lateLosses = 0;
+        return;
+      }
+      const bonus = Math.min(Math.floor(won * 0.5), 20 * currentBlinds(state).bb);
+      const payers = state.players.filter((p) => p !== owner && active(p) && p.chips > 0);
+      const share = payers.length ? Math.floor(bonus / payers.length) : 0;
+      let got = 0;
+      for (const p of payers) {
+        const pay = Math.min(share, p.chips);
+        p.chips -= pay;
+        got += pay;
+      }
+      owner.chips += got;
+      owner.lateLosses = 0;
+      result.extras.push(`${owner.name}: 왕귀 +${got} (남은 플레이어가 나눠 냄)`);
+      revealPassive(ctx, `— 3번 진 뒤 첫 승리: ${got}칩을 남은 플레이어에게서 받음`);
+    },
+  },
+
+  totem: {
+    onHandEnd(ctx, result) {
+      const { state, owner, aug } = ctx;
+      if (!result.showdown || owner.chips > 0 || !owner.wentAllIn || (aug.usesLeft ?? 0) <= 0) return;
+      if (!result.entries.some((e) => e.id === owner.id)) return;
+      const need = 10 * currentBlinds(state).bb;
+      let got = 0;
+      const winners = Object.entries(result.won)
+        .filter(([id, w]) => id !== owner.id && w > 0)
+        .sort((a, b) => b[1] - a[1])
+        .map(([id]) => playerById(state, id)!);
+      for (const w of winners) {
+        const take = Math.min(need - got, w.chips);
+        w.chips -= take;
+        got += take;
+        if (got >= need) break;
+      }
+      if (got <= 0) return;
+      owner.chips += got;
+      aug.usesLeft = 0;
+      result.extras.push(`${owner.name}: 불사의 토템 — 탈락하지 않고 ${got}칩을 남김`);
+      revealPassive(ctx, `— 승자의 몫에서 ${got}칩을 남겨 받고 계속합니다`);
     },
   },
 
@@ -610,7 +1065,8 @@ export function windowOptions(state: GameState, ops: EngineOps, p: PlayerState):
     const def = AUGMENTS[a.id];
     if (def.trigger !== 'window' || (a.usesLeft ?? 0) <= 0) continue;
     // 봉인은 카드 선택 전이므로 아무 칸이나 가능한지만 본다
-    const params: ActiveParams = a.id === 'seal' ? { boardIndex: [0, 1, 2, 3, 4].find((i) => !state.effects.sealed.includes(i)) } : {};
+    const params: ActiveParams =
+      a.id === 'seal' ? { boardIndex: [0, 1, 2, 3, 4].find((i) => !state.effects.sealed.includes(i)) } : a.id === 'lastFork' ? { cardIndex: 0 } : {};
     if (!ACTIVE[a.id]?.check({ state, ops, owner: p, aug: a }, params, false)) out.push(a.id);
   }
   return out;

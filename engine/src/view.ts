@@ -16,7 +16,9 @@ import {
   LegalActions,
   playerRules,
 } from './game.js';
-import { holeVisible, live, publicCards, taxFor, visibleBoard } from './core.js';
+import { boardBlind, glassShows, holeVisible, invertedNow, live, lockError, publicCards, taxFor, VARIANT_AUG, visibleBoard } from './core.js';
+import { fullDeck } from './cards.js';
+import { immunityCandidates } from './game.js';
 import { countingInfo, CountingView } from './counting.js';
 import { ACTIVE } from './effects.js';
 import type { GameState, NoteKind, Phase, PlayerState, Street } from './types.js';
@@ -47,6 +49,10 @@ export interface MyAugmentView extends AugmentInfo {
   armed: boolean | null;
   fakeId: AugmentId | null;
   fakeUsed: boolean | null;
+  /** 짝수/홀수 동맹: 고른 쪽 */
+  parity: 'even' | 'odd' | null;
+  /** 1차 / 2차 풀 */
+  pool: 1 | 2;
   /** 지금 버튼으로 쓸 수 있는가 (최종 검증은 서버) */
   usableNow: boolean;
   /** 못 쓰는 이유 또는 쓸 수 있는 시점 (툴팁) */
@@ -73,6 +79,8 @@ export interface PublicPlayerView {
   out: boolean;
   place: number | null;
   sittingOut: boolean;
+  /** 추방됨 (핸드가 끝나면 자리에서 사라짐) */
+  kicked: boolean;
   isDealer: boolean;
   isSB: boolean;
   isBB: boolean;
@@ -149,6 +157,8 @@ export interface ReactionView {
   counteredBy: string | null;
   /** 나에게만: 카운터 스펠로 무효화할 수 있는가 */
   canCounter: boolean;
+  /** 나에게만: 면역으로 이 공개형 효과에서 빠질 수 있는가 */
+  canImmune: boolean;
   /** 이 뒤에 대기 중인 선언 수 */
   queued: number;
 }
@@ -167,6 +177,17 @@ export interface TableView {
   /** 죽음과 세금 선언자 이름 */
   taxers: string[];
   notes: string[];
+  /** 언더독: 이번 핸드 포함 남은 핸드 수 (0 = 없음) */
+  underdogHands: number;
+  bomb: boolean;
+  /** 실명 다트 대상 이름 (공개 정보) */
+  blindDarted: string[];
+  /** 서킷브레이커로 다시 시작한 라운드 (레이즈 1회 제한) */
+  raiseCap: number | null;
+  /** 이번 라운드 레이즈 수 */
+  roundRaises: number;
+  /** 자물쇠가 걸린 라운드 */
+  locked: boolean;
 }
 
 export interface PlayerView {
@@ -174,8 +195,16 @@ export interface PlayerView {
   handNumber: number;
   level: number;
   blinds: { sb: number; bb: number };
+  /** 이번 레벨의 핸드 수 */
   handsPerLevel: number;
   handsUntilLevelUp: number;
+  /** 블라인드 설정 (공개 정보) */
+  blindSchedule: 'standard' | 'x1.5';
+  levelMode: 'auto' | 'fixed';
+  /** 남은 인원 (탈락·추방 제외, 자리에 앉은 사람) */
+  alive: number;
+  /** 중도 참여 대기자 (이름만) */
+  joiners: { id: string; name: string }[];
   street: Street;
   /** 공개된 보드 (짙은 안개로 가려진 카드는 null) */
   board: (Card | null)[];
@@ -191,6 +220,10 @@ export interface PlayerView {
   reaction: ReactionView | null;
   you: {
     id: string;
+    /** 자리에 앉아 있는가 (중도 참여 대기자·자리를 비켜 준 탈락자는 false) */
+    seated: boolean;
+    /** 중도 참여 대기 중: 증강 선택 진행 상황 */
+    joining: { picksDone: number; picksTotal: number } | null;
     seat: number;
     chips: number;
     out: boolean;
@@ -212,6 +245,28 @@ export interface PlayerView {
     counting: CountingView | null;
     /** 액티브·공개형 증강을 쓸 때 낼 세금 (죽음과 세금) */
     tax: number;
+    /** 실명 다트로 보드를 못 보는 중 */
+    boardBlind: boolean;
+    /** 2차 증강의 본인 전용 정보 */
+    extra: {
+      /** 왕귀: 쇼다운에서 진 횟수 (보유 시) */
+      lateLosses: number | null;
+      /** 내기할래?: 이번 핸드 예측 (0~7) */
+      betPrediction: number | null;
+      /** 데스티니 드로우: 다음 핸드에 받을 카드 */
+      destinyCard: Card | null;
+      /** 데스티니 드로우에서 고를 수 없는 카드 (내가 이미 가져가는 카드) */
+      destinyBlocked: Card[];
+      /** 보관함: 이번 프리플랍에 바꿀 수 있는 카드 / 핸드 종료 후 보관할 카드 선택 */
+      lockerReady: Card | null;
+      lockerChoose: Card[] | null;
+      /** 양자택일: 턴 후보와 고른 쪽 */
+      eitherOr: { cards: Card[]; pick: number | null } | null;
+      /** 쇼맨십: 공개 여부 선택 */
+      showChoose: boolean;
+      ironWall: boolean;
+      blackjackOn: boolean;
+    };
   };
   result: HandResultView | null;
   log: { seq: number; hand: number; text: string }[];
@@ -229,13 +284,6 @@ function publicAugName(p: PlayerState, id: AugmentId): string {
   if (!a || !a.publicId) return AUGMENTS[id].name;
   return AUGMENTS[a.publicId].name;
 }
-
-const VARIANT_AUG: Record<AppliedVariant, AugmentId> = {
-  fourFlush: 'fourFlush',
-  gapStraight: 'gapStraight',
-  wrapStraight: 'wrapStraight',
-  wild: 'favoritism',
-};
 
 /** 내 홀카드(볼 수 있을 때) + 내가 볼 수 있는 보드(봉인 제외) + 내 증강만으로 계산한 내 족보 */
 function myHand(state: GameState, me: PlayerState, hole: Card[], board: (Card | null)[]): MyHandView | null {
@@ -266,6 +314,24 @@ function myHand(state: GameState, me: PlayerState, hole: Card[], board: (Card | 
   };
 }
 
+/** 버튼 사용 가능 여부를 판단할 기본 인자 (실제 값은 화면에서 고른다) */
+function sampleParams(state: GameState, me: PlayerState, id: AugmentId, targets: string[]): Record<string, unknown> {
+  const d = AUGMENTS[id];
+  if (d.target) return { targetId: targets[0] };
+  switch (id) {
+    case 'radar':
+      return { boardIndex: visibleBoard(state, me).findIndex((c) => !!c) };
+    case 'destinyDraw':
+      return { card: fullDeck().find((c) => c !== me.keptCard && c !== me.lockerStored) };
+    case 'bet':
+      return { choice: 0 };
+    case 'rumor':
+      return { augment: 'observer' };
+    default:
+      return { cardIndex: 0 };
+  }
+}
+
 function targetsFor(state: GameState, me: PlayerState, id: AugmentId): string[] {
   const def = AUGMENTS[id];
   if (!def.target || !ACTIVE[id]) return [];
@@ -275,10 +341,14 @@ function targetsFor(state: GameState, me: PlayerState, id: AugmentId): string[] 
 
 /** 보는 사람(viewerId)에게 허용된 정보만으로 만든 뷰 */
 export function getPlayerView(state: GameState, viewerId: string): PlayerView {
-  const me = state.players.find((p) => p.id === viewerId);
+  const seatedMe = state.players.find((p) => p.id === viewerId);
+  const joiner = state.joiners.find((j) => j.player.id === viewerId);
+  const me = seatedMe ?? joiner?.player ?? state.retired.find((p) => p.id === viewerId);
   if (!me) throw new Error('unknown player');
+  // 자리에 앉지 않은 사람(중도 참여 대기자 등)은 테이블의 공개 정보만 본다
+  const seated = !!seatedMe;
   const { sb, bb } = currentBlinds(state);
-  const hpl = state.options.handsPerLevel;
+  const hpl = state.levelHands;
   const board = visibleBoard(state, me);
   const pot = state.players.reduce((s, p) => s + p.contributed, 0) + state.deadMoney;
   const e = state.effects;
@@ -298,6 +368,7 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     out: p.out,
     place: p.place,
     sittingOut: p.sittingOut,
+    kicked: p.kicked,
     isDealer: state.dealerIdx === i && p.inHand,
     isSB: state.sbIdx === i && p.inHand,
     isBB: state.bbIdx === i && p.inHand,
@@ -311,7 +382,7 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
         return { name: p === me ? d.name : publicAugName(p, a.id), stars: d.stars, description: d.description };
       }),
     // 홀카드는 볼 수 있는 경우에만 (쇼다운·유리 테이블, 본인은 암전이 아닐 때)
-    shownCards: p.inHand && (p.shown || e.glass) && holeVisible(state, p, me) ? [...p.hole] : null,
+    shownCards: p.inHand && (p.shown || glassShows(state, p)) && holeVisible(state, p, me) ? [...p.hole] : null,
     shepherdShown: [...p.shepherdShown],
     connected: true,
     isHost: false,
@@ -357,15 +428,18 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
   const head = state.phase === 'reaction' ? state.reaction?.queue[0] : undefined;
   if (head) {
     const mine = head.ownerId === me.id;
+    // 소문처럼 선언자까지 숨기는 선언은 본인 외에는 누가 썼는지 보이지 않는다
+    const hideWho = head.secret && !mine;
     reaction = {
-      declarerId: head.ownerId,
-      declarerName: nameById(head.ownerId),
+      declarerId: hideWho ? '' : head.ownerId,
+      declarerName: hideWho ? '누군가' : nameById(head.ownerId),
       label: mine ? AUGMENTS[head.augment].name : head.anonymous ? '비공개 증강' : head.publicName ?? '증강',
       anonymous: head.anonymous,
       mine,
       countered: head.countered,
       counteredBy: head.counteredBy ? nameById(head.counteredBy) : null,
-      canCounter: counterCandidates(state).includes(me.id),
+      canCounter: seated && counterCandidates(state).includes(me.id),
+      canImmune: seated && immunityCandidates(state).includes(me.id),
       queued: (state.reaction?.queue.length ?? 1) - 1,
     };
   }
@@ -386,13 +460,19 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     count: state.phase === 'augmentSelect' ? state.players.filter((p) => p.pickOptions).length : 0,
   };
 
-  const myHole = me.inHand && holeVisible(state, me, me) ? [...me.hole] : [];
-  const hand = me.inHand && !me.folded ? myHand(state, me, myHole, board) : null;
+  const myHole = seated && me.inHand && holeVisible(state, me, me) ? [...me.hole] : [];
+  // 실명 다트 대상에게는 보드로 계산되는 정보(현재 족보 등)도 보내지 않는다
+  const blind = boardBlind(state, me);
+  const hand = seated && me.inHand && !me.folded && !blind ? myHand(state, me, myHole, board) : null;
 
   const myAugments: MyAugmentView[] = me.augments.map((a) => {
     const d = AUGMENTS[a.id];
-    const targets = targetsFor(state, me, a.id);
-    const why = d.trigger === 'button' ? canUseNow(state, me, a, d.target ? { targetId: targets[0] } : { cardIndex: 0 }) : null;
+    const targets = seated ? targetsFor(state, me, a.id) : [];
+    const why = !seated
+      ? '자리에 앉은 뒤에 쓸 수 있습니다.'
+      : d.trigger === 'button'
+        ? canUseNow(state, me, a, sampleParams(state, me, a.id, targets))
+        : null;
     return {
       ...info(a.id),
       trigger: d.trigger,
@@ -410,19 +490,21 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
       armed: a.armed ?? null,
       fakeId: a.fakeId ?? null,
       fakeUsed: a.fakeUsed ?? null,
-      usableNow: d.trigger === 'button' && !why,
+      parity: a.parity ?? null,
+      pool: d.pool ?? 1,
+      usableNow: seated && d.trigger === 'button' && !why,
       hint: why ?? d.timing,
     };
   });
 
   const log = state.log
-    .filter((x) => (!x.to || x.to.includes(viewerId)) && !(x.except && x.except.includes(viewerId)))
+    .filter((x) => x.seq >= me.logFrom && (!x.to || x.to.includes(viewerId)) && !(x.except && x.except.includes(viewerId)))
     .slice(-150)
     .map((x) => ({ seq: x.seq, hand: x.hand, text: x.text }));
 
-  const declOpts = declareOptions(state, me);
+  const declOpts = seated ? declareOptions(state, me) : [];
   const counting =
-    findAug(me, 'counting') && me.inHand && !me.out
+    seated && !blind && findAug(me, 'counting') && me.inHand && !me.out
       ? countingInfo(
           myHole,
           board.filter((c): c is Card => !!c),
@@ -438,7 +520,11 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     level: state.levelIndex + 1,
     blinds: { sb, bb },
     handsPerLevel: hpl,
-    handsUntilLevelUp: (state.levelIndex + 1) * hpl - state.handNumber + 1,
+    handsUntilLevelUp: state.levelStartHand + hpl - state.handNumber,
+    blindSchedule: state.options.blindSchedule,
+    levelMode: state.options.levelMode,
+    alive: state.players.filter((p) => !p.out && !p.kicked).length,
+    joiners: state.joiners.map((j) => ({ id: j.player.id, name: j.player.name })),
     street: state.street,
     board,
     sealed: [...e.sealed],
@@ -456,15 +542,23 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
       blackout: e.blackout,
       fog: e.fogSeers.length > 0 && !e.fogLifted,
       fogHidden: board.some((c) => c === null),
-      flips: e.flips,
-      inverted: e.flips % 2 === 1,
+      flips: e.flips + (e.underdog ? 1 : 0),
+      inverted: invertedNow(state),
       rewinds: e.rewinds,
       taxers: state.taxers.map(nameById),
       notes: tableNotes(state),
+      underdogHands: (e.underdog ? 1 : 0) + state.underdogLeft,
+      bomb: e.bomb,
+      blindDarted: e.fogLifted ? [] : e.blindDarted.map(nameById),
+      raiseCap: state.phase === 'betting' || state.phase === 'reaction' ? state.round.raiseCap : null,
+      roundRaises: state.round.raises,
+      locked: !!lockError(state),
     },
     reaction,
     you: {
       id: me.id,
+      seated,
+      joining: joiner ? { picksDone: joiner.picksTotal - joiner.picksLeft, picksTotal: joiner.picksTotal } : null,
       seat: me.seat,
       chips: me.chips,
       out: me.out,
@@ -475,17 +569,30 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
       notes: me.notes
         .filter((n) => n.hand === state.handNumber || n.kind === 'inquiry')
         .map((n) => ({ hand: n.hand, kind: n.kind, text: n.text, cards: n.cards ? [...n.cards] : null, targetId: n.targetId ?? null })),
-      legal: legalActions(state, me.id),
+      legal: seated ? legalActions(state, me.id) : null,
       pick: me.pickOptions ? me.pickOptions.map(info) : null,
-      pickDone: state.phase === 'augmentSelect' && !me.pickOptions,
+      pickDone: seated && state.phase === 'augmentSelect' && !me.pickOptions,
       discard:
-        state.phase === 'discard' && live(me) && me.hole.length === 3
+        seated && state.phase === 'discard' && live(me) && me.hole.length === 3
           ? { pending: me.pendingDiscard === null, chosen: me.pendingDiscard }
           : null,
       declare: declOpts.length ? { options: declOpts.map(info) } : null,
-      attach: me.attachPending && state.phase === 'handEnd' ? { cards: [...me.hole] } : null,
+      attach: seated && me.attachPending && state.phase === 'handEnd' ? { cards: [...me.hole] } : null,
       counting,
       tax: taxFor(state, me),
+      boardBlind: blind,
+      extra: {
+        lateLosses: findAug(me, 'lateBloomer') ? me.lateLosses : null,
+        betPrediction: me.betPrediction,
+        destinyCard: me.destinyCard,
+        destinyBlocked: [me.keptCard, me.lockerStored].filter((c): c is Card => !!c),
+        lockerReady: seated && me.lockerReady && live(me) && state.street === 'preflop' ? me.lockerReady : null,
+        lockerChoose: seated && me.lockerPending && state.phase === 'handEnd' ? [...me.hole] : null,
+        eitherOr: me.eitherOr ? { cards: [...me.eitherOr.cards], pick: me.eitherOr.pick } : null,
+        showChoose: seated && me.showPending && state.phase === 'handEnd',
+        ironWall: me.ironWall,
+        blackjackOn: me.blackjackOn,
+      },
     },
     result,
     log,
@@ -498,7 +605,12 @@ function tableNotes(state: GameState): string[] {
   const e = state.effects;
   const out: string[] = [];
   if (state.phase !== 'augmentSelect') {
-    if (e.flips % 2 === 1) out.push('족보 역전: 낮은 패가 승리');
+    if (invertedNow(state)) out.push(e.underdog && e.flips === 0 ? '언더독: 낮은 패가 승리' : '족보 역전: 낮은 패가 승리');
+    else if (e.underdog) out.push('언더독 + 밥상 뒤집기: 역전 상쇄');
+    if (e.bomb) out.push('폭탄 팟');
+    if (e.blindDarted.length && !e.fogLifted) out.push(`실명 다트: ${e.blindDarted.map((id) => state.players.find((p) => p.id === id)?.name ?? '?').join(', ')}`);
+    if (state.round.raiseCap !== null && (state.phase === 'betting' || state.phase === 'reaction')) out.push('서킷브레이커: 레이즈 1회 제한');
+    if (state.round.locked) out.push('자물쇠: 증강 사용 불가');
     if (e.glass) out.push('유리 테이블');
     if (e.blackout) out.push('암전');
     if (e.fogSeers.length && !e.fogLifted) out.push('짙은 안개');
@@ -506,6 +618,8 @@ function tableNotes(state: GameState): string[] {
     if (e.rewinds) out.push(`되감기 ${e.rewinds}회`);
   }
   if (state.blackoutNext) out.push('다음 핸드 암전');
+  if (state.bombNext) out.push('다음 핸드 폭탄 팟');
+  if (state.underdogLeft > 0) out.push(`언더독 ${state.underdogLeft}핸드 남음`);
   return out;
 }
 

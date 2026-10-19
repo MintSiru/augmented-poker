@@ -11,7 +11,7 @@ function guard(state: GameState): ActionResult | null {
 }
 
 /** 특정 증강을 강제로 지급 */
-export function debugGiveAugment(state: GameState, playerId: string, augment: AugmentId, wildRank?: number): ActionResult {
+export function debugGiveAugment(state: GameState, playerId: string, augment: AugmentId, wildRank?: number, parity?: 'even' | 'odd'): ActionResult {
   const g = guard(state);
   if (g) return g;
   const p = getPlayer(state, playerId);
@@ -19,7 +19,7 @@ export function debugGiveAugment(state: GameState, playerId: string, augment: Au
   if (!isAugmentId(augment)) return { ok: false, error: '알 수 없는 증강' };
   if (findAug(p, augment)) return { ok: false, error: '이미 보유한 증강' };
   const wr = typeof wildRank === 'number' && wildRank >= 2 && wildRank <= 14 ? wildRank : undefined;
-  grantAugment(state, p, augment, wr);
+  grantAugment(state, p, augment, wr, parity);
   return { ok: true };
 }
 
@@ -27,12 +27,18 @@ export function debugGiveAugment(state: GameState, playerId: string, augment: Au
 export function debugSetNextDeal(state: GameState, deal: DebugDeal): ActionResult {
   const g = guard(state);
   if (g) return g;
-  const all: Card[] = [...(deal.board ?? []), ...Object.values(deal.hands ?? {}).flat()];
+  const all: Card[] = [...(deal.board ?? []), ...(deal.burns ?? []), ...(deal.deck ?? []), ...Object.values(deal.hands ?? {}).flat()];
   if (!all.every(isCard)) return { ok: false, error: '카드 형식이 올바르지 않습니다 (예: As, Td, 7c)' };
   if (new Set(all).size !== all.length) return { ok: false, error: '같은 카드가 두 번 지정되었습니다.' };
   if ((deal.board ?? []).length > 5) return { ok: false, error: '보드는 최대 5장' };
+  if ((deal.burns ?? []).length > 3) return { ok: false, error: '번 카드는 최대 3장' };
   for (const id of Object.keys(deal.hands ?? {})) if (!getPlayer(state, id)) return { ok: false, error: `플레이어 없음: ${id}` };
-  state.nextDeal = { board: deal.board ? [...deal.board] : undefined, hands: deal.hands ? { ...deal.hands } : undefined };
+  state.nextDeal = {
+    board: deal.board ? [...deal.board] : undefined,
+    hands: deal.hands ? { ...deal.hands } : undefined,
+    burns: deal.burns ? [...deal.burns] : undefined,
+    deck: deal.deck ? [...deal.deck] : undefined,
+  };
   return { ok: true };
 }
 
@@ -75,7 +81,7 @@ export interface DebugView {
     discarded: Card[];
     keptCard: Card | null;
     shepherdLied: boolean;
-    augments: { id: AugmentId; name: string; usesLeft: number | null; usedThisHand: boolean; revealed: boolean; publicName: string | null; wildRank: string | null; armed: boolean | null; fakeId: AugmentId | null }[];
+    augments: { id: AugmentId; name: string; usesLeft: number | null; usedThisHand: boolean; revealed: boolean; publicName: string | null; wildRank: string | null; armed: boolean | null; fakeId: AugmentId | null; parity: string | null }[];
   }[];
 }
 
@@ -93,7 +99,7 @@ export function getDebugView(state: GameState): DebugView | null {
     forceLevelUp: state.forceLevelUp,
     taxers: [...state.taxers],
     reaction: (state.reaction?.queue ?? []).map((d) => ({ owner: d.ownerId, augment: AUGMENTS[d.augment].name, countered: d.countered })),
-    players: state.players.map((p) => ({
+    players: [...state.players, ...state.joiners.map((j) => j.player)].map((p) => ({
       id: p.id,
       name: p.name,
       chips: p.chips,
@@ -111,6 +117,7 @@ export function getDebugView(state: GameState): DebugView | null {
         wildRank: a.wildRank ? rankName(a.wildRank) : null,
         armed: a.armed ?? null,
         fakeId: a.fakeId ?? null,
+        parity: a.parity ?? null,
       })),
     })),
   };

@@ -6,6 +6,7 @@
 // - 키커 장인: 족보·키커까지 완전히 같으면 보유자가 이긴다.
 // - 절대 키커: 같은 숫자의 같은 족보면 키커와 상관없이 보유자가 이긴다. 단, 둘 다 보드 5장만으로 만든 완전 동점은 스플릿.
 // - 동점 처리 증강은 역전 중에도 "보유자가 이긴다"로 동작한다. 양쪽 모두 해당하면 서로 상쇄.
+// - 순혈: 최종 족보에 홀카드 2장이 모두 쓰였으면 같은 족보 종류끼리는 숫자와 상관없이 보유자가 이긴다 (역전 중에도 보유자 승리, 둘 다 조건을 만족하면 원래 비교).
 
 import type { Card } from './cards.js';
 import type { AugmentId } from './augments.js';
@@ -17,6 +18,8 @@ export interface Contender {
   bestCards: Card[];
   kickerMaster: boolean;
   absoluteKicker: boolean;
+  /** 순혈 보유 + 홀카드 2장이 모두 최종 족보에 쓰였는가 */
+  pureBlood?: boolean;
 }
 
 export interface CompareContext {
@@ -37,6 +40,11 @@ function boardOnly(c: Contender, board: Card[]): boolean {
 }
 
 export function compareContenders(a: Contender, b: Contender, ctx: CompareContext): Outcome {
+  if (a.score[0] === b.score[0] && !!a.pureBlood !== !!b.pureBlood) {
+    // 순혈이 실제로 승부를 뒤집었을 때만 "순혈 적용"으로 표시
+    const plain = compareScores(a.score, b.score) * (ctx.inverted ? -1 : 1);
+    return a.pureBlood ? { result: 1, by: plain > 0 ? null : 'pureBlood' } : { result: -1, by: null };
+  }
   const raw = compareScores(a.score, b.score);
   const base = ctx.inverted ? -raw : raw;
   if (raw === 0) {

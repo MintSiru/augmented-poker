@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { io as connectClient, type Socket } from 'socket.io-client';
 import { createAppServer, type AppServer } from '../src/index.js';
 import type { Room } from '../src/rooms.js';
-import type { ChatMessage, GameEnvelope, LobbyState } from '../src/protocol.js';
+import type { ChatMessage, GameEnvelope, LobbyState, RoomListItem } from '../src/protocol.js';
 import type { GameState } from '../../engine/src/index.js';
 
 type Res = { ok: boolean; error?: string; code?: string; token?: string; playerId?: string };
@@ -27,7 +27,7 @@ const CARD_RE = /(?<![A-Za-z0-9])[2-9TJQKA][shdc](?![A-Za-z0-9])/g;
 
 /** 서버가 만든 봉투(envelope)에 받는 사람이 알 수 없는 카드가 들어 있지 않은지 (만드는 순간의 서버 상태 기준) */
 function assertEnvelopePrivate(env: GameEnvelope, g: GameState, forId: string) {
-  const me = g.players.find((p) => p.id === forId)!;
+  const me = (g.players.find((p) => p.id === forId) ?? g.joiners.find((j) => j.player.id === forId)?.player ?? g.retired.find((p) => p.id === forId))!;
   const e = g.effects;
   const fogged = (i: number) => i < 3 && e.fogSeers.length > 0 && !e.fogLifted && !e.fogSeers.includes(forId);
   const forbidden = new Set<string>();
@@ -124,9 +124,9 @@ class VClient {
     return r;
   }
 
-  async join(code: string, name: string) {
+  async join(code: string, name: string, prevToken?: string) {
     await this.ready();
-    const r = await this.emit('room:join', { code, name });
+    const r = await this.emit('room:join', { code, name, prevToken });
     if (r.ok) Object.assign(this, { id: r.playerId, token: r.token, code: r.code });
     return r;
   }
@@ -185,7 +185,8 @@ describe('방과 접속', () => {
     await waitFor(() => !!a.env && !!b.env, 2000, 'game start');
     expect(a.env!.view.players).toHaveLength(3);
     expect(a.env!.view.players.filter((p) => p.isBot)).toHaveLength(1);
-    // 시작 후에는 새로 입장할 수 없다
+    // 중도 참여를 끄면 시작 후에는 새로 입장할 수 없다
+    expect((await a.emit('room:settings', { midJoin: false })).ok).toBe(true);
     const c = new VClient(s.port);
     const r = await c.join(a.code, '민수');
     expect(r.ok).toBe(false);
@@ -316,6 +317,7 @@ describe('한 판 끝까지', () => {
     await b.join(a.code, 'B');
     await c.join(a.code, 'C');
     const room = s.rooms.rooms.get(a.code)!;
+    expect((await a.emit('room:settings', { autoKickMinutes: 0 })).ok).toBe(true);
     // 빨리 끝나지 않도록 A, C는 체크/콜만
     for (const cl of [a, c]) {
       cl.play = (e: GameEnvelope) => {
@@ -350,6 +352,212 @@ describe('한 판 끝까지', () => {
     const r = await a2.emit('room:resume', { token: a.token });
     expect(r.ok).toBe(true);
     await waitFor(() => kicked !== '', 2000, 'kick');
+  });
+});
+
+/** 체크/콜만 하는 정책 (게임이 빨리 끝나지 않도록) */
+function passive(cl: VClient) {
+  cl.play = (e: GameEnvelope) => {
+    const v = e.view;
+    if (v.you.pick?.length) void cl.emit('game:action', { type: 'pick', augment: v.you.pick[0].id });
+    else if (v.you.discard?.pending) void cl.emit('game:action', { type: 'discard', cardIndex: 0 });
+    else if (v.you.declare) void cl.emit('game:action', { type: 'declare', augment: null });
+    else if (v.you.attach) void cl.emit('game:action', { type: 'attach', cardIndex: 0 });
+    else if (v.you.legal) void cl.emit('game:action', v.you.legal.check ? { type: 'check' } : { type: 'call' });
+  };
+}
+
+describe('공개 방 목록과 방 설정', () => {
+  it('공개 방은 다른 브라우저의 목록에 바로 나타나고 실시간으로 갱신된다 (게임 내용은 없음)', async () => {
+    const s = await start();
+    const watcher = new VClient(s.port);
+    let list: RoomListItem[] = [];
+    let raw = '';
+    watcher.sock.on('rooms', (l: RoomListItem[]) => {
+      list = l;
+      raw = JSON.stringify(l);
+    });
+    await watcher.ready();
+    await watcher.emit('rooms:watch', { on: true });
+    const a = new VClient(s.port);
+    const b = new VClient(s.port);
+    passive(a);
+    await a.ready();
+    expect((await a.emit('room:create', { name: '철수', roomName: '즐거운 방', isPublic: true })).ok).toBe(true);
+    const code = s.rooms.publicList()[0].code;
+    a.code = code;
+    await b.ready();
+    expect((await b.emit('room:create', { name: '영희', isPublic: false })).ok).toBe(true);
+    await waitFor(() => list.length === 1 && list[0].name === '즐거운 방', 2000, 'public list');
+    expect(list[0]).toEqual({
+      code, name: '즐거운 방', players: 1, maxPlayers: 8, status: 'waiting', midJoin: true, joinable: true,
+      startingChips: 1000, smallBlind: 10, bigBlind: 20,
+    });
+    // 비공개 방의 기본 이름
+    const priv = [...s.rooms.rooms.values()].find((r) => !r.isPublic)!;
+    expect(priv.name).toBe('영희님의 방');
+    // 목록에서 입장 → 인원 변화 반영
+    const c = new VClient(s.port);
+    passive(c);
+    expect((await c.join(code, '민수')).ok).toBe(true);
+    await waitFor(() => list[0]?.players === 2, 2000, 'count update');
+    // 설정 변경 반영, 시작하면 게임 중 + 대기 중인 방이 위로
+    expect((await a.emit('room:settings', { startingChips: 2000, bigBlind: 40, fillBots: true, botCount: 1, autoKickMinutes: 0 })).ok).toBe(true);
+    await waitFor(() => list[0]?.bigBlind === 40, 2000, 'settings in list');
+    expect((await a.emit('room:settings', { isPublic: false })).ok).toBe(true);
+    await waitFor(() => list.length === 0, 2000, 'hidden');
+    expect((await a.emit('room:settings', { isPublic: true })).ok).toBe(true);
+    const d = new VClient(s.port);
+    await d.ready();
+    await d.emit('room:create', { name: 'D', roomName: '새 방' });
+    expect((await a.emit('room:start')).ok).toBe(true);
+    await waitFor(() => list.length === 2 && list[1].status === 'playing', 3000, 'playing status');
+    expect(list[0].name).toBe('새 방');
+    expect(list[1].players).toBe(3);
+    // 목록에는 게임 내용이 절대 들어가지 않는다
+    expect(raw).not.toMatch(/"(view|players\"\s*:\s*\[|hole|board|log|augments)"/);
+    expect(raw).not.toMatch(CARD_RE);
+    // 꽉 차면 입장 불가로 표시
+    expect((await a.emit('room:settings', { maxPlayers: 3 })).ok).toBe(true);
+    await waitFor(() => list[1]?.joinable === false, 2000, 'full');
+    const e = new VClient(s.port);
+    expect((await e.join(code, 'E')).ok).toBe(false);
+    // 방이 삭제되면 목록에서 사라진다
+    for (const r of [...s.rooms.rooms.values()]) r.destroy();
+    await waitFor(() => list.length === 0, 2000, 'deleted');
+  });
+
+  it('동시에 존재할 수 있는 방 수를 제한한다', async () => {
+    server = await createAppServer(0, { maxRooms: 2, timeScale: 0.005 });
+    const s = server;
+    const cs = [new VClient(s.port), new VClient(s.port), new VClient(s.port)];
+    for (const c of cs) await c.ready();
+    expect((await cs[0].emit('room:create', { name: 'A' })).ok).toBe(true);
+    expect((await cs[1].emit('room:create', { name: 'B' })).ok).toBe(true);
+    const r = await cs[2].emit('room:create', { name: 'C' });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('최대 2개');
+  });
+
+  it('설정값 검증, 10BB 미만 시작 불가, 시작 후 칩·블라인드 잠금, 설정이 게임에 반영', async () => {
+    const s = await start(false, 1);
+    const a = new VClient(s.port);
+    const b = new VClient(s.port);
+    a.auto = b.auto = false;
+    await a.create('A');
+    await b.join(a.code, 'B');
+    for (const bad of [{ startingChips: 100 }, { startingChips: 20000 }, { bigBlind: 1 }, { bigBlind: 2000 }, { turnSeconds: 10 }, { turnSeconds: 61 },
+      { levelHands: 3 }, { levelHands: 31 }, { levelMode: 'x' }, { blindSchedule: 'double' }, { autoKickMinutes: 7 }, { midJoin: 'yes' }]) {
+      expect((await a.emit('room:settings', bad)).ok, JSON.stringify(bad)).toBe(false);
+    }
+    expect((await b.emit('room:settings', { startingChips: 5000 })).ok).toBe(false);
+    expect((await a.emit('room:settings', { startingChips: 500, bigBlind: 100 })).ok).toBe(true);
+    const r = await a.emit('room:start');
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('10BB');
+    expect((await a.emit('room:settings', { startingChips: 2000, bigBlind: 50, levelMode: 'fixed', levelHands: 5, blindSchedule: 'x1.5', turnSeconds: 45 })).ok).toBe(true);
+    expect((await a.emit('room:start')).ok).toBe(true);
+    await waitFor(() => !!a.env, 2000, 'start');
+    const room = s.rooms.rooms.get(a.code)!;
+    expect(room.game!.options).toMatchObject({ startingChips: 2000, bigBlind: 50, levelMode: 'fixed', fixedLevelHands: 5, blindSchedule: 'x1.5' });
+    expect(a.env!.view.blinds).toEqual({ sb: 25, bb: 50 });
+    expect(a.env!.view.handsPerLevel).toBe(5);
+    // 시작 후: 칩·블라인드는 잠기고, 나머지는 바꿀 수 있다 (상승 주기는 다음 레벨부터)
+    expect((await a.emit('room:settings', { startingChips: 3000 })).ok).toBe(false);
+    expect((await a.emit('room:settings', { bigBlind: 20 })).ok).toBe(false);
+    expect((await a.emit('room:settings', { blindSchedule: 'standard' })).ok).toBe(false);
+    expect((await a.emit('room:settings', { turnSeconds: 20, maxPlayers: 6, midJoin: false, autoKickMinutes: 10, isPublic: false, levelHands: 8 })).ok).toBe(true);
+    expect(room.settings.turnSeconds).toBe(20);
+    expect(room.game!.options.fixedLevelHands).toBe(8);
+    expect((await b.emit('room:settings', { turnSeconds: 30 })).ok).toBe(false);
+  });
+});
+
+describe('추방', () => {
+  it('방장은 연결 끊긴 플레이어만 추방할 수 있고, 추방된 토큰은 다시 들어올 수 없다', async () => {
+    const s = await start(false, 0.02);
+    const a = new VClient(s.port);
+    const b = new VClient(s.port);
+    const c = new VClient(s.port);
+    for (const cl of [a, b, c]) passive(cl);
+    await a.create('A');
+    await b.join(a.code, 'B');
+    await c.join(a.code, 'C');
+    await a.emit('room:settings', { autoKickMinutes: 0 });
+    // 게임 전에는 추방 없음
+    expect((await a.emit('room:kick', { playerId: b.id })).ok).toBe(false);
+    await a.emit('room:start');
+    await waitFor(() => !!a.env && !!c.env, 2000, 'start');
+    const room = s.rooms.rooms.get(a.code)!;
+    // 접속 중인 플레이어는 추방할 수 없고, 방장이 아니면 거부
+    expect((await a.emit('room:kick', { playerId: b.id })).error).toContain('접속 중');
+    b.sock.disconnect();
+    await waitFor(() => a.env!.connected[b.id] === false, 2000, 'disconnect seen');
+    expect((await c.emit('room:kick', { playerId: b.id })).error).toContain('방장');
+    expect((await a.emit('room:kick', { playerId: b.id })).ok).toBe(true);
+    await waitFor(() => a.env!.view.players.find((p) => p.id === b.id)?.kicked === true || !a.env!.view.players.some((p) => p.id === b.id), 2000, 'kicked shown');
+    await waitFor(() => !room.game!.players.some((p) => p.id === b.id) || room.game!.phase === 'gameOver', 10000, 'removed after hand');
+    expect(room.game!.log.some((e) => e.text.includes('B님이 추방되었습니다'))).toBe(true);
+    // 같은 토큰으로 재접속·재입장 불가
+    const r = await b.reconnect(s.port);
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('추방');
+    const r2 = await b.join(a.code, 'B2', b.token);
+    expect(r2.ok).toBe(false);
+  });
+
+  it('자동 추방: 설정한 시간 이상 연결이 끊기면 추방되고 게임은 계속된다', async () => {
+    const s = await start(false, 0.005); // 3분 → 0.9초
+    const a = new VClient(s.port);
+    const b = new VClient(s.port);
+    const c = new VClient(s.port);
+    for (const cl of [a, b, c]) passive(cl);
+    await a.create('A');
+    await b.join(a.code, 'B');
+    await c.join(a.code, 'C');
+    await a.emit('room:settings', { autoKickMinutes: 3 });
+    const room = s.rooms.rooms.get(a.code)!;
+    await a.emit('room:start');
+    await waitFor(() => !!room.game && room.game.handNumber >= 1 && room.game.phase === 'betting', 3000, 'start');
+    b.sock.disconnect();
+    await waitFor(() => room.game!.log.some((e) => e.text.includes('B님이 추방되었습니다')), 5000, 'auto kick');
+    const hand = room.game!.handNumber;
+    await waitFor(() => room.game!.handNumber > hand + 1 || room.game!.phase === 'gameOver', 10000, 'game continues');
+    expect(room.game!.players.some((p) => p.id === b.id)).toBe(false);
+  });
+});
+
+describe('중도 참여', () => {
+  it('게임 중에 들어오면 관전하며 증강을 고르고, 다음 핸드부터 자리에 앉는다 (이전 비공개 정보 없음)', async () => {
+    const s = await start(false, 0.02);
+    const a = new VClient(s.port);
+    const b = new VClient(s.port);
+    for (const cl of [a, b]) passive(cl);
+    await a.create('A');
+    await b.join(a.code, 'B');
+    await a.emit('room:settings', { fillBots: true, botCount: 1, autoKickMinutes: 0, levelMode: 'fixed', levelHands: 4 });
+    const room = s.rooms.rooms.get(a.code)!;
+    const checked = watchRoom(room);
+    await a.emit('room:start');
+    await waitFor(() => !!room.game && room.game.handNumber >= 2 && room.game.phase === 'betting', 10000, 'hand 2');
+    const c = new VClient(s.port);
+    passive(c);
+    let firstJoinEnv: GameEnvelope | null = null;
+    c.sock.on('game', (e: GameEnvelope) => (firstJoinEnv ??= e));
+    const r = await c.join(a.code, 'C');
+    expect(r.ok).toBe(true);
+    await waitFor(() => !!firstJoinEnv, 2000, 'joiner view');
+    const v0 = firstJoinEnv!.view;
+    expect(v0.you.seated).toBe(false);
+    expect(v0.you.joining?.picksTotal).toBe(room.game!.pickRounds);
+    expect(v0.log.some((x) => x.text.includes('핸드 #1'))).toBe(false);
+    await waitFor(() => !!a.env!.view.joiners.find((j) => j.name === 'C') || a.env!.view.players.some((p) => p.name === 'C'), 3000, 'joiner shown to others');
+    await waitFor(() => !!room.game!.players.find((p) => p.id === c.id), 20000, 'seated');
+    const pc = room.game!.players.find((p) => p.id === c.id)!;
+    expect(pc.augments.length).toBe(v0.you.joining!.picksTotal);
+    expect(room.game!.log.some((e) => e.text.includes('C님이 참여했습니다'))).toBe(true);
+    await waitFor(() => c.env?.view.you.seated === true && (c.env.view.you.hole.length > 0 || c.env.view.phase !== 'betting'), 5000, 'playing');
+    expect(checked()).toBeGreaterThan(10);
   });
 });
 
@@ -449,13 +657,27 @@ describe('서버 측 검증과 디버그 차단', () => {
     await a.emit('room:start');
     let debugState = false;
     a.sock.on('debug:state', () => (debugState = true));
-    for (const ev of ['debug:reveal', 'debug:give', 'debug:deal', 'debug:chips']) {
+    for (const ev of ['debug:reveal', 'debug:give', 'debug:deal', 'debug:chips', 'debug:levelup', 'debug:disconnect']) {
       const r = await a.emit(ev, { on: true, playerId: a.id, augment: 'foresight', chips: 99999 }, 400);
       expect(r).toEqual({ ok: false, error: 'timeout' }); // 응답하는 핸들러가 없음
     }
     expect(debugState).toBe(false);
     expect(s.rooms.rooms.get(a.code)!.game!.options.debug).toBe(false);
     expect(a.env!.debug).toBe(false);
+  });
+
+  it('DEBUG 모드: 특정 플레이어의 연결을 끊은 상태로 만든다', async () => {
+    const s = await start(true, 1);
+    const a = new VClient(s.port);
+    const b = new VClient(s.port);
+    a.auto = b.auto = false;
+    await a.create('A');
+    await b.join(a.code, 'B');
+    await a.emit('room:start');
+    await waitFor(() => !!a.env, 2000, 'start');
+    expect((await a.emit('debug:disconnect', { playerId: b.id })).ok).toBe(true);
+    await waitFor(() => a.env!.connected[b.id] === false, 2000, 'b disconnected');
+    await waitFor(() => !b.sock.connected, 2000, 'b socket closed');
   });
 
   it('DEBUG 모드에서는 전체 공개·증강 지급·덱 지정이 동작한다', async () => {

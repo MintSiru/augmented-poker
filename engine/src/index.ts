@@ -6,8 +6,17 @@ export * from './pots.js';
 export * from './rng.js';
 export * from './types.js';
 export {
-  BLIND_LEVELS,
   blindsAt,
+  bigBlindAt,
+  niceRound,
+  STANDARD_MULTIPLIERS,
+  addJoiner,
+  removeJoiner,
+  getJoiner,
+  joinerPending,
+  joinerTimeout,
+  kickPlayer,
+  setLevelPlan,
   createGame,
   applyAction,
   applyTimeouts,
@@ -18,6 +27,10 @@ export {
   startNextHand,
   cardsNeeded,
   counterCandidates,
+  immunityCandidates,
+  freshEffects,
+  betCategory,
+  BET_CATEGORY_NAMES,
   resolveReaction,
   grantAugment,
   MAX_PLAYERS,
@@ -26,5 +39,6 @@ export {
 export type { NewPlayer, CreateGameOptions, LegalActions } from './game.js';
 export * from './view.js';
 export * from './debug.js';
+export { standingOf, contenderFor, handEvalFor } from './standing.js';
 export type { CountingView } from './counting.js';
 export { chooseBotAction, chooseBotOpportunistic, estimateEquity } from './bot.js';
