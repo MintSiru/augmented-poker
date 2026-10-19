@@ -798,3 +798,126 @@ describe('4. 좌석·증강 흐름', () => {
 function findThermal(s: GameState) {
   return P(s, 'p1').augments.find((a) => a.id === 'thermal')!;
 }
+
+// ───────────────────────── 5. 판정 공유·팀·탈취 ─────────────────────────
+
+describe('5. 판정 공유·팀·탈취', () => {
+  const HANDS3 = { p1: cards('9c 8d'), p2: cards('Kc 3h'), p3: cards('6c 5d') };
+
+  it('서로 다른 사람의 동점 처리 증강이 같은 비교에서 맞붙으면 상쇄되어 원래 비교', async () => {
+    const { compareContenders } = await import('../src/showdown.js');
+    const board = cards('2c 7d 9h Jc Ks');
+    const base = { bestCards: [], kickerMaster: false, absoluteKicker: false, pureBlood: false };
+    const a = { ...base, id: 'a', score: [1, 9, 13, 11, 7], pureBlood: true };
+    const b = { ...base, id: 'b', score: [1, 13, 11, 9, 7], kickerMaster: true };
+    expect(compareContenders(a, b, { inverted: false, board }).result).toBeLessThan(0);
+    // 한쪽만이면 순혈이 이긴다
+    expect(compareContenders(a, { ...b, kickerMaster: false }, { inverted: false, board }).result).toBeGreaterThan(0);
+  });
+
+  it('운명 공동체: 짝과 무작위 팀, 팀원이 이기면 팀원(쇼다운 참가)과 반씩 (낸 칩 한도), 면역이면 혼자', () => {
+    const s = setup(4, {
+      augs: { p1: ['destinyTeam'] },
+      deal: { board: cards(BOARD), hands: { p1: cards('Ac Ah'), p2: cards('Qc Jd'), p3: cards('8c 6d'), p4: cards('9c 9d') } },
+      before: (st) => use(st, 'p1', 'destinyTeam', { targetId: 'p3' }),
+    });
+    expect(s.teams).toContainEqual(['p1', 'p3']);
+    expect(s.teams).toContainEqual(expect.arrayContaining(['p2', 'p4']));
+    expect(view(s, 'p2').players.find((p) => p.id === 'p3')!.team).toBe(view(s, 'p2').players.find((p) => p.id === 'p1')!.team);
+    // 팀원끼리도 홀카드는 보이지 않는다
+    expect(JSON.stringify(view(s, 'p3'))).not.toMatch(/"Ac"|"Ah"/);
+    toShowdown(s);
+    // 팟 80: p1 승리, p3 는 낸 20 한도까지 받는다
+    expect(s.result!.won).toEqual({ p1: 60, p3: 20 });
+
+    const t = setup(4, {
+      augs: { p1: ['destinyTeam'], p3: ['immunity'] },
+      before: (st) => {
+        use(st, 'p1', 'destinyTeam', { targetId: 'p3' });
+        act(st, 'p3', { type: 'immunity' });
+      },
+    });
+    expect(t.teams.flat()).not.toContain('p3');
+    expect(t.teams).toHaveLength(1);
+    expect(t.teams[0]).toContain('p1');
+  });
+
+  it('기생: 쇼다운 직전 지목한 상대의 높은 홀카드 1장으로도 족보를 만든다 (카드는 그대로)', () => {
+    const s = setup(3, { augs: { p1: ['parasite'] }, deal: { board: cards(BOARD), hands: HANDS3 } });
+    toWindow(s, 'preShowdown');
+    act(s, getPending(s).playerIds[0], { type: 'declare', augment: 'parasite', targetId: 'p2' });
+    resolveAll(s);
+    toShowdown(s);
+    // p1: 9c + p2 의 Kc → K 원페어(A·9·7 키커)로 p2 의 K 원페어(A·7·4)를 이긴다
+    expect(s.result!.won).toEqual({ p1: 60 });
+    expect(P(s, 'p2').hole).toEqual(['Kc', '3h']);
+  });
+
+  it('승격: 리버 직후 선언하면 족보를 한 단계 올려 판정 (최대 풀하우스)', () => {
+    const s = setup(3, { augs: { p1: ['promotion'] }, deal: { board: cards(BOARD), hands: { p1: cards('9c 8d'), p2: cards('Qc Jh'), p3: cards('6c 5d') } } });
+    toWindow(s, 'river');
+    act(s, 'p1', { type: 'declare', augment: 'promotion' });
+    resolveAll(s);
+    toShowdown(s);
+    expect(s.result!.won).toEqual({ p1: 60 });
+    expect(s.result!.entries.find((e) => e.id === 'p1')!.handName).toContain('승격');
+  });
+
+  it('연금술: 홀카드 1장 숫자를 한 단계 올리거나 내리고 공개, 공개된 카드와 같아지면 불가', () => {
+    const s = setup(3, { augs: { p1: ['alchemy'] }, deal: { board: cards(BOARD), hands: { p1: cards('9c 8d'), p2: cards('Qc Jh'), p3: cards('6c Qd') } } });
+    toWindow(s, 'river');
+    expect(applyAction(s, 'p1', { type: 'declare', augment: 'alchemy', cardIndex: 0, choice: 0 }).ok).toBe(true);
+    resolveAll(s);
+    expect(P(s, 'p1').alchemy).toEqual({ index: 0, from: '9c', to: '8c' });
+    expect(view(s, 'p2').log.some((e) => e.text.includes('[9c]') && e.text.includes('[8c]'))).toBe(true);
+    toShowdown(s);
+    expect(s.result!.won).toEqual({ p1: 60 }); // 8 원페어
+    const t = setup(3, { augs: { p1: ['alchemy'] }, deal: { board: cards(BOARD), hands: { p1: cards('Qs 3d'), p2: cards('Qc Jh'), p3: cards('6c Qd') } } });
+    toWindow(t, 'river');
+    // Qs → Ks 는 가능, Ks → As 는 보드 카드와 같아져 불가
+    expect(applyAction(t, 'p1', { type: 'declare', augment: 'alchemy', cardIndex: 0, choice: 1 }).ok).toBe(true);
+    const u = setup(3, { augs: { p1: ['alchemy'] }, deal: { board: cards(BOARD), hands: { p1: cards('Ks 3d'), p2: cards('Qc Jh'), p3: cards('6c Qd') } } });
+    toWindow(u, 'river');
+    expect((applyAction(u, 'p1', { type: 'declare', augment: 'alchemy', cardIndex: 0, choice: 1 }) as { error?: string }).error).toContain('공개된 카드');
+  });
+
+  it('탈취: 지목형 증강을 빼앗아 대상을 다시 고른다, 원래 선언자의 횟수는 소모, 먼저 쓴 쪽 우선', () => {
+    const s = setup(3, { augs: { p1: ['blindDart'], p2: ['steal'], p3: ['counterSpell'] } });
+    use(s, 'p1', 'blindDart', { targetId: 'p3' });
+    expect(view(s, 'p2').reaction!.steal!.map((o) => o.targetId).sort()).toEqual(['p1', 'p3']);
+    expect(view(s, 'p3').reaction!.steal).toBeNull();
+    act(s, 'p2', { type: 'steal', targetId: 'p1' });
+    expect(applyAction(s, 'p3', { type: 'counter' }).ok).toBe(false);
+    resolveAll(s);
+    expect(s.effects.blindDarted).toEqual(['p1']);
+    expect(P(s, 'p1').augments[0].usesLeft).toBe(0);
+    expect(P(s, 'p2').augments[0].usesLeft).toBe(0);
+    // 카운터가 먼저면 탈취 불가
+    const t = setup(3, { augs: { p1: ['blindDart'], p2: ['steal'], p3: ['counterSpell'] } });
+    use(t, 'p1', 'blindDart', { targetId: 'p3' });
+    act(t, 'p3', { type: 'counter' });
+    expect(applyAction(t, 'p2', { type: 'steal', targetId: 'p1' }).ok).toBe(false);
+  });
+
+  it('탈취: 카드를 지정하는 증강(봉인)은 카드를 다시 고른다, 탈취할 수 없는 증강에는 못 쓴다', () => {
+    const s = setup(3, { augs: { p1: ['seal', 'thermal'], p2: ['steal'] }, deal: { board: cards(BOARD) } });
+    toWindow(s, 'river');
+    act(s, getPending(s).playerIds[0] === 'p1' ? 'p1' : 'p1', { type: 'declare', augment: 'seal', boardIndex: 0 });
+    act(s, 'p2', { type: 'steal', boardIndex: 3 });
+    resolveAll(s);
+    expect(s.effects.sealed).toEqual([3]);
+    const t = setup(3, { augs: { p1: ['thermal'], p2: ['steal'] } });
+    use(t, 'p1', 'thermal', { targetId: 'p3' });
+    expect(applyAction(t, 'p2', { type: 'steal', targetId: 'p1' }).ok).toBe(false);
+  });
+
+  it('공개 청문회: 정보형 증강으로 나를 보면 확인은 허용, 쓴 사람의 같은 종류 정보를 전원에게', () => {
+    const s = setup(3, { augs: { p1: ['clairvoyance'], p2: ['publicHearing'] }, deal: { hands: { p1: cards('9c 8d'), p2: cards('Kc 3h'), p3: cards('6c 5d') } } });
+    use(s, 'p1', 'clairvoyance', { targetId: 'p2' });
+    resolveAll(s);
+    expect(lastNote(s, 'p1')).toMatch(/\[Kc\]|\[3h\]/);
+    const pub = view(s, 'p3').log.find((e) => e.text.startsWith('공개 청문회'))!;
+    expect(pub.text).toMatch(/P1의 홀카드 중 1장은 \[(9c|8d)\]/);
+    expect(P(s, 'p2').augments[0].usesLeft).toBe(0);
+  });
+});

@@ -126,6 +126,8 @@ export function chooseBotOpportunistic(view: PlayerView, rng: Rng): GameAction |
   if (usable(view, 'padlock') && chance(rng, 8)) return use('padlock');
   if (usable(view, 'loan') && view.you.chips < view.blinds.bb * 10) return use('loan');
   if (usable(view, 'augShuffle') && chance(rng, 8)) return use('augShuffle');
+  const dt = usable(view, 'destinyTeam');
+  if (dt && dt.targets.length && chance(rng, 10)) return use('destinyTeam', { targetId: pickOne(dt.targets, rng) });
   const ls = usable(view, 'loanShark');
   if (ls && ls.targets.length && chance(rng, 5)) return use('loanShark', { targetId: pickOne(ls.targets, rng) });
   if (usable(view, 'rumor') && chance(rng, 4)) return use('rumor', { rumor: pickOne(ALL_AUGMENT_IDS, rng) });
@@ -141,6 +143,8 @@ export function chooseBotAction(view: PlayerView, rng: Rng): GameAction | null {
   if (view.reaction) {
     if (view.reaction.canCounter && chance(rng, view.reaction.anonymous ? 15 : 35)) return { type: 'counter' };
     if (view.reaction.canImmune && chance(rng, 40)) return { type: 'immunity' };
+    const st = view.reaction.steal;
+    if (st?.length && chance(rng, 40)) return { type: 'steal', ...pickOne(st, rng) };
     return null;
   }
 
@@ -236,6 +240,14 @@ export function chooseBotAction(view: PlayerView, rng: Rng): GameAction | null {
       if (bestIdx !== null) return { type: 'declare', augment: 'seal', boardIndex: bestIdx };
     }
     if (opts.includes('rewind') && base < 0.3 && chance(rng, 50)) return { type: 'declare', augment: 'rewind' };
+    if (opts.includes('promotion') && you.hand && you.hand.category <= 4) return { type: 'declare', augment: 'promotion' };
+    const pz = you.declare.targets.parasite;
+    if (opts.includes('parasite') && pz?.length && base < 0.6) return { type: 'declare', augment: 'parasite', targetId: pickOne(pz, rng) };
+    if (opts.includes('alchemy') && you.hole.length && base < 0.5 && chance(rng, 50)) {
+      const ranks = you.hole.map(rankOf);
+      const i = ranks.indexOf(Math.max(...ranks));
+      return { type: 'declare', augment: 'alchemy', cardIndex: i, choice: ranks[i] < 14 ? 1 : 0 };
+    }
     const jt = you.declare.targets.jointTransfer;
     if (opts.includes('jointTransfer') && jt?.length && base < 0.4 && chance(rng, 25)) return { type: 'declare', augment: 'jointTransfer', targetId: pickOne(jt, rng) };
     const ni = you.declare.targets.nameIt;

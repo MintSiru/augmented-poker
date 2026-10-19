@@ -28,6 +28,7 @@ export {
   cardsNeeded,
   counterCandidates,
   immunityCandidates,
+  stealCandidates,
   freshEffects,
   betCategory,
   BET_CATEGORY_NAMES,

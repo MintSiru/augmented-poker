@@ -19,6 +19,7 @@ import {
   chooseBotOpportunistic,
   counterCandidates,
   immunityCandidates,
+  stealCandidates,
   REACTION_MS,
   createGame,
   cryptoRng,
@@ -686,12 +687,12 @@ export class Room {
       );
     };
     if (kind === 'reaction') {
-      for (const id of new Set([...counterCandidates(g), ...immunityCandidates(g)])) {
+      for (const id of new Set([...counterCandidates(g), ...immunityCandidates(g), ...stealCandidates(g)])) {
         if (!bots.some((b) => b.id === id)) continue;
         schedule(`counter:${seq}:${id}`, 300 + Math.random() * 1500, () => {
           if (getPending(g).seq !== seq) return;
           const a = chooseBotAction(getPlayerView(g, id), cryptoRng);
-          if ((a?.type === 'counter' || a?.type === 'immunity') && applyAction(g, id, a).ok) this.sync();
+          if ((a?.type === 'counter' || a?.type === 'immunity' || a?.type === 'steal') && applyAction(g, id, a).ok) this.sync();
         });
       }
       return;

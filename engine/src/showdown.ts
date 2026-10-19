@@ -5,7 +5,7 @@
 // - 역전이 홀수 번이면 비교 결과를 뒤집는다 (키커 비교까지 모두). 짝수 번이면 상쇄.
 // - 키커 장인: 족보·키커까지 완전히 같으면 보유자가 이긴다.
 // - 절대 키커: 같은 숫자의 같은 족보면 키커와 상관없이 보유자가 이긴다. 단, 둘 다 보드 5장만으로 만든 완전 동점은 스플릿.
-// - 동점 처리 증강은 역전 중에도 "보유자가 이긴다"로 동작한다. 양쪽 모두 해당하면 서로 상쇄.
+// - 동점 처리 증강은 역전 중에도 "보유자가 이긴다"로 동작한다. 양쪽 모두 동점 처리 증강(종류 무관)을 가졌으면 서로 상쇄되어 원래 비교.
 // - 순혈: 최종 족보에 홀카드 2장이 모두 쓰였으면 같은 족보 종류끼리는 숫자와 상관없이 보유자가 이긴다 (역전 중에도 보유자 승리, 둘 다 조건을 만족하면 원래 비교).
 
 import type { Card } from './cards.js';
@@ -39,7 +39,17 @@ function boardOnly(c: Contender, board: Card[]): boolean {
   return c.bestCards.length === 5 && c.bestCards.every((x) => board.includes(x));
 }
 
+/** 이 비교에서 동점 처리 증강을 내세울 수 있는가 */
+function hasTiebreak(c: Contender): boolean {
+  return c.kickerMaster || c.absoluteKicker || !!c.pureBlood;
+}
+
 export function compareContenders(a: Contender, b: Contender, ctx: CompareContext): Outcome {
+  // 서로 다른 사람의 동점 처리 증강이 같은 비교에서 맞붙으면 상쇄되어 원래 비교로
+  if (hasTiebreak(a) && hasTiebreak(b)) {
+    const raw = compareScores(a.score, b.score);
+    return { result: ctx.inverted ? -raw : raw, by: null };
+  }
   if (a.score[0] === b.score[0] && !!a.pureBlood !== !!b.pureBlood) {
     // 순혈이 실제로 승부를 뒤집었을 때만 "순혈 적용"으로 표시
     const plain = compareScores(a.score, b.score) * (ctx.inverted ? -1 : 1);

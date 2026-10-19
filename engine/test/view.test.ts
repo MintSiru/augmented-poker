@@ -161,6 +161,7 @@ function allowedCards(s: GameState, viewerId: string): Set<Card> {
   for (const p of s.players) {
     if (p.inHand && (p.shown || glassShows(s, p))) p.hole.forEach((c) => ok.add(c));
     p.shepherdShown.forEach((c) => ok.add(c));
+    if (p.alchemy) [p.alchemy.from, p.alchemy.to].forEach((c) => ok.add(c));
   }
   for (const n of me.notes) if (n.hand === s.handNumber) n.cards?.forEach((c) => ok.add(c));
   if (me.augments.some((a) => a.id === 'counting')) s.used.forEach((u) => ok.add(u.card));

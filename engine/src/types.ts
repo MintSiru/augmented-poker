@@ -197,6 +197,12 @@ export interface PlayerState {
   lurkChoose: boolean;
   /** 잠복: 숨길 증강이 없어 다음에 얻는 증강을 숨긴다 */
   lurkWaiting: boolean;
+  /** 기생: 이번 핸드에 홀카드를 빌려 쓰는 상대 */
+  parasite: string | null;
+  /** 승격: 이번 핸드 족보 한 단계 위로 */
+  promoted: boolean;
+  /** 연금술: 이번 핸드 족보 계산에서 바꾼 홀카드 (공개) */
+  alchemy: { index: number; from: Card; to: Card } | null;
   /** 이 플레이어에게 보여 줄 로그의 시작 번호 (중도 참여자는 참여 이후 로그만 본다) */
   logFrom: number;
 }
@@ -374,6 +380,8 @@ export interface Declaration {
   immune: string[];
   /** 소문처럼 선언자까지 숨기는 선언 */
   secret: boolean;
+  /** 탈취: 원래 선언자 (ownerId 는 탈취한 사람으로 바뀐다) */
+  stolenFrom?: string | null;
 }
 
 export interface ActiveParams {
@@ -459,6 +467,10 @@ export interface GameState {
   nameItWinner: string | null;
   /** 예약 작업 (사채·대출 상환, 부활) */
   tasks: ScheduledTask[];
+  /** 운명 공동체: 이번 핸드의 팀 (2명씩) */
+  teams: string[][];
+  /** 운명 공동체: 다음 핸드에 적용할 팀 */
+  teamsNext: string[][] | null;
   used: UsedCard[];
   effects: TableEffects;
   /** 다음 핸드에 암전 적용 */
@@ -533,6 +545,8 @@ export type GameAction =
   | { type: 'turnRiver'; swap: boolean }
   /** 무승부로 하지 않을래?: 쇼다운 직후 제안 여부 */
   | { type: 'draw'; accept: boolean }
+  /** 탈취: 반응 대기 중인 선언을 빼앗고 대상·카드를 다시 고른다 */
+  | { type: 'steal'; targetId?: string; boardIndex?: number; cardIndex?: number; choice?: number }
   /** 잠복: 숨길 증강 고르기 */
   | { type: 'lurk'; augment: AugmentId }
   /** 제안·입찰·비공개 선언에 대한 응답 */

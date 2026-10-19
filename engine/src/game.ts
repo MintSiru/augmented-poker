@@ -163,6 +163,9 @@ function newPlayer(np: NewPlayer, seat: number, chips: number): PlayerState {
     pickExtra: 0,
     lurkChoose: false,
     lurkWaiting: false,
+    parasite: null,
+    promoted: false,
+    alchemy: null,
   };
 }
 
@@ -261,6 +264,8 @@ export function createGame(players: NewPlayer[], opts: CreateGameOptions = {}): 
     staredown: null,
     nameItWinner: null,
     tasks: [],
+    teams: [],
+    teamsNext: null,
     used: [],
     effects: freshEffects(),
     blackoutNext: false,
@@ -335,8 +340,8 @@ function opsFor(state: GameState): EngineOps {
   };
 }
 
-function ctxFor(state: GameState, owner: PlayerState, aug: OwnedAugment): Ctx {
-  return { state, ops: opsFor(state), owner, aug };
+function ctxFor(state: GameState, owner: PlayerState, aug: OwnedAugment, stolen = false): Ctx {
+  return { state, ops: opsFor(state), owner, aug, ...(stolen ? { stolen } : {}) };
 }
 
 function runHandEndHooks(state: GameState, result: HandResult): void {
@@ -689,6 +694,9 @@ function resetHandState(state: GameState): void {
     p.drawPrompt = null;
     p.truthClaim = null;
     p.contract = null;
+    p.parasite = null;
+    p.promoted = false;
+    p.alchemy = null;
     for (const a of p.augments) a.usedThisHand = false;
   }
   state.board = [];
@@ -703,6 +711,7 @@ function resetHandState(state: GameState): void {
   state.auctionCard = null;
   state.staredown = null;
   state.nameItWinner = null;
+  state.teams = [];
   state.burns = [];
   state.boardRevealed = 0;
   state.deck = [];
@@ -823,6 +832,11 @@ function beginHand(state: GameState): void {
   if (!betweenHands(state)) return;
   resetHandState(state);
   for (const p of state.players) p.lurkChoose = false;
+  // 운명 공동체: 예약된 팀으로 이번 핸드를 진행 (둘 다 남아 있는 팀만)
+  if (state.teamsNext) {
+    state.teams = state.teamsNext.filter((t) => t.every((id) => active(playerById(state, id)!)));
+    state.teamsNext = null;
+  }
   state.phase = 'betting';
   state.effects.blackout = state.blackoutNext;
   state.effects.blackoutImmune = state.blackoutNext ? [...state.blackoutImmuneNext] : [];
@@ -1500,6 +1514,8 @@ function applyCounter(state: GameState, p: PlayerState): string | null {
   const head = state.reaction.queue[0];
   if (head.ownerId === p.id) return '자기 증강은 무효화할 수 없습니다.';
   if (head.countered) return '이미 무효화되었습니다.';
+  // 탈취와 카운터 스펠이 같은 선언에 쓰이면 먼저 쓴 쪽이 우선
+  if (head.stolenFrom) return '이미 탈취된 선언입니다.';
   const lock = lockError(state);
   if (lock) return lock;
   const tax = taxError(state, p);
@@ -1511,6 +1527,65 @@ function applyCounter(state: GameState, p: PlayerState): string | null {
   head.counteredBy = p.id;
   announceNamed(state, p, cs, '발동', `— ${declarerLabel(state, head)}의 ${declLabel(head)}을(를) 무효화`);
   return null;
+}
+
+/** 탈취: 다른 사람이 선언한 탈취 가능한 증강을 내가 선언한 것으로 바꾼다 (대상·카드는 내가 다시 고름) */
+function stealError(state: GameState, p: PlayerState): string | null {
+  if (state.phase !== 'reaction' || !state.reaction) return '반응 대기 중에만 쓸 수 있습니다.';
+  const st = findAug(p, 'steal');
+  if (!st || (st.usesLeft ?? 0) <= 0) return '탈취가 없습니다.';
+  if (!active(p)) return '게임에 참여하고 있지 않습니다.';
+  const head = state.reaction.queue[0];
+  if (!AUGMENTS[head.augment].stealable || head.anonymous) return '탈취할 수 없는 증강입니다.';
+  if (head.ownerId === p.id) return '자기 증강은 탈취할 수 없습니다.';
+  if (head.countered) return '이미 무효화된 선언입니다.';
+  if (head.stolenFrom) return '이미 탈취된 선언입니다.';
+  return lockError(state) ?? taxError(state, p);
+}
+
+/** 탈취할 때 고를 수 있는 인자 후보 (대상·보드 카드). 고를 것이 없는 증강은 [{}] */
+export function stealOptions(state: GameState, p: PlayerState): ActiveParams[] {
+  if (stealError(state, p)) return [];
+  const head = state.reaction!.queue[0];
+  const from = playerById(state, head.ownerId)!;
+  const aug = findAug(from, head.augment);
+  if (!aug) return [];
+  const ctx = ctxFor(state, p, aug, true);
+  let cands: ActiveParams[];
+  if (AUGMENTS[head.augment].target) cands = state.players.filter((t) => t !== p).map((t) => ({ targetId: t.id }));
+  else if (head.augment === 'seal') cands = Array.from({ length: state.boardRevealed }, (_, i) => ({ boardIndex: i }));
+  else if (head.augment === 'freeze') cands = (state.result?.board ?? []).map((_, i) => ({ boardIndex: i }));
+  else cands = [{}];
+  return cands.filter((params) => !ACTIVE[head.augment]!.check(ctx, params, true));
+}
+
+function applySteal(state: GameState, p: PlayerState, a: Extract<GameAction, { type: 'steal' }>): string | null {
+  const err = stealError(state, p);
+  if (err) return err;
+  const head = state.reaction!.queue[0];
+  const params: ActiveParams = {};
+  if (typeof a.targetId === 'string') params.targetId = a.targetId;
+  if (typeof a.boardIndex === 'number') params.boardIndex = a.boardIndex;
+  if (typeof a.cardIndex === 'number') params.cardIndex = a.cardIndex;
+  if (typeof a.choice === 'number') params.choice = a.choice;
+  const from = playerById(state, head.ownerId)!;
+  const aug = findAug(from, head.augment)!;
+  const bad = ACTIVE[head.augment]!.check(ctxFor(state, p, aug, true), params, true);
+  if (bad) return bad;
+  const st = findAug(p, 'steal')!;
+  payTax(state, p);
+  st.usesLeft = 0;
+  countUse(state, 'steal');
+  head.stolenFrom = head.ownerId;
+  head.ownerId = p.id;
+  head.params = params;
+  announceNamed(state, p, st, '발동', `— ${from.name}의 ${declLabel(head)}을(를) 빼앗음`);
+  return null;
+}
+
+/** 반응 대기 중 탈취를 쓸 수 있는 사람 */
+export function stealCandidates(state: GameState): string[] {
+  return state.players.filter((p) => findAug(p, 'steal') && stealOptions(state, p).length > 0).map((p) => p.id);
 }
 
 /** 면역: 반응 대기 중인 공개형 효과에서 나만 빠진다 (판 전체 규칙을 바꾸는 공개형은 불가) */
@@ -1567,16 +1642,20 @@ export function resolveReaction(state: GameState): void {
   const decl = r.queue.shift()!;
   state.phase = r.resume;
   const owner = playerById(state, decl.ownerId);
-  const aug = owner ? findAug(owner, decl.augment) : undefined;
+  // 탈취한 선언은 원래 선언자의 증강으로 탈취한 사람이 효과를 낸다
+  const from = decl.stolenFrom ? playerById(state, decl.stolenFrom) : owner;
+  const aug = from ? findAug(from, decl.augment) : undefined;
   if (owner && aug) {
     const effect = ACTIVE[decl.augment]!;
-    const ctx = ctxFor(state, owner, aug);
+    const ctx = ctxFor(state, owner, aug, !!decl.stolenFrom);
     if (decl.countered) {
       addLog(state, `${declarerLabel(state, decl)}의 ${declLabel(decl)}이(가) 무효화되었습니다 (사용 횟수 소모)`);
       effect.onCountered?.(ctx, decl.params);
     } else {
       const err = owner.out ? '탈락' : owner.kicked ? '추방됨' : effect.check(ctx, decl.params, true);
-      if (err) {
+      if (err && decl.stolenFrom) {
+        addLog(state, `탈취한 ${AUGMENTS[decl.augment].name} 효과가 적용되지 않았습니다: ${err}`);
+      } else if (err) {
         // 상황이 바뀌어 효과가 성립하지 않으면 사용 횟수를 돌려준다
         const def = AUGMENTS[decl.augment];
         if (def.uses?.per === 'game') aug.usesLeft = (aug.usesLeft ?? 0) + 1;
@@ -1633,7 +1712,7 @@ export function counterCandidates(state: GameState): string[] {
   const head = state.reaction?.queue[0];
   if (state.phase !== 'reaction' || !head || head.countered || lockError(state)) return [];
   return state.players
-    .filter((p) => active(p) && p.id !== head.ownerId && (findAug(p, 'counterSpell')?.usesLeft ?? 0) > 0)
+    .filter((p) => active(p) && p.id !== head.ownerId && !head.stolenFrom && (findAug(p, 'counterSpell')?.usesLeft ?? 0) > 0 && !taxError(state, p))
     .map((p) => p.id);
 }
 
@@ -2012,6 +2091,8 @@ function showdown(state: GameState): void {
     }
   }
   const won: Record<string, number> = {};
+  // 운명 공동체: 팀원이 받은 몫 (각자 낸 칩 한도)
+  const teamGot = new Map<string, number>();
   const give = (id: string, amt: number) => {
     if (amt <= 0) return;
     won[id] = (won[id] ?? 0) + amt;
@@ -2041,7 +2122,7 @@ function showdown(state: GameState): void {
     const base = Math.floor(pot.amount / n);
     const unitResults: PotUnit[] = unitDecisions.map((decision, u) => {
       const ordered = order.map((i) => state.players[i].id).filter((id) => decision.winners.includes(id));
-      const shares = teamShares(state, pot, ordered, base);
+      const shares = teamShares(state, ordered, base, teamGot);
       for (const [id, amt] of shares) give(id, amt);
       return { label: units[u].label || label, amount: base, winners: [...shares.keys()].filter((id) => (shares.get(id) ?? 0) > 0) };
     });
@@ -2073,9 +2154,24 @@ function showdown(state: GameState): void {
   });
 }
 
-/** 판정 단위 하나의 칩을 승자에게 나눈다 (운명 공동체면 팀원과 반씩 — 5단계에서 확장) */
-function teamShares(_state: GameState, _pot: { eligible: string[] }, winnersInOrder: string[], amount: number): Map<string, number> {
-  return winnersInOrder.length ? splitPot(amount, winnersInOrder) : new Map();
+/**
+ * 판정 단위 하나의 칩을 승자에게 나눈다.
+ * 운명 공동체: 승자의 팀원이 쇼다운까지 남아 있으면(승자가 아닐 때) 승자 몫의 절반을 팀원에게 (팀원이 낸 칩 한도 안에서)
+ */
+function teamShares(state: GameState, winnersInOrder: string[], amount: number, teamGot: Map<string, number>): Map<string, number> {
+  const shares = winnersInOrder.length ? splitPot(amount, winnersInOrder) : new Map<string, number>();
+  for (const w of winnersInOrder) {
+    const team = state.teams.find((t) => t.includes(w));
+    const mate = team && playerById(state, team.find((id) => id !== w));
+    if (!mate || !live(mate) || winnersInOrder.includes(mate.id)) continue;
+    const room = Math.max(0, mate.contributed - (teamGot.get(mate.id) ?? 0));
+    const half = Math.min(Math.floor((shares.get(w) ?? 0) / 2), room);
+    if (half <= 0) continue;
+    shares.set(w, (shares.get(w) ?? 0) - half);
+    shares.set(mate.id, (shares.get(mate.id) ?? 0) + half);
+    teamGot.set(mate.id, (teamGot.get(mate.id) ?? 0) + half);
+  }
+  return shares;
 }
 
 const TIEBREAK_AUGS: AugmentId[] = ['kickerMaster', 'absoluteKicker', 'pureBlood', 'drawOffer'];
@@ -2443,6 +2539,9 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
       break;
     case 'immunity':
       err = applyImmunity(state, p);
+      break;
+    case 'steal':
+      err = applySteal(state, p, action);
       break;
     case 'draw':
       err = applyDraw(state, p, action.accept === true);

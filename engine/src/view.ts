@@ -35,7 +35,7 @@ import {
   type MaskRules,
 } from './core.js';
 import { fullDeck } from './cards.js';
-import { immunityCandidates } from './game.js';
+import { immunityCandidates, stealOptions } from './game.js';
 import { countingInfo, CountingView } from './counting.js';
 import { ACTIVE } from './effects.js';
 import type { GameState, NoteKind, Phase, PlayerState, Street } from './types.js';
@@ -119,6 +119,8 @@ export interface PublicPlayerView {
   dormant: number | null;
   /** 폭주기관차 연승 수 (보유자, 0이면 null) */
   streak: number | null;
+  /** 운명 공동체: 이번 핸드 팀 번호 (팀 색) */
+  team: number | null;
 }
 
 export interface NoteView {
@@ -188,6 +190,8 @@ export interface ReactionView {
   canCounter: boolean;
   /** 나에게만: 면역으로 이 공개형 효과에서 빠질 수 있는가 */
   canImmune: boolean;
+  /** 나에게만: 탈취할 수 있으면 고를 수 있는 대상·보드 카드 (고를 것이 없으면 [{}]) */
+  steal: { targetId?: string; boardIndex?: number }[] | null;
   /** 이 뒤에 대기 중인 선언 수 */
   queued: number;
 }
@@ -489,6 +493,10 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     isHost: false,
     dormant: p.dormant !== null ? Math.max(0, p.dormant - state.handNumber) : null,
     streak: p.streak > 0 && findAug(p, 'runaway') ? p.streak : null,
+    team: (() => {
+      const k = state.teams.findIndex((t) => t.includes(p.id));
+      return k >= 0 ? k : null;
+    })(),
   }));
 
   // 결과 화면
@@ -546,6 +554,7 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
       counteredBy: head.counteredBy ? nameById(head.counteredBy) : null,
       canCounter: seated && counterCandidates(state).includes(me.id),
       canImmune: seated && immunityCandidates(state).includes(me.id),
+      steal: seated && findAug(me, 'steal') ? (stealOptions(state, me).length ? stealOptions(state, me).map((o) => ({ targetId: o.targetId, boardIndex: o.boardIndex })) : null) : null,
       queued: (state.reaction?.queue.length ?? 1) - 1,
     };
   }
@@ -844,6 +853,14 @@ function tableNotes(state: GameState): string[] {
   if (state.blackoutNext) out.push('다음 핸드 암전');
   if (state.bombNext) out.push('다음 핸드 폭탄 팟');
   if (state.nextHand.reverse) out.push('다음 핸드 거꾸로 강을 거슬러');
+  const nm = (id: string) => state.players.find((p) => p.id === id)?.name ?? '?';
+  if (state.teams.length) out.push(`운명 공동체: ${state.teams.map((t) => t.map(nm).join(' & ')).join(', ')}`);
+  if (state.teamsNext) out.push(`다음 핸드 팀전: ${state.teamsNext.map((t) => t.map(nm).join(' & ')).join(', ')}`);
+  for (const p of state.players) {
+    if (p.parasite && live(p)) out.push(`기생: ${p.name} → ${nm(p.parasite)}`);
+    if (p.promoted && live(p)) out.push(`승격: ${p.name}`);
+    if (p.alchemy && live(p)) out.push(`연금술: ${p.name} [${p.alchemy.from}] → [${p.alchemy.to}]`);
+  }
   if (state.nextHand.prophecy) out.push('다음 핸드 미리 온 결말');
   if (state.nextHand.freezeCard) out.push(`다음 핸드 동결 [${state.nextHand.freezeCard}]`);
   if (state.underdogLeft > 0) out.push(`언더독 ${state.underdogLeft}핸드 남음`);

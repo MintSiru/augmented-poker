@@ -67,6 +67,8 @@ export interface Ctx {
   ops: EngineOps;
   owner: PlayerState;
   aug: OwnedAugment;
+  /** 탈취한 선언: 선언 시점 조건(내 차례·내 올인 등)은 보지 않고 대상만 다시 검사 */
+  stolen?: boolean;
 }
 
 export interface ActiveEffect {
@@ -146,7 +148,7 @@ function needClearSight(ctx: Ctx): string | null {
 function preflopMyTurn(ctx: Ctx): string | null {
   const { state, owner } = ctx;
   if (basePhase(state) !== 'betting' || state.street !== 'preflop' || state.boardRevealed > 0) return '프리플랍 베팅 중에만 선언할 수 있습니다.';
-  if (state.toAct !== idxOf(state, owner.id)) return '내 차례에만 선언할 수 있습니다.';
+  if (state.toAct !== idxOf(state, owner.id) && !ctx.stolen) return '내 차례에만 선언할 수 있습니다.';
   if (!live(owner)) return '핸드에 참여 중일 때만 쓸 수 있습니다.';
   return null;
 }
@@ -259,6 +261,26 @@ export function rechargeable(p: PlayerState, maxStars: number): OwnedAugment[] {
     const d = AUGMENTS[a.id];
     return isActiveAugment(a.id) && d.stars <= maxStars && d.uses?.per === 'game' && (a.usesLeft ?? 0) <= 0;
   });
+}
+
+// ───────────────────────── 연금술 ─────────────────────────
+
+/** 숫자를 한 단계 올리거나(1) 내린(0) 카드 (무늬 유지, A와 2는 이어지지 않음) */
+export function alchemyTarget(c: Card, up: number): Card | null {
+  const r = rankOf(c) + (up ? 1 : -1);
+  if (r < 2 || r > 14) return null;
+  return `${'23456789TJQKA'[r - 2]}${suitOf(c)}` as Card;
+}
+
+/** 모두에게 공개된 카드 (보드·공개된 홀카드·경매·명추리·청문회 등) */
+function publicSeen(state: GameState): Card[] {
+  return [
+    ...state.board.slice(0, state.boardRevealed),
+    ...publicCards(state),
+    ...state.used.filter((u) => u.kind === 'shown' || u.kind === 'called').map((u) => u.card),
+    ...state.players.flatMap((p) => [...p.shepherdShown, ...(p.alchemy ? [p.alchemy.from, p.alchemy.to] : [])]),
+    ...(state.auctionCard ? [state.auctionCard] : []),
+  ];
 }
 
 // ───────────────────────── 제안·응답 공통 ─────────────────────────
@@ -572,12 +594,12 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
     check(ctx, params) {
       const { state, owner } = ctx;
       if (basePhase(state) !== 'betting' || state.street !== 'river') return '리버 베팅 라운드에서만 쓸 수 있습니다.';
-      if (!live(owner) || !owner.allIn || owner.streetBet <= 0) return '리버에서 내가 올인한 뒤에만 쓸 수 있습니다.';
+      if (!ctx.stolen && (!live(owner) || !owner.allIn || owner.streetBet <= 0)) return '리버에서 내가 올인한 뒤에만 쓸 수 있습니다.';
       const t = targetOf(ctx, params);
       if (!t || !live(t) || t.allIn) return '핸드에 남아 있는 상대를 고르세요.';
       const wall = targetable(t);
       if (wall) return wall;
-      if (t.chips + t.streetBet <= owner.streetBet) return '나보다 칩이 많은 상대만 지목할 수 있습니다.';
+      if (!ctx.stolen && t.chips + t.streetBet <= owner.streetBet) return '나보다 칩이 많은 상대만 지목할 수 있습니다.';
       if (t.streetBet + t.streetShort >= state.currentBet) return '이미 콜한 상대입니다.';
       return null;
     },
@@ -1610,6 +1632,93 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
     },
   },
 
+  // ═════════════════════════ 3차 풀: 판정 공유·팀·탈취 ═════════════════════════
+
+  destinyTeam: {
+    check(ctx, params) {
+      const { state, owner } = ctx;
+      const err = betweenHandsCheck(ctx);
+      if (err) return err;
+      if (state.players.filter(active).length < 4) return '4명 이상 남았을 때만 쓸 수 있습니다.';
+      if (state.teamsNext) return '다음 핸드의 팀이 이미 정해져 있습니다.';
+      const t = targetOf(ctx, params);
+      if (!t || !active(t) || t === owner) return '짝을 고르세요.';
+      return null;
+    },
+    detail: (ctx, p) => `— 짝: ${nameOf(ctx.state, p.targetId ?? '')}`,
+    resolve(ctx, params, decl) {
+      const { state, owner } = ctx;
+      // 면역으로 빠진 사람은 혼자 플레이
+      const pool = state.players.filter((p) => active(p) && !decl.immune.includes(p.id));
+      const t = targetOf(ctx, params)!;
+      const teams: string[][] = [];
+      const rest = pool.filter((p) => p !== owner && p !== t);
+      if (pool.includes(t)) teams.push([owner.id, t.id]);
+      else rest.push(owner);
+      const shuffled = [...rest];
+      for (let i = shuffled.length - 1; i > 0; i--) {
+        const j = state.rng.int(i + 1);
+        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+      }
+      for (let i = 0; i + 1 < shuffled.length; i += 2) teams.push([shuffled[i].id, shuffled[i + 1].id]);
+      state.teamsNext = teams;
+      const names = teams.map((tm) => tm.map((id) => nameOf(state, id)).join(' & ')).join(', ');
+      addLog(state, `운명 공동체: 다음 핸드는 팀전 — ${names} (팀원이 쇼다운에서 이기면 팟을 반씩)${immuneText(state, decl.immune, '혼자 플레이')}`);
+    },
+  },
+
+  parasite: {
+    check(ctx, params) {
+      const { state, owner } = ctx;
+      if (basePhase(state) !== 'declare' || state.windowStage !== 'preShowdown') return '리버 베팅이 끝난 뒤 쇼다운 직전 선언 기회에만 쓸 수 있습니다.';
+      const err = opponentInHand(ctx, params);
+      if (err) return err;
+      if (owner.parasite) return '이미 기생 중입니다.';
+      return targetable(targetOf(ctx, params)!);
+    },
+    detail: (ctx, p) => `— 대상: ${nameOf(ctx.state, p.targetId ?? '')}`,
+    resolve(ctx, params) {
+      const t = targetOf(ctx, params)!;
+      ctx.owner.parasite = t.id;
+      addLog(ctx.state, `기생: ${ctx.owner.name}은(는) 이번 쇼다운에서 ${t.name}의 높은 홀카드 1장으로도 족보를 만들 수 있습니다`);
+    },
+  },
+
+  promotion: {
+    check(ctx) {
+      const { state, owner } = ctx;
+      if (basePhase(state) !== 'declare' || state.windowStage !== 'river') return '리버 공개 직후 선언 기회에만 쓸 수 있습니다.';
+      if (!live(owner)) return '핸드에 참여 중일 때만 쓸 수 있습니다.';
+      return owner.promoted ? '이미 승격했습니다.' : null;
+    },
+    resolve(ctx) {
+      ctx.owner.promoted = true;
+      addLog(ctx.state, `승격: ${ctx.owner.name}의 이번 핸드 족보를 한 단계 올려 판정합니다 (최대 풀하우스)`);
+    },
+  },
+
+  alchemy: {
+    check(ctx, params) {
+      const { state, owner } = ctx;
+      if (basePhase(state) !== 'declare' || state.windowStage !== 'river') return '리버 공개 직후 선언 기회에만 쓸 수 있습니다.';
+      if (!live(owner)) return '핸드에 참여 중일 때만 쓸 수 있습니다.';
+      if (owner.alchemy) return '이미 연금술을 썼습니다.';
+      if (!validHoleIndex(owner, params.cardIndex)) return '바꿀 홀카드를 고르세요.';
+      if (params.choice !== 0 && params.choice !== 1) return '올릴지 내릴지 고르세요.';
+      const to = alchemyTarget(owner.hole[params.cardIndex], params.choice);
+      if (!to) return 'A와 2는 이어지지 않습니다.';
+      if (owner.hole.includes(to) || publicSeen(state).includes(to)) return `${cardToken(to)}은(는) 공개된 카드와 같아 바꿀 수 없습니다.`;
+      return null;
+    },
+    resolve(ctx, params) {
+      const { state, owner } = ctx;
+      const from = owner.hole[params.cardIndex!];
+      const to = alchemyTarget(from, params.choice!)!;
+      owner.alchemy = { index: params.cardIndex!, from, to };
+      addLog(state, `연금술: ${owner.name}의 홀카드 ${cardToken(from)}을(를) 이번 핸드 족보 계산에서 ${cardToken(to)}(으)로 바꿉니다`);
+    },
+  },
+
   // 면제권: 블라인드 차례에 엔진이 자동으로 선언한다
   exemption: {
     check: (ctx) => (ctx.owner.inHand ? null : '핸드에 참여하지 않았습니다.'),
@@ -1955,6 +2064,25 @@ export const PASSIVE: Partial<Record<AugmentId, PassiveEffect>> = {
     },
   },
 
+  // 공개 청문회: 정보형 증강으로 나를 보면 확인은 허용하되, 쓴 사람의 같은 종류 정보를 테이블 전원에게
+  publicHearing: {
+    onInfoExposed(ctx, looker, kind) {
+      const { state, aug } = ctx;
+      if ((aug.usesLeft ?? 0) <= 0 || !looker.hole.length) return;
+      aug.usesLeft = 0;
+      let info: string;
+      if (kind === 'clairvoyance') {
+        const c = pickOne(looker.hole, state.rng);
+        state.used.push({ card: c, kind: 'called' });
+        info = `홀카드 중 1장은 ${cardToken(c)}`;
+      } else if (kind === 'thermal') info = `홀카드 — ${hiLoText(looker.hole)}`;
+      else if (kind === 'liedetector') info = realMade(state, looker) ? '메이드 핸드입니다' : '메이드 핸드가 아닙니다';
+      else info = `홀카드 숫자 합은 15 ${looker.hole.reduce((a, c) => a + rankOf(c), 0) >= 15 ? '이상' : '미만'}`;
+      revealPassive(ctx, `— ${looker.name}이(가) 「${INFO_NAME[kind]}」으로 확인함`);
+      addLog(state, `공개 청문회: ${looker.name}의 ${info}`);
+    },
+  },
+
   vest: {
     blockForcedFold(ctx) {
       if ((ctx.aug.usesLeft ?? 0) <= 0) return false;
@@ -2020,6 +2148,7 @@ export const TASKS: Record<ScheduledTask['kind'], (state: GameState, t: Schedule
 function windowSamples(state: GameState, p: PlayerState, id: AugmentId): ActiveParams[] {
   if (id === 'seal') return [{ boardIndex: [0, 1, 2, 3, 4].find((i) => !state.effects.sealed.includes(i)) }];
   if (id === 'lastFork') return [{ cardIndex: 0 }];
+  if (id === 'alchemy') return p.hole.flatMap((_, i) => [{ cardIndex: i, choice: 0 }, { cardIndex: i, choice: 1 }]);
   if (!AUGMENTS[id].target) return [{}];
   return state.players.filter((t) => t !== p).map((t) => {
     // 명추리: 이미 아는 카드가 아닌 아무 카드 (판단용)

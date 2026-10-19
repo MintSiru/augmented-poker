@@ -627,7 +627,7 @@ function seatPos(k: number, n: number) {
 function seatHtml(v: PlayerView, p: PublicPlayerView, k: number, n: number): string {
   const { x, y } = seatPos(k, n);
   const me = p.id === v.you.id;
-  const cls = ['seat', me ? 'mine' : '', p.isTurn ? 'turn' : '', p.folded ? 'folded' : '', p.out || p.kicked ? 'out' : '', p.connected ? '' : 'off']
+  const cls = ['seat', me ? 'mine' : '', p.team !== null ? `team team-${p.team % 4}` : '', p.isTurn ? 'turn' : '', p.folded ? 'folded' : '', p.out || p.kicked ? 'out' : '', p.connected ? '' : 'off']
     .filter(Boolean)
     .join(' ');
   const badges = [p.isDealer ? '<i class="b d">D</i>' : '', p.isSB ? '<i class="b">SB</i>' : '', p.isBB ? '<i class="b">BB</i>' : '']
@@ -692,6 +692,18 @@ function reactionHtml(v: PlayerView): string {
       ${r.countered ? `<div class="rx-sub">🛡 ${esc(r.counteredBy ?? '')}의 카운터 스펠로 무효화됨</div>` : '<div class="rx-sub">반응 대기 중…</div>'}
       ${r.canCounter && !r.countered ? `<button class="primary small" data-a="counter">카운터 스펠: 무효화할까요?${v.you.tax ? ` (세금 ${fmt(v.you.tax)})` : ''}</button>` : ''}
       ${r.canImmune && !r.countered ? `<button class="small" data-a="immunity">면역: 나만 이 효과에서 빠지기${v.you.tax ? ` (세금 ${fmt(v.you.tax)})` : ''}</button>` : ''}
+      ${
+        r.steal && !r.countered
+          ? `<div class="rx-steal">${r.steal
+              .map(
+                (o) =>
+                  `<button class="small primary" data-a="steal"${o.targetId ? ` data-target="${esc(o.targetId)}"` : ''}${o.boardIndex !== undefined ? ` data-board="${o.boardIndex}"` : ''}>탈취${
+                    o.targetId ? ` → ${esc(nameOf(v, o.targetId))}` : o.boardIndex !== undefined ? ` → 보드 ${o.boardIndex + 1}번째` : ''
+                  }</button>`,
+              )
+              .join('')}</div>`
+          : ''
+      }
       ${r.queued ? `<div class="rx-sub">대기 중인 선언 ${r.queued}개</div>` : ''}
     </div>`;
 }
@@ -1556,6 +1568,8 @@ document.addEventListener('click', async (ev) => {
       return act({ type: 'attach', cardIndex: Number(t.dataset.i) });
     case 'counter':
       return act({ type: 'counter' });
+    case 'steal':
+      return act({ type: 'steal', targetId: t.dataset.target, boardIndex: t.dataset.board !== undefined ? Number(t.dataset.board) : undefined });
     case 'freeRide':
       return act({ type: 'call', freeRide: true });
     case 'use': {
