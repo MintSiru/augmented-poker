@@ -294,7 +294,7 @@ export interface GameOptions {
 export interface UsedCard {
   card: Card;
   /** shown: 공개하고 버린 카드 (마지막 갈림길) */
-  kind: 'burn' | 'fold' | 'discard' | 'rewind' | 'shown';
+  kind: 'burn' | 'fold' | 'discard' | 'rewind' | 'shown' | 'called';
 }
 
 /** 베팅 라운드 단위 상태 (서킷브레이커·자물쇠) */

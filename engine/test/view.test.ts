@@ -164,7 +164,7 @@ function allowedCards(s: GameState, viewerId: string): Set<Card> {
   }
   for (const n of me.notes) if (n.hand === s.handNumber) n.cards?.forEach((c) => ok.add(c));
   if (me.augments.some((a) => a.id === 'counting')) s.used.forEach((u) => ok.add(u.card));
-  s.used.filter((u) => u.kind === 'rewind' || u.kind === 'shown').forEach((u) => ok.add(u.card));
+  s.used.filter((u) => u.kind === 'rewind' || u.kind === 'shown' || u.kind === 'called').forEach((u) => ok.add(u.card));
   s.result?.board.forEach((c) => ok.add(c));
   s.result?.board2?.forEach((c) => ok.add(c));
   // 공개 예약 카드(미리 온 결말·동결), 두 번째 보드의 공개된 칸

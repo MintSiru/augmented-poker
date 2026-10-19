@@ -1567,11 +1567,15 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
       const known = knownCardsFor(state, owner, t).includes(card);
       if (!known && t.hole.includes(card)) {
         state.nameItWinner = owner.id;
+        // 맞힌 카드는 모두에게 공개된다
+        state.used.push({ card, kind: 'called' });
         addLog(state, `명추리 성공: ${owner.name}이(가) ${t.name}의 홀카드 ${cardToken(card)}을(를) 맞혔습니다 — 참여할 수 있는 팟을 모두 가져갑니다`);
         return;
       }
       const paid = transfer(state, owner, t, 2 * bbOf(state));
-      addLog(state, `명추리 실패: ${owner.name}이(가) 부른 ${cardToken(card)}은(는) ${known ? '이미 알려진 카드라 인정되지 않습니다' : `${t.name}의 카드가 아닙니다`} — 폴드하고 ${t.name}에게 ${paid}칩을 냅니다`);
+      // 틀린 카드는 다른 사람의 카드일 수 있으므로 공개하지 않는다
+      addLog(state, `명추리 실패: ${owner.name}이(가) 부른 카드는 ${known ? '이미 알려진 카드라 인정되지 않습니다' : `${t.name}의 카드가 아닙니다`} — 폴드하고 ${t.name}에게 ${paid}칩을 냅니다`);
+      addLog(state, `명추리: 내가 부른 카드 ${cardToken(card)}`, { to: [owner.id] });
       ctx.ops.fold(owner, false);
     },
   },

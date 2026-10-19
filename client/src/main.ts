@@ -1025,7 +1025,7 @@ function countingHtml(v: PlayerView): string {
           .join('')}</div>`,
     )
     .join('');
-  const kindName: Record<string, string> = { burn: '번', fold: '폴드', discard: '버림', rewind: '되감기', shown: '공개 후 버림' };
+  const kindName: Record<string, string> = { burn: '번', fold: '폴드', discard: '버림', rewind: '되감기', shown: '공개 후 버림', called: '명추리로 공개' };
   const used = c.used.length
     ? c.used.map((u) => `<span class="cu">${cardHtml(u.card, { size: 'sm', extra: 'inline' })}<i>${kindName[u.kind] ?? ''}</i></span>`).join('')
     : '<span class="muted">아직 없음</span>';
