@@ -105,6 +105,20 @@ export interface PlayerState {
   keptCard: Card | null;
   /** 애착: 핸드 종료 후 가져갈 카드를 고르는 중 */
   attachPending: boolean;
+  /** 추방됨: 진행 중인 핸드는 폴드 처리되고, 핸드가 끝나면 자리에서 제거된다 */
+  kicked: boolean;
+  /** 이 플레이어에게 보여 줄 로그의 시작 번호 (중도 참여자는 참여 이후 로그만 본다) */
+  logFrom: number;
+}
+
+/** 중도 참여 대기자: 다른 플레이어가 받은 증강 선택 횟수만큼 고른 뒤 다음 핸드 시작 때 자리에 앉는다 */
+export interface Joiner {
+  player: PlayerState;
+  /** 앞으로 고를 증강 수 (지금 고르는 중인 것 포함) */
+  picksLeft: number;
+  picksTotal: number;
+  /** 선택지가 바뀔 때마다 증가 (서버의 30초 타이머 기준) */
+  pickSeq: number;
 }
 
 export interface LogEntry {
@@ -149,11 +163,25 @@ export interface HandResult {
 export interface DebugDeal {
   board?: Card[];
   hands?: Record<string, Card[]>;
+  /** 번 카드 3장 (플랍·턴·리버 앞) */
+  burns?: Card[];
+  /** 남은 덱 맨 위부터의 순서 (멀리건 교체·되감기에 쓰이는 카드) */
+  deck?: Card[];
 }
+
+/** 블라인드 상승 방식: 기본 표(1→2→4→7.5→15→30→60배 …) / 레벨마다 1.5배 */
+export type BlindSchedule = 'standard' | 'x1.5';
+/** 블라인드 상승 주기: 자동(레벨 시작 시 남은 인원 × 2핸드) / 고정 N핸드 */
+export type LevelMode = 'auto' | 'fixed';
 
 export interface GameOptions {
   startingChips: number;
-  handsPerLevel: number;
+  /** 시작 빅블라인드 (스몰블라인드는 절반) */
+  bigBlind: number;
+  blindSchedule: BlindSchedule;
+  levelMode: LevelMode;
+  /** 고정 주기일 때 레벨당 핸드 수 */
+  fixedLevelHands: number;
   debug: boolean;
 }
 
@@ -207,6 +235,10 @@ export interface GameStats {
   bankChips: number;
   /** 은행으로 사라진 칩 (죽음과 세금) */
   bankTaxed: number;
+  /** 중도 참여자에게 은행에서 새로 지급한 칩 */
+  joinChips: number;
+  /** 추방으로 사라진 칩 */
+  kickedChips: number;
 }
 
 export interface GameState {
@@ -216,6 +248,15 @@ export interface GameState {
   phase: Phase;
   handNumber: number;
   levelIndex: number;
+  /** 현재 레벨이 시작된 핸드 번호와 이 레벨의 핸드 수 (자동 주기는 레벨 시작 시 남은 인원 × 2) */
+  levelStartHand: number;
+  levelHands: number;
+  /** 지금까지 열린 증강 선택 횟수 (중도 참여자가 고를 개수) */
+  pickRounds: number;
+  /** 중도 참여 대기자 (아직 자리에 앉지 않음) */
+  joiners: Joiner[];
+  /** 자리를 비켜 준 탈락자 (계속 관전할 수 있도록 보관) */
+  retired: PlayerState[];
   dealerIdx: number;
   sbIdx: number;
   bbIdx: number;
@@ -231,6 +272,8 @@ export interface GameState {
   effects: TableEffects;
   /** 다음 핸드에 암전 적용 */
   blackoutNext: boolean;
+  /** 다음 핸드 암전을 선언한 사람 (추방되면 효과가 끝난다) */
+  blackoutBy: string | null;
   currentBet: number;
   minRaise: number;
   toAct: number | null;

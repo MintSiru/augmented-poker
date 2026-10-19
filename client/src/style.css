@@ -72,7 +72,7 @@ input:focus, select:focus { outline: 2px solid #3bb98466; }
 .card.sm.wild::after { width: 11px; height: 11px; font-size: 7px; line-height: 11px; top: -4px; right: -4px; }
 
 /* ── 첫 화면 / 대기실 ── */
-.home, .lobby { max-width: 440px; margin: 0 auto; padding: 48px 16px; display: flex; flex-direction: column; gap: 12px; }
+.home, .lobby { max-width: 520px; margin: 0 auto; padding: 48px 16px; display: flex; flex-direction: column; gap: 12px; }
 .home h1 { margin: 0; font-size: 34px; text-align: center; }
 .home .logo { color: var(--accent); }
 .home .sub { text-align: center; color: var(--muted); margin: 0 0 12px; }
@@ -222,7 +222,7 @@ button.mh-help { padding: 0 7px; font-size: 11px; line-height: 18px; }
 .card.wildex { background: var(--accent); color: #000; font-weight: 800; border-color: #b8862a; }
 
 /* 채팅 */
-.lobby-wrap { max-width: 440px; margin: 0 auto; padding-bottom: 32px; }
+.lobby-wrap { max-width: 520px; margin: 0 auto; padding-bottom: 32px; }
 .lobby-wrap .lobby { padding-bottom: 12px; }
 .chatbox { margin: 0 16px; display: flex; flex-direction: column; gap: 8px; }
 .chatbox .chat-list { height: 180px; }
@@ -376,4 +376,39 @@ button.aug-btn { background: #2d2346; border-color: #6c4fb0; }
   .banner { top: 44px; font-size: 12px; width: max-content; max-width: 92vw; }
   .handtable { left: 8px; right: 8px; bottom: 8px; width: auto; max-height: 70vh; }
   .mh-name { font-size: 15px; }
+}
+
+/* ───────── 첫 화면: 방 만들기·공개 방 목록 ───────── */
+.home { max-width: 520px; }
+.create-box { display: flex; flex-direction: column; gap: 10px; }
+.vis-row { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.rooms h3 { display: flex; justify-content: space-between; align-items: baseline; }
+.room-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 340px; overflow: auto; }
+.room-list li { display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: var(--panel2); border-radius: 8px; }
+.room-list li.full { opacity: .6; }
+.rl-main { flex: 1; min-width: 0; }
+.rl-name { word-break: break-all; }
+.rl-meta { font-size: 12px; margin-top: 2px; }
+.st { font-size: 11px; border-radius: 4px; padding: 0 5px; }
+.st.wait { background: #1f4d39; color: #9df0c5; }
+.st.play { background: #4d3a1f; color: #ffd28a; }
+.tag.off { color: var(--muted); text-decoration: line-through; }
+.empty { padding: 6px 0; }
+
+/* ───────── 대기실 설정 ───────── */
+.room-name { font-size: 18px; word-break: break-all; }
+.settings input[type='number'] { width: 90px; padding: 5px 6px; }
+.settings input[data-setting='name'] { flex: 1; min-width: 0; max-width: 220px; padding: 5px 8px; }
+.inline-num { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.summary { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.settings-modal { max-width: 480px; }
+
+/* ───────── 게임: 추방·중도 참여 ───────── */
+.seat .kick { margin-top: 3px; padding: 1px 6px; font-size: 11px; background: #4a1f1c; border-color: #8b3a33; }
+.hand-info.joining { display: flex; flex-direction: column; gap: 4px; }
+#conn button { margin-left: 8px; }
+
+@media (max-width: 760px) {
+  .settings label { flex-wrap: wrap; }
+  .room-list li { padding: 7px 8px; }
 }

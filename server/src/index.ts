@@ -15,7 +15,7 @@ import {
   isAugmentId,
   type GameAction,
 } from '../../engine/src/index.js';
-import { CODE_RE, DEFAULT_OPTIONS, RoomManager, sanitizeName, type Member, type Room, type ServerOptions } from './rooms.js';
+import { CODE_RE, DEFAULT_OPTIONS, LIST_ROOM, RoomManager, sanitizeName, type Member, type Room, type ServerOptions } from './rooms.js';
 
 export interface AppServer {
   httpServer: HttpServer;
@@ -83,10 +83,24 @@ export async function createAppServer(port = 0, overrides: Partial<ServerOptions
       if (typeof ack === 'function') (ack as AckFn)(res);
     };
 
+    // 공개 방 목록: 구독한 소켓에만 실시간으로 보낸다 (방 이름·인원·상태·설정값만)
+    socket.on('rooms:watch', (payload: unknown, ack: unknown) => {
+      const on = !isObj(payload) || payload.on !== false;
+      if (on) {
+        socket.join(LIST_ROOM);
+        socket.emit('rooms', rooms.publicList());
+      } else socket.leave(LIST_ROOM);
+      reply(ack, { ok: true });
+    });
+
     socket.on('room:create', (payload: unknown, ack: unknown) => {
       const name = sanitizeName(isObj(payload) ? payload.name : null);
       if (!name) return reply(ack, { ok: false, error: '닉네임을 입력하세요 (12자 이내).' });
-      const { room, member } = rooms.createRoom(name);
+      const isPublic = !(isObj(payload) && payload.isPublic === false);
+      const r = rooms.createRoom(name, isObj(payload) ? payload.roomName : null, isPublic);
+      if (typeof r === 'string') return reply(ack, { ok: false, error: r });
+      const { room, member } = r;
+      socket.leave(LIST_ROOM);
       bind(room, member);
       reply(ack, { ok: true, code: room.code, token: member.token, playerId: member.id });
     });
@@ -97,14 +111,17 @@ export async function createAppServer(port = 0, overrides: Partial<ServerOptions
       const code = typeof payload.code === 'string' ? payload.code.trim().toUpperCase() : '';
       if (!name) return reply(ack, { ok: false, error: '닉네임을 입력하세요 (12자 이내).' });
       if (!CODE_RE.test(code)) return reply(ack, { ok: false, error: '방 코드는 영문 대문자+숫자 5자리입니다.' });
-      const r = rooms.join(code, name);
+      const r = rooms.join(code, name, payload.prevToken);
       if (typeof r === 'string') return reply(ack, { ok: false, error: r });
+      socket.leave(LIST_ROOM);
       bind(r.room, r.member);
       reply(ack, { ok: true, code: r.room.code, token: r.member.token, playerId: r.member.id });
     });
 
     socket.on('room:resume', (payload: unknown, ack: unknown) => {
-      const found = rooms.byToken(isObj(payload) ? payload.token : null);
+      const token = isObj(payload) ? payload.token : null;
+      if (rooms.isRevoked(token)) return reply(ack, { ok: false, error: '추방되어 그 방에 다시 들어갈 수 없습니다.' });
+      const found = rooms.byToken(token);
       if (!found || found.member.left) return reply(ack, { ok: false, error: '이전 자리를 찾을 수 없습니다.' });
       bind(found.room, found.member);
       reply(ack, { ok: true, code: found.room.code, token: found.member.token, playerId: found.member.id });
@@ -124,6 +141,13 @@ export async function createAppServer(port = 0, overrides: Partial<ServerOptions
       if (!current) return reply(ack, { ok: false, error: '방에 들어가 있지 않습니다.' });
       if (!isObj(payload)) return reply(ack, { ok: false, error: '잘못된 요청입니다.' });
       const err = current.room.updateSettings(current.member, payload);
+      current.room.sync();
+      reply(ack, err ? { ok: false, error: err } : { ok: true });
+    });
+
+    socket.on('room:kick', (payload: unknown, ack: unknown) => {
+      if (!current) return reply(ack, { ok: false, error: '방에 들어가 있지 않습니다.' });
+      const err = current.room.kick(current.member, isObj(payload) ? payload.playerId : null);
       current.room.sync();
       reply(ack, err ? { ok: false, error: err } : { ok: true });
     });
@@ -186,7 +210,8 @@ export async function createAppServer(port = 0, overrides: Partial<ServerOptions
         if (isObj(payload.hands)) {
           for (const [id, cards] of Object.entries(payload.hands)) if (Array.isArray(cards)) hands[id] = cards.map(String);
         }
-        const r = debugSetNextDeal(g, { board, hands });
+        const list = (v: unknown) => (Array.isArray(v) && v.length ? v.map(String) : undefined);
+        const r = debugSetNextDeal(g, { board, hands, burns: list(payload.burns), deck: list(payload.deck) });
         current.room.sync();
         reply(ack, r);
       });
@@ -196,6 +221,21 @@ export async function createAppServer(port = 0, overrides: Partial<ServerOptions
         const r = debugLevelUp(g);
         current.room.sync();
         reply(ack, r);
+      });
+      // 특정 플레이어의 연결을 끊은 상태로 만들기 (그 창은 '다시 연결'을 누를 때까지 끊긴 채로 둔다)
+      socket.on('debug:disconnect', (payload: unknown, ack: unknown) => {
+        if (!current || !current.room.game || !isObj(payload)) return reply(ack, { ok: false, error: '게임 중이 아닙니다.' });
+        const room = current.room;
+        const m = typeof payload.playerId === 'string' ? room.member(payload.playerId) : undefined;
+        if (!m || m.isBot) return reply(ack, { ok: false, error: '사람 플레이어를 고르세요.' });
+        if (!m.connected) return reply(ack, { ok: false, error: '이미 연결이 끊겨 있습니다.' });
+        const sock = m.socketId ? io.sockets.sockets.get(m.socketId) : undefined;
+        reply(ack, { ok: true });
+        if (sock) sock.disconnect(true);
+        else {
+          room.detach(m);
+          room.sync();
+        }
       });
       socket.on('debug:chips', (payload: unknown, ack: unknown) => {
         const g = current?.room.game;

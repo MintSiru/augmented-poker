@@ -3,34 +3,48 @@
 import { Card, cardToken, rankName } from './cards.js';
 import { AUGMENTS, AugmentId } from './augments.js';
 import type { EvalRules } from './evaluator.js';
-import type { GameState, LogEntry, NoteKind, OwnedAugment, Phase, PlayerState } from './types.js';
+import type { BlindSchedule, GameState, LogEntry, NoteKind, OwnedAugment, Phase, PlayerState } from './types.js';
 
-export const BLIND_LEVELS: ReadonlyArray<readonly [number, number]> = [
-  [10, 20],
-  [20, 40],
-  [40, 80],
-  [75, 150],
-  [150, 300],
-  [300, 600],
-  [500, 1000],
-  [1000, 2000],
-  [2000, 4000],
-  [4000, 8000],
-];
+/** 기본 표: 시작 BB 의 배수 (이후 2배씩) */
+export const STANDARD_MULTIPLIERS: readonly number[] = [1, 2, 4, 7.5, 15, 30, 60];
 
-export function blindsAt(levelIndex: number): { sb: number; bb: number } {
-  if (levelIndex < BLIND_LEVELS.length) {
-    const [sb, bb] = BLIND_LEVELS[levelIndex];
-    return { sb, bb };
+/** 보기 좋은 숫자로 반올림: 10 미만은 정수, 100 미만은 5 단위, 그 이상은 두 번째 자리를 5 단위로 */
+export function niceRound(x: number, mode: 'round' | 'ceil' = 'round'): number {
+  const f = mode === 'ceil' ? Math.ceil : Math.round;
+  if (x < 10) return Math.max(1, f(x));
+  const step = x < 100 ? 5 : 5 * 10 ** (Math.floor(Math.log10(x)) - 1);
+  return f(x / step) * step;
+}
+
+/** 레벨(0부터)의 빅블라인드 */
+export function bigBlindAt(levelIndex: number, baseBB: number, schedule: BlindSchedule): number {
+  if (schedule === 'x1.5') {
+    let bb = baseBB;
+    for (let i = 0; i < levelIndex; i++) {
+      let next = niceRound(bb * 1.5);
+      if (next <= bb) next = niceRound(bb * 1.5, 'ceil');
+      bb = Math.max(next, bb + 1);
+    }
+    return bb;
   }
-  const [sb, bb] = BLIND_LEVELS[BLIND_LEVELS.length - 1];
-  const f = 2 ** (levelIndex - BLIND_LEVELS.length + 1);
-  return { sb: sb * f, bb: bb * f };
+  const m = levelIndex < STANDARD_MULTIPLIERS.length
+    ? STANDARD_MULTIPLIERS[levelIndex]
+    : STANDARD_MULTIPLIERS[STANDARD_MULTIPLIERS.length - 1] * 2 ** (levelIndex - STANDARD_MULTIPLIERS.length + 1);
+  return Math.max(2, Math.round(baseBB * m));
+}
+
+/** 블라인드: 스몰블라인드는 빅블라인드의 절반 (내림) */
+export function blindsAt(levelIndex: number, baseBB = 20, schedule: BlindSchedule = 'standard'): { sb: number; bb: number } {
+  const bb = bigBlindAt(levelIndex, baseBB, schedule);
+  return { sb: Math.max(1, Math.floor(bb / 2)), bb };
 }
 
 export function currentBlinds(state: GameState) {
-  return blindsAt(state.levelIndex);
+  return blindsAt(state.levelIndex, state.options.bigBlind, state.options.blindSchedule);
 }
+
+/** 자리에 앉아 게임을 이어 가는 플레이어 (탈락·추방 제외) */
+export const active = (p: PlayerState) => !p.out && !p.kicked;
 
 export const live = (p: PlayerState) => p.inHand && !p.folded;
 export const canAct = (p: PlayerState) => live(p) && !p.allIn;

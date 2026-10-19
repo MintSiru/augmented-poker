@@ -3,7 +3,8 @@
 
 import { io, type Socket } from 'socket.io-client';
 import './style.css';
-import type { ChatMessage, DebugView, GameEnvelope, LobbyState } from '../../server/src/protocol.js';
+import type { ChatMessage, DebugView, GameEnvelope, LobbyState, RoomListItem, RoomSettings } from '../../server/src/protocol.js';
+import { blindsAt } from '../../engine/src/core.js';
 import type { MyAugmentView, PlayerView, PublicPlayerView } from '../../engine/src/view.js';
 import { AUGMENTS, type AugmentId } from '../../engine/src/augments.js';
 import { $, cardBack, cardHtml, esc, fmt, mount, patch, richText, stars } from './dom.js';
@@ -35,6 +36,13 @@ const app = {
   homeError: '',
   homeName: '',
   homeCode: '',
+  homeRoomName: '',
+  homePublic: true,
+  rooms: [] as RoomListItem[],
+  watchingRooms: false,
+  /** 서버(디버그)가 연결을 끊어 자동 재연결하지 않는 상태 */
+  forcedOff: false,
+  showSettings: false,
   lastLogSeq: 0,
   showHandTable: false,
   chat: [] as ChatMessage[],
@@ -123,10 +131,17 @@ socket.on('connect', () => {
   app.everConnected = true;
   renderConn();
   if (app.seat) resume(app.seat, true);
+  else if (app.screen === 'home') render();
 });
-socket.on('disconnect', () => {
+socket.on('disconnect', (reason: string) => {
   app.connected = false;
+  app.watchingRooms = false;
+  app.forcedOff = reason === 'io server disconnect';
   renderConn();
+});
+socket.on('rooms', (list: RoomListItem[]) => {
+  app.rooms = list;
+  if (app.screen === 'home') renderRoomList();
 });
 socket.on('lobby', (s: LobbyState) => {
   app.lobby = s;
@@ -160,7 +175,11 @@ socket.on('chat', (m: ChatMessage) => {
 });
 socket.on('kicked', (reason: string) => {
   storageSet(sessionStorage, SESSION_KEY, null);
+  const last = readSeat(localStorage, LAST_KEY);
+  if (last && app.seat && last.token === app.seat.token && reason.includes('추방')) storageSet(localStorage, LAST_KEY, null);
   app.seat = null;
+  app.env = null;
+  app.lobby = null;
   app.screen = 'home';
   app.homeError = reason;
   render();
@@ -181,7 +200,9 @@ function renderConn() {
   const el = $('#conn')!;
   const show = app.everConnected && !app.connected;
   el.className = show ? 'show' : '';
-  el.textContent = show ? '서버와 연결이 끊겼습니다. 재연결 중…' : '';
+  if (!show) el.innerHTML = '';
+  else if (app.forcedOff) el.innerHTML = '서버가 연결을 끊었습니다. <button class="small" data-a="reconnect">다시 연결</button>';
+  else el.textContent = '서버와 연결이 끊겼습니다. 재연결 중…';
 }
 
 function roomLink(code: string) {
@@ -200,6 +221,12 @@ async function copyLink(code: string) {
 
 function render() {
   document.body.dataset.screen = app.screen;
+  // 공개 방 목록은 첫 화면에 있을 때만 실시간으로 받는다
+  const wantRooms = app.screen === 'home' && app.connected;
+  if (wantRooms !== app.watchingRooms && (app.connected || !wantRooms)) {
+    app.watchingRooms = wantRooms;
+    void send('rooms:watch', { on: wantRooms });
+  }
   if (app.screen === 'home') renderHome();
   else if (app.screen === 'lobby') renderLobby();
   else renderGame();
@@ -210,32 +237,73 @@ function render() {
 function syncHomeInputs() {
   const n = $('#home-name') as HTMLInputElement | null;
   const c = $('#home-code') as HTMLInputElement | null;
+  const r = $('#home-room') as HTMLInputElement | null;
   if (n) app.homeName = n.value;
   if (c) app.homeCode = c.value;
+  if (r) app.homeRoomName = r.value;
 }
 
 function renderHome() {
   $('#modal')!.innerHTML = '';
+  if (!$('.home')) {
+    // 입력칸은 목록이 실시간으로 바뀌어도 유지되도록 뼈대에 한 번만 그린다
+    mount(
+      $('#app'),
+      `<div class="home">
+        <h1><span class="logo">♠</span> 증강 홀덤</h1>
+        <p class="sub">텍사스 홀덤 + 증강 · 최대 8명</p>
+        <label class="field">닉네임<input id="home-name" maxlength="12" autocomplete="nickname" value="${esc(app.homeName)}" placeholder="12자 이내" /></label>
+        <div class="panel create-box">
+          <h3>방 만들기</h3>
+          <label class="field">방 이름<input id="home-room" maxlength="20" value="${esc(app.homeRoomName)}" placeholder="비워 두면 ○○님의 방" /></label>
+          <div class="vis-row">
+            <label class="check"><input type="radio" name="vis" value="public" ${app.homePublic ? 'checked' : ''}/> 공개 <span class="muted">(목록에 표시)</span></label>
+            <label class="check"><input type="radio" name="vis" value="private" ${app.homePublic ? '' : 'checked'}/> 비공개 <span class="muted">(코드·링크로만)</span></label>
+          </div>
+          <button class="primary big" data-a="create">방 만들기</button>
+        </div>
+        <div class="or">또는</div>
+        <div class="join-row">
+          <input id="home-code" maxlength="5" placeholder="방 코드 5자리" value="${esc(app.homeCode)}" autocapitalize="characters" />
+          <button class="big" data-a="join">방 코드로 입장</button>
+        </div>
+        <div id="home-extra"></div>
+        <div class="panel rooms"><h3>공개 방 목록 <span class="muted small-note">실시간</span></h3><div id="home-rooms"></div></div>
+      </div>`,
+    );
+  }
   const last = readSeat(localStorage, LAST_KEY);
   patch(
-    $('#app'),
-    `<div class="home">
-      <h1><span class="logo">♠</span> 증강 홀덤</h1>
-      <p class="sub">텍사스 홀덤 + 증강 · 최대 8명</p>
-      <label class="field">닉네임<input id="home-name" maxlength="12" autocomplete="nickname" value="${esc(app.homeName)}" placeholder="12자 이내" /></label>
-      <button class="primary big" data-a="create">방 만들기</button>
-      <div class="or">또는</div>
-      <div class="join-row">
-        <input id="home-code" maxlength="5" placeholder="방 코드 5자리" value="${esc(app.homeCode)}" autocapitalize="characters" />
-        <button class="big" data-a="join">방 코드로 입장</button>
-      </div>
-      ${last ? `<button class="ghost" data-a="resumeLast">이전 방(${esc(last.code)})의 내 자리로 돌아가기</button>` : ''}
-      <p class="err">${esc(app.homeError)}</p>
-    </div>`,
+    $('#home-extra'),
+    `${last ? `<button class="ghost" data-a="resumeLast">이전 방(${esc(last.code)})의 내 자리로 돌아가기</button>` : ''}
+     <p class="err">${esc(app.homeError)}</p>`,
+  );
+  renderRoomList();
+}
+
+function renderRoomList() {
+  const el = $('#home-rooms');
+  if (!el) return;
+  if (!app.rooms.length) {
+    patch(el, '<div class="muted empty">지금 열려 있는 공개 방이 없습니다</div>');
+    return;
+  }
+  patch(
+    el,
+    `<ul class="room-list">${app.rooms
+      .map((r) => {
+        const status = r.status === 'waiting' ? '<span class="st wait">대기 중</span>' : '<span class="st play">게임 중</span>';
+        const mid = r.status === 'playing' ? (r.midJoin ? '<span class="tag">중도 참여 가능</span>' : '<span class="tag off">중도 참여 불가</span>') : '';
+        return `<li class="${r.joinable ? '' : 'full'}">
+          <div class="rl-main"><b class="rl-name">${esc(r.name)}</b> ${status} ${mid}
+            <div class="muted rl-meta">${r.players}/${r.maxPlayers}명 · 시작 칩 ${fmt(r.startingChips)} · 블라인드 ${fmt(r.smallBlind)}/${fmt(r.bigBlind)}</div></div>
+          <button class="small primary" data-a="joinList" data-code="${esc(r.code)}" ${r.joinable ? '' : 'disabled'} title="${r.joinable ? '' : r.players >= r.maxPlayers ? '방이 가득 찼습니다' : '중도 참여가 꺼져 있습니다'}">입장</button></li>`;
+      })
+      .join('')}</ul>`,
   );
 }
 
-async function homeEnter(kind: 'create' | 'join') {
+async function homeEnter(kind: 'create' | 'join', listCode?: string) {
   syncHomeInputs();
   const name = app.homeName.trim();
   if (!name) {
@@ -243,10 +311,13 @@ async function homeEnter(kind: 'create' | 'join') {
     return renderHome();
   }
   storageSet(localStorage, NAME_KEY, name);
+  const code = (listCode ?? app.homeCode).trim().toUpperCase();
+  // 이 브라우저가 전에 이 방에서 쓰던 토큰 (탈락·추방된 사람은 다시 참여할 수 없다)
+  const prev = readSeat(localStorage, LAST_KEY);
   const r =
     kind === 'create'
-      ? await send('room:create', { name })
-      : await send('room:join', { name, code: app.homeCode.trim().toUpperCase() });
+      ? await send('room:create', { name, roomName: app.homeRoomName.trim(), isPublic: app.homePublic })
+      : await send('room:join', { name, code, prevToken: prev?.code === code ? prev.token : undefined });
   if (!r.ok) {
     app.homeError = r.error ?? '실패했습니다.';
     return renderHome();
@@ -290,6 +361,66 @@ function renderChat() {
   if (badge) badge.textContent = app.unread ? String(app.unread) : '';
 }
 
+/** 이 영역의 글자·숫자 입력칸에 입력하는 중인가 (체크박스·선택 상자는 제외) */
+function typingIn(root: Element | null | undefined): boolean {
+  const el = document.activeElement as HTMLInputElement | null;
+  return !!root && !!el && el.tagName === 'INPUT' && (el.type === 'text' || el.type === 'number') && root.contains(el);
+}
+
+const TURN_CHOICES = [15, 20, 25, 30, 40, 45, 50, 60];
+const KICK_LABEL: Record<number, string> = { 0: '끄기', 3: '3분', 5: '5분', 10: '10분' };
+
+/** 블라인드 진행 미리 보기 (예: 10/20 → 20/40 → 40/80 …) */
+function blindPreview(s: RoomSettings, levels = 6): string {
+  return Array.from({ length: levels }, (_, i) => {
+    const b = blindsAt(i, s.bigBlind, s.blindSchedule);
+    return `${fmt(b.sb)}/${fmt(b.bb)}`;
+  }).join(' → ') + ' …';
+}
+
+function settingsSummary(s: RoomSettings, bots: number | null): string {
+  const bbx = s.startingChips / s.bigBlind;
+  return `<ul class="summary">
+    <li>최대 ${s.maxPlayers}명${bots === null ? '' : ` · 봇 ${s.fillBots ? `${bots}명` : '없음'}`} · 제한 시간 ${s.turnSeconds}초</li>
+    <li>시작 칩 ${fmt(s.startingChips)} (${Math.floor(bbx)}BB) · 시작 블라인드 ${fmt(blindsAt(0, s.bigBlind).sb)}/${fmt(s.bigBlind)}</li>
+    <li>상승: ${s.levelMode === 'auto' ? '자동 (남은 인원 × 2핸드)' : `${s.levelHands}핸드마다`} · ${s.blindSchedule === 'x1.5' ? '1.5배씩' : '기본 표'}</li>
+    <li class="muted">${blindPreview(s)}</li>
+    <li>중도 참여 ${s.midJoin ? '허용' : '끔'} · 연결 끊긴 플레이어 자동 추방 ${KICK_LABEL[s.autoKickMinutes] ?? `${s.autoKickMinutes}분`}</li>
+  </ul>`;
+}
+
+/** 방장용 설정 폼. inGame 이면 칩·블라인드·봇은 잠근다 */
+function settingsForm(s: RoomSettings, room: { name: string; isPublic: boolean }, humans: number, inGame: boolean): string {
+  const opt = (vals: (number | string)[], cur: number | string, label: (v: number | string) => string = String) =>
+    vals.map((v) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${esc(label(v))}</option>`).join('');
+  const range = (a: number, b: number) => Array.from({ length: b - a + 1 }, (_, i) => a + i);
+  const bbx = s.startingChips / s.bigBlind;
+  const sb = blindsAt(0, s.bigBlind).sb;
+  return `<label>방 이름 <input data-setting="name" data-kind="str" maxlength="20" value="${esc(room.name)}" /></label>
+    <label class="check"><input type="checkbox" data-setting="isPublic" ${room.isPublic ? 'checked' : ''}/> 공개 방 (공개 방 목록에 표시)</label>
+    <label>최대 인원 <select data-setting="maxPlayers">${opt(range(inGame ? 2 : Math.max(2, humans), 8), s.maxPlayers)}</select></label>
+    ${
+      inGame
+        ? ''
+        : `<label class="check"><input type="checkbox" data-setting="fillBots" ${s.fillBots ? 'checked' : ''}/> 빈자리를 봇으로 채우기</label>
+    <label>봇 수 <select data-setting="botCount" ${s.fillBots ? '' : 'disabled'}>${opt(range(0, Math.max(0, s.maxPlayers - humans)), Math.min(s.botCount, s.maxPlayers - humans))}</select></label>`
+    }
+    <label>행동 제한 시간 <select data-setting="turnSeconds">${opt(TURN_CHOICES, s.turnSeconds, (v) => `${v}초`)}</select></label>
+    ${inGame ? `<div class="locked-row">시작 칩 ${fmt(s.startingChips)} (${Math.floor(bbx)}BB) · 시작 블라인드 ${fmt(sb)}/${fmt(s.bigBlind)} · ${s.blindSchedule === 'x1.5' ? '1.5배씩' : '기본 표'} <span class="muted">(잠김)</span></div>` : `
+    <label>시작 칩 <span class="inline-num"><input type="number" data-setting="startingChips" min="200" max="10000" step="100" value="${s.startingChips}" />
+      <b class="${bbx < 10 ? 'warn' : 'muted'}">${Math.floor(bbx)}BB</b></span></label>
+    ${bbx < 10 ? '<div class="warn">시작 칩이 10BB 미만이면 시작할 수 없습니다.</div>' : ''}
+    <label>시작 블라인드 <span class="inline-num"><span class="muted">SB ${fmt(sb)} / BB</span><input type="number" data-setting="bigBlind" min="2" max="1000" value="${s.bigBlind}" /></span></label>
+    `}
+    <label>블라인드 상승 주기 <span class="inline-num"><select data-setting="levelMode" data-kind="str">${opt(['auto', 'fixed'], s.levelMode, (v) => (v === 'auto' ? '자동 (인원 × 2핸드)' : '고정'))}</select>
+      ${s.levelMode === 'fixed' ? `<select data-setting="levelHands">${opt(range(4, 30), s.levelHands, (v) => `${v}핸드마다`)}</select>` : ''}</span></label>
+    ${inGame ? '<div class="muted small-note">상승 주기를 바꾸면 다음 레벨부터 적용됩니다.</div>' : ''}
+    ${inGame ? '' : `<label>블라인드 상승 방식 <select data-setting="blindSchedule" data-kind="str">${opt(['standard', 'x1.5'], s.blindSchedule, (v) => (v === 'standard' ? '기본 표' : '1.5배씩'))}</select></label>`}
+    <div class="muted small-note">${blindPreview(s)}</div>
+    <label class="check"><input type="checkbox" data-setting="midJoin" ${s.midJoin ? 'checked' : ''}/> 중도 참여 허용</label>
+    <label>연결 끊긴 플레이어 자동 추방 <select data-setting="autoKickMinutes">${opt([0, 3, 5, 10], s.autoKickMinutes, (v) => KICK_LABEL[Number(v)])}</select></label>`;
+}
+
 function renderLobby() {
   $('#modal')!.innerHTML = '';
   if (!$('.lobby-wrap')) {
@@ -302,28 +433,22 @@ function renderLobby() {
     // 채팅 기록은 대기실 화면보다 먼저 도착할 수 있다
     renderChat();
   }
+  // 설정을 입력하는 중에는 다시 그리지 않는다 (입력이 끝나면 change 로 반영됨)
+  if (typingIn($('#lobby-main')?.querySelector('.settings'))) return;
   const l = app.lobby!;
   const isHost = l.youId === l.hostId;
   const s = l.settings;
   const humans = l.players.length;
   const bots = s.fillBots ? Math.min(s.botCount, s.maxPlayers - humans) : 0;
-  const opt = (from: number, to: number, cur: number) =>
-    Array.from({ length: to - from + 1 }, (_, i) => from + i)
-      .map((v) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${v}</option>`)
-      .join('');
+  const tooFewChips = s.startingChips < s.bigBlind * 10;
   const settings = isHost
-    ? `<label>최대 인원 <select data-setting="maxPlayers">${opt(Math.max(2, humans), 8, s.maxPlayers)}</select></label>
-       <label class="check"><input type="checkbox" data-setting="fillBots" ${s.fillBots ? 'checked' : ''}/> 빈자리를 봇으로 채우기</label>
-       <label>봇 수 <select data-setting="botCount" ${s.fillBots ? '' : 'disabled'}>${opt(0, Math.max(0, s.maxPlayers - humans), Math.min(s.botCount, s.maxPlayers - humans))}</select></label>
-       <label>행동 제한 시간 <select data-setting="turnSeconds">${[10, 15, 20, 30, 45, 60, 90]
-         .map((v) => `<option value="${v}" ${v === s.turnSeconds ? 'selected' : ''}>${v}초</option>`)
-         .join('')}</select></label>`
-    : `<p>최대 ${s.maxPlayers}명 · 봇 ${s.fillBots ? `${bots}명` : '없음'} · 제한 시간 ${s.turnSeconds}초</p><p class="muted">방장이 설정하고 시작합니다.</p>`;
+    ? settingsForm(s, l, humans, false)
+    : `${settingsSummary(s, bots)}<p class="muted">방장이 설정하고 시작합니다.</p>`;
   patch(
     $('#lobby-main'),
     `<div class="lobby">
       <div class="lobby-head">
-        <div>방 코드 <b class="code">${esc(l.code)}</b></div>
+        <div><b class="room-name">${esc(l.name)}</b> <span class="tag">${l.isPublic ? '공개' : '비공개'}</span><br/>방 코드 <b class="code">${esc(l.code)}</b></div>
         <button data-a="copy">링크 복사</button>
       </div>
       <div class="panel">
@@ -343,7 +468,7 @@ function renderLobby() {
         ${settings}
       </div>
       <div class="lobby-actions">
-        ${isHost ? `<button class="primary big" data-a="start" ${humans + bots >= 2 ? '' : 'disabled'}>게임 시작</button>` : ''}
+        ${isHost ? `<button class="primary big" data-a="start" ${humans + bots >= 2 && !tooFewChips ? '' : 'disabled'}>게임 시작</button>` : ''}
         <button data-a="leave">나가기</button>
       </div>
       ${humans + bots < 2 && isHost ? '<p class="muted tcenter">친구에게 링크를 보내거나 봇으로 빈자리를 채우세요.</p>' : ''}
@@ -421,10 +546,13 @@ function renderTop(env: GameEnvelope, v: PlayerView) {
     `<div class="tb-left"><b class="code" data-a="copy" title="링크 복사">${esc(env.code)}</b>
       <span>핸드 #${v.handNumber}</span>
       <span>레벨 ${v.level} · 블라인드 ${fmt(v.blinds.sb)}/${fmt(v.blinds.bb)}</span>
-      <span class="muted hide-sm">상승까지 ${Math.max(0, v.handsUntilLevelUp)}핸드</span>
+      <span class="muted">다음 레벨까지 ${Math.max(0, v.handsUntilLevelUp)}핸드</span>
+      <span class="muted">남은 인원 ${v.alive}명</span>
+      ${v.joiners.length ? `<span class="muted hide-sm" title="다음 핸드부터 참여">참여 대기: ${esc(v.joiners.map((j) => j.name).join(', '))}</span>` : ''}
       ${v.table.taxers.length ? `<span class="taxbadge" title="죽음과 세금 선언자: ${esc(v.table.taxers.join(', '))}">💀 세금 ${v.you.tax ? `${fmt(v.you.tax)}칩/사용` : '면제'}</span>` : ''}</div>
      <div class="tb-right"><span class="wait">${waitingText(v)} <span class="timer-text" data-timer></span></span>
       ${env.debug ? '<span class="debug-flag">DEBUG</span>' : ''}
+      <button class="small" data-a="settings">${env.youAreHost ? '방 설정' : '설정 보기'}</button>
       <button class="small" data-a="leave">나가기</button></div>`,
   );
 }
@@ -440,7 +568,7 @@ function seatPos(k: number, n: number) {
 function seatHtml(v: PlayerView, p: PublicPlayerView, k: number, n: number): string {
   const { x, y } = seatPos(k, n);
   const me = p.id === v.you.id;
-  const cls = ['seat', me ? 'mine' : '', p.isTurn ? 'turn' : '', p.folded ? 'folded' : '', p.out ? 'out' : '', p.connected ? '' : 'off']
+  const cls = ['seat', me ? 'mine' : '', p.isTurn ? 'turn' : '', p.folded ? 'folded' : '', p.out || p.kicked ? 'out' : '', p.connected ? '' : 'off']
     .filter(Boolean)
     .join(' ');
   const badges = [p.isDealer ? '<i class="b d">D</i>' : '', p.isSB ? '<i class="b">SB</i>' : '', p.isBB ? '<i class="b">BB</i>' : '']
@@ -449,7 +577,9 @@ function seatHtml(v: PlayerView, p: PublicPlayerView, k: number, n: number): str
   if (p.shownCards) cards = p.shownCards.map((c) => cardHtml(c, { size: 'sm', extra: me ? handCardClass(v, c) : '' })).join('');
   else if (me && v.you.hole.length && !p.folded) cards = v.you.hole.map((c) => cardHtml(c, { size: 'sm', extra: handCardClass(v, c) })).join('');
   else if (p.hasCards) cards = cardBack('sm') + cardBack('sm');
-  const status = p.out
+  const status = p.kicked
+    ? '추방됨'
+    : p.out
     ? `탈락${p.place ? ` (${p.place}위)` : ''}`
     : p.sittingOut
       ? '자리 비움'
@@ -472,11 +602,19 @@ function seatHtml(v: PlayerView, p: PublicPlayerView, k: number, n: number): str
   return `<div class="${cls}" style="left:${x}%;top:${y}%">${bubbleHtml}
       <div class="seat-top"><span class="nm">${p.isBot ? '🤖 ' : ''}${esc(p.name)}</span>${badges}</div>
       <div class="seat-mid"><span class="chips">${fmt(p.chips)}</span><span class="cards">${cards}</span></div>
-      <div class="seat-status">${esc(status)}${!p.connected && !p.out ? ' ⚠' : ''}</div>
+      <div class="seat-status">${esc(status)}${!p.connected && !p.out && !p.kicked ? ' ⚠' : ''}</div>
+      ${canKick(p) ? `<button class="small kick" data-a="kick" data-id="${esc(p.id)}" data-name="${esc(p.name)}">추방</button>` : ''}
       ${shep}
       <div class="seat-augs"><span class="cnt" title="보유 증강 수">증강 ${p.augmentCount}</span>${revealed}</div>
     </div>
     ${p.streetBet > 0 ? `<div class="bet" style="left:${bx}%;top:${by}%">${fmt(p.streetBet)}</div>` : ''}`;
+}
+
+/** 방장 화면: 연결 끊김·자리 비움 상태인 사람 좌석에 추방 버튼 (최종 검증은 서버) */
+function canKick(p: PublicPlayerView): boolean {
+  const env = app.env;
+  if (!env?.youAreHost || p.isBot || p.out || p.kicked || p.id === env.view.you.id) return false;
+  return !p.connected || p.sittingOut;
 }
 
 function reactionHtml(v: PlayerView): string {
@@ -494,7 +632,8 @@ function reactionHtml(v: PlayerView): string {
 
 function renderTable(v: PlayerView) {
   const n = v.players.length;
-  const mySeat = v.players.findIndex((p) => p.id === v.you.id);
+  // 자리에 앉지 않은 사람(중도 참여 대기 등)은 첫 좌석을 아래에 둔다
+  const mySeat = Math.max(0, v.players.findIndex((p) => p.id === v.you.id));
   const seats = v.players.map((p, i) => seatHtml(v, p, (i - mySeat + n) % n, n)).join('');
   patch($('#g-seats'), seats);
 
@@ -552,10 +691,15 @@ function renderTable(v: PlayerView) {
 }
 
 function renderHand(v: PlayerView) {
-  const me = v.players.find((p) => p.id === v.you.id)!;
+  const me = v.players.find((p) => p.id === v.you.id);
   let html: string;
-  if (v.you.out) {
-    html = `<div class="hand-info">탈락했습니다${me.place ? ` (${me.place}위)` : ''}. 게임은 계속 볼 수 있습니다.</div>`;
+  if (v.you.joining) {
+    const j = v.you.joining;
+    html = `<div class="hand-info joining"><b>다음 핸드부터 참여합니다</b>
+      <div>증강 선택 ${j.picksDone}/${j.picksTotal}${j.picksDone < j.picksTotal ? ' 진행 중' : ' 완료 — 다음 핸드 시작 때 자리에 앉습니다'}</div>
+      <div class="muted small-note">지금은 테이블의 공개 정보만 볼 수 있습니다.</div></div>`;
+  } else if (v.you.out || !me) {
+    html = `<div class="hand-info">탈락했습니다${me?.place ? ` (${me.place}위)` : ''}. 게임은 계속 볼 수 있습니다.</div>`;
   } else {
     let cards: string;
     if (v.you.hole.length) cards = v.you.hole.map((c) => cardHtml(c, { size: 'lg', extra: me.folded ? 'dim' : handCardClass(v, c) })).join('');
@@ -767,7 +911,7 @@ function renderModal(env: GameEnvelope, v: PlayerView) {
   if (you.pick && you.pick.length) {
     html = `<div class="modal-bg"><div class="modal pick">
       <h3>증강 선택 <span class="timer-text" data-timer></span></h3>
-      <p class="muted">레벨 ${v.level} · 하나를 고르세요. 시간이 지나면 무작위로 선택됩니다.</p>
+      <p class="muted">레벨 ${v.level} · 하나를 고르세요. 시간이 지나면 무작위로 선택됩니다.${you.joining ? ` <b>중도 참여 선택 ${you.joining.picksDone + 1}/${you.joining.picksTotal}</b>` : ''}</p>
       <div class="pick-row">${you.pick
         .map(
           (a) => `<button class="pick-card s${a.stars}" data-a="pick" data-aug="${a.id}">
@@ -777,6 +921,12 @@ function renderModal(env: GameEnvelope, v: PlayerView) {
           <div class="pc-desc">${esc(a.description)}</div></button>`,
         )
         .join('')}</div></div></div>`;
+  } else if (app.showSettings) {
+    html = `<div class="modal-bg"><div class="modal settings-modal">
+      <h3>${env.youAreHost ? '방 설정' : '방 설정 (읽기 전용)'}</h3>
+      <div class="settings">${env.youAreHost ? settingsForm(env.settings, env, 0, true) : settingsSummary(env.settings, null)}</div>
+      <p class="muted small-note">게임 중에는 시작 칩·블라인드·상승 방식을 바꿀 수 없습니다.</p>
+      <div class="lobby-actions"><button data-a="settings">닫기</button></div></div></div>`;
   } else if (v.reaction) {
     html = '';
   } else if (you.discard?.pending) {
@@ -822,12 +972,14 @@ function renderModal(env: GameEnvelope, v: PlayerView) {
     const ranking = [...v.players].sort((a, b) => (a.place ?? 99) - (b.place ?? 99));
     html = `<div class="modal-bg"><div class="modal">
       <h3>🏆 ${esc(nameOf(v, v.winnerId))} 우승!</h3>
-      <ol class="ranking">${ranking.map((p) => `<li>${esc(p.name)} <span class="muted">${p.place ?? '-'}위</span></li>`).join('')}</ol>
+      <ol class="ranking">${ranking.filter((p) => !p.kicked).map((p) => `<li>${esc(p.name)} <span class="muted">${p.place ?? '-'}위</span></li>`).join('')}</ol>
       <div class="lobby-actions">${env.youAreHost ? '<button class="primary" data-a="toLobby">같은 멤버로 대기실로</button>' : '<span class="muted">방장이 대기실로 돌아갈 수 있습니다.</span>'}
       <button data-a="leave">나가기</button></div></div></div>`;
   } else if (v.phase === 'augmentSelect' && you.pickDone && !you.out) {
     html = `<div class="banner">다른 플레이어가 증강을 고르는 중… <span class="timer-text" data-timer></span></div>`;
   }
+  // 설정 입력 중에는 다시 그리지 않는다
+  if (typingIn(el?.querySelector('.settings-modal'))) return;
   patch(el, html);
 }
 
@@ -885,11 +1037,14 @@ function renderDebug() {
       <input id="dbg-wild" placeholder="편애 숫자 2~14" size="6" />
       <button class="small" data-a="dbgGive">증강 지급</button></div>
     <div class="dbg-row"><input id="dbg-chips" placeholder="칩" size="6" /><button class="small" data-a="dbgChips">칩 설정</button>
-      <button class="small" data-a="dbgLevel">블라인드 레벨 즉시 올리기</button></div>
+      <button class="small" data-a="dbgLevel">블라인드 레벨 즉시 올리기</button>
+      <button class="small" data-a="dbgDisconnect">선택한 플레이어 연결 끊기</button></div>
     <div class="dbg-deal">
       <div class="muted">다음 핸드 카드 지정 (예: As Kd 7c)</div>
       <label>보드 <input id="dbg-board" placeholder="최대 5장" /></label>
       ${v.players.filter((p) => !p.out).map((p) => `<label>${esc(p.name)} <input data-dbg-hand="${esc(p.id)}" placeholder="2~3장" /></label>`).join('')}
+      <label>번 카드 <input id="dbg-burns" placeholder="플랍·턴·리버 앞, 최대 3장" /></label>
+      <label>덱 순서 <input id="dbg-deck" placeholder="남은 덱 맨 위부터 (멀리건·되감기)" /></label>
       <button class="small" data-a="dbgDeal">다음 핸드에 적용</button>
     </div>`,
   );
@@ -935,6 +1090,27 @@ document.addEventListener('click', async (ev) => {
       return homeEnter('create');
     case 'join':
       return homeEnter('join');
+    case 'joinList':
+      return homeEnter('join', t.dataset.code);
+    case 'reconnect':
+      app.forcedOff = false;
+      socket.connect();
+      return;
+    case 'settings':
+      app.showSettings = !app.showSettings;
+      if (app.env) renderGame();
+      return;
+    case 'kick': {
+      if (!confirm(`${t.dataset.name}님을 추방할까요? 진행 중인 핸드는 폴드 처리되고, 핸드가 끝나면 남은 칩과 함께 자리에서 사라집니다.`)) return;
+      const r = await send('room:kick', { playerId: t.dataset.id });
+      if (!r.ok) toast(r.error ?? '추방하지 못했습니다.');
+      return;
+    }
+    case 'dbgDisconnect': {
+      const r = await send('debug:disconnect', { playerId: ($('#dbg-player') as HTMLSelectElement).value });
+      toast(r.ok ? '연결을 끊었습니다.' : (r.error ?? '실패'));
+      return;
+    }
     case 'resumeLast': {
       const last = readSeat(localStorage, LAST_KEY);
       if (last) resume(last, false);
@@ -970,6 +1146,7 @@ document.addEventListener('click', async (ev) => {
       app.chat = [];
       app.unread = 0;
       app.bubbles.clear();
+      app.showSettings = false;
       app.screen = 'home';
       history.replaceState(null, '', location.pathname);
       render();
@@ -1059,7 +1236,9 @@ document.addEventListener('click', async (ev) => {
         if (inp.value.trim()) hands[inp.dataset.dbgHand!] = split(inp.value);
       });
       const board = split(($('#dbg-board') as HTMLInputElement).value);
-      const r = await send('debug:deal', { board: board.length ? board : undefined, hands });
+      const burns = split(($('#dbg-burns') as HTMLInputElement).value);
+      const deck = split(($('#dbg-deck') as HTMLInputElement).value);
+      const r = await send('debug:deal', { board: board.length ? board : undefined, hands, burns, deck });
       toast(r.ok ? '다음 핸드에 적용됩니다.' : (r.error ?? '실패'));
       return;
     }
@@ -1082,9 +1261,24 @@ document.addEventListener('change', async (ev) => {
   const t = ev.target as HTMLElement;
   if (t.dataset.setting) {
     const key = t.dataset.setting;
-    const value = t instanceof HTMLInputElement && t.type === 'checkbox' ? t.checked : Number((t as HTMLSelectElement).value);
+    const raw = (t as HTMLInputElement | HTMLSelectElement).value;
+    const value = t instanceof HTMLInputElement && t.type === 'checkbox' ? t.checked : t.dataset.kind === 'str' ? raw : Number(raw);
     const r = await send('room:settings', { [key]: value });
-    if (!r.ok) toast(r.error ?? '설정 실패');
+    if (!r.ok) {
+      toast(r.error ?? '설정 실패');
+      // 거부된 값은 서버 값으로 되돌린다
+      if (app.screen === 'lobby' && app.lobby) {
+        $('#lobby-main') && mount($('#lobby-main'), '');
+        renderLobby();
+      } else if (app.env) {
+        mount($('#modal'), '');
+        renderGame();
+      }
+    }
+    return;
+  }
+  if ((t as HTMLInputElement).name === 'vis') {
+    app.homePublic = (t as HTMLInputElement).value === 'public';
     return;
   }
   if (t.dataset.target) {

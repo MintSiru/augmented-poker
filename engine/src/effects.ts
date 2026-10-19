@@ -387,6 +387,7 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
     },
     resolve(ctx) {
       ctx.state.blackoutNext = true;
+      ctx.state.blackoutBy = ctx.owner.id;
       addLog(ctx.state, '암전: 다음 핸드는 모두 자기 홀카드를 보지 못한 채 진행합니다');
     },
   },

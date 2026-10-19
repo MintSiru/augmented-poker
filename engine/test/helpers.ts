@@ -20,15 +20,16 @@ export function makePlayers(n: number) {
   return Array.from({ length: n }, (_, i) => ({ id: `p${i + 1}`, name: `P${i + 1}`, isBot: true }));
 }
 
-/** 테이블 위 전체 칩. 핸드가 끝나 팟이 분배된 뒤에는 칩만 센다. */
+/** 테이블 위 전체 칩. 핸드가 끝나 팟이 분배된 뒤에는 칩만 센다. (자리를 비켜 준 탈락자는 0칩) */
 export function totalChips(state: GameState): number {
   if (state.result) return state.players.reduce((s, p) => s + p.chips, 0);
   return state.players.reduce((s, p) => s + p.chips + p.contributed, 0) + state.deadMoney;
 }
 
-/** 은행에서 생기거나 사라진 칩을 반영한 기대 총액 */
+/** 은행에서 생기거나 사라진 칩(하이리스크 보너스, 중도 참여 지급, 세금, 추방)을 반영한 기대 총액 */
 export function expectedChips(state: GameState, initial: number): number {
-  return initial + state.stats.bankChips - state.stats.bankTaxed;
+  const st = state.stats;
+  return initial + st.bankChips + st.joinChips - st.bankTaxed - st.kickedChips;
 }
 
 function act(state: GameState, id: string, a: GameAction, strict: boolean): boolean {

@@ -7,6 +7,7 @@ import { evaluatePlayerHand, VARIANT_LABEL, AppliedVariant } from './evaluator.j
 import { computePots, splitPot } from './pots.js';
 import { cryptoRng, pickOne, Rng, shuffle } from './rng.js';
 import {
+  active,
   addLog,
   announceAnonymous,
   announceNamed,
@@ -41,14 +42,17 @@ import type {
   GameAction,
   GameState,
   HandResult,
+  Joiner,
   OwnedAugment,
   Pending,
   Phase,
   PlayerState,
   ShowdownEntry,
+  BlindSchedule,
+  LevelMode,
 } from './types.js';
 
-export { BLIND_LEVELS, blindsAt, currentBlinds, findAug } from './core.js';
+export { blindsAt, bigBlindAt, niceRound, STANDARD_MULTIPLIERS, currentBlinds, findAug } from './core.js';
 
 export const MAX_PLAYERS = 8;
 /** 증강 선언 후 효과 적용 전 반응 대기 시간 (카운터 스펠 보유 여부와 무관하게 항상 같다) */
@@ -62,9 +66,17 @@ export interface NewPlayer {
 
 export interface CreateGameOptions {
   startingChips?: number;
+  /** 시작 빅블라인드 (기본 20, 스몰블라인드는 절반) */
+  bigBlind?: number;
+  blindSchedule?: BlindSchedule;
+  /** 블라인드 상승 주기 (기본 자동: 레벨 시작 시 남은 인원 × 2핸드) */
+  levelMode?: LevelMode;
+  /** 고정 주기의 레벨당 핸드 수 */
+  fixedLevelHands?: number;
   rng?: Rng;
   debug?: boolean;
   dealerSeat?: number;
+  /** 테스트 편의: 지정하면 고정 주기 N핸드 */
   handsPerLevel?: number;
   /** false 면 첫 증강 선택 없이 '핸드 종료' 상태로 만들어 두고, 호출 측이 startNextHand 로 첫 핸드를 시작한다 */
   initialPick?: boolean;
@@ -113,6 +125,8 @@ function newPlayer(np: NewPlayer, seat: number, chips: number): PlayerState {
     shepherdLied: false,
     keptCard: null,
     attachPending: false,
+    kicked: false,
+    logFrom: 0,
   };
 }
 
@@ -121,13 +135,26 @@ export function createGame(players: NewPlayer[], opts: CreateGameOptions = {}): 
   if (new Set(players.map((p) => p.id)).size !== players.length) throw new Error('플레이어 id 중복');
   const rng = opts.rng ?? cryptoRng;
   const startingChips = opts.startingChips ?? 1000;
+  const fixed = opts.handsPerLevel ?? opts.fixedLevelHands;
   const state: GameState = {
-    options: { startingChips, handsPerLevel: opts.handsPerLevel ?? players.length * 2, debug: !!opts.debug },
+    options: {
+      startingChips,
+      bigBlind: opts.bigBlind ?? 20,
+      blindSchedule: opts.blindSchedule ?? 'standard',
+      levelMode: opts.handsPerLevel !== undefined ? 'fixed' : (opts.levelMode ?? 'auto'),
+      fixedLevelHands: Math.max(1, fixed ?? 10),
+      debug: !!opts.debug,
+    },
     rng,
     players: players.map((np, seat) => newPlayer(np, seat, startingChips)),
     phase: 'augmentSelect',
     handNumber: 1,
     levelIndex: 0,
+    levelStartHand: 1,
+    levelHands: 0,
+    pickRounds: 0,
+    joiners: [],
+    retired: [],
     dealerIdx: opts.dealerSeat ?? rng.int(players.length),
     sbIdx: -1,
     bbIdx: -1,
@@ -139,6 +166,7 @@ export function createGame(players: NewPlayer[], opts: CreateGameOptions = {}): 
     used: [],
     effects: { glass: false, blackout: false, fogSeers: [], fogLifted: false, flips: 0, rewinds: 0, sealed: [] },
     blackoutNext: false,
+    blackoutBy: null,
     currentBet: 0,
     minRaise: 0,
     toAct: null,
@@ -157,10 +185,13 @@ export function createGame(players: NewPlayer[], opts: CreateGameOptions = {}): 
     nextDeal: null,
     forceLevelUp: false,
     taxers: [],
-    stats: { picks: {}, uses: {}, bankChips: 0, bankTaxed: 0 },
+    stats: { picks: {}, uses: {}, bankChips: 0, bankTaxed: 0, joinChips: 0, kickedChips: 0 },
   };
-  const { sb, bb } = blindsAt(0);
-  addLog(state, `게임 시작! 참가자 ${players.length}명, 시작 칩 ${startingChips}, 블라인드 ${sb}/${bb} (${state.options.handsPerLevel}핸드마다 상승)`);
+  state.levelHands = levelHandsFor(state);
+  const { sb, bb } = currentBlinds(state);
+  const cycle = state.options.levelMode === 'auto' ? `자동: 남은 인원 × 2핸드, 지금 ${state.levelHands}핸드` : `${state.levelHands}핸드마다`;
+  const how = state.options.blindSchedule === 'x1.5' ? '1.5배씩' : '기본 표';
+  addLog(state, `게임 시작! 참가자 ${players.length}명, 시작 칩 ${startingChips}, 블라인드 ${sb}/${bb} (${cycle} ${how}로 상승)`);
   if (opts.initialPick === false) {
     state.handNumber = 0;
     state.phase = 'handEnd';
@@ -168,6 +199,18 @@ export function createGame(players: NewPlayer[], opts: CreateGameOptions = {}): 
   }
   startPickRound(state);
   return state;
+}
+
+/** 이 레벨의 핸드 수: 자동은 (레벨 시작 시 남은 인원 × 2), 고정은 설정값 */
+function levelHandsFor(state: GameState): number {
+  if (state.options.levelMode === 'fixed') return state.options.fixedLevelHands;
+  return Math.max(2, state.players.filter(active).length * 2);
+}
+
+/** 블라인드 상승 주기 변경 (게임 중에도 가능, 다음 레벨부터 적용) */
+export function setLevelPlan(state: GameState, mode: LevelMode, fixedHands: number): void {
+  state.options.levelMode = mode;
+  state.options.fixedLevelHands = Math.max(1, Math.floor(fixedHands));
 }
 
 // ───────────────────────── 엔진 기능 (효과 함수용) ─────────────────────────
@@ -198,10 +241,17 @@ function runHandEndHooks(state: GameState, result: HandResult): void {
 function startPickRound(state: GameState): void {
   resetHandState(state);
   state.phase = 'augmentSelect';
+  state.pickRounds++;
   const level = state.levelIndex + 1;
+  // 아직 앉지 않은 중도 참여자도 이번 선택 기회를 받는다
+  for (const j of state.joiners) {
+    j.picksLeft++;
+    j.picksTotal++;
+    if (!j.player.pickOptions) rollJoinerOffer(state, j);
+  }
   for (const p of state.players) {
     p.pickOptions = null;
-    if (p.out) continue;
+    if (!active(p)) continue;
     if (p.skipPicks > 0) {
       p.skipPicks--;
       addLog(state, '하이리스크 패배로 이번 증강 선택 기회를 잃었습니다.', { to: [p.id] });
@@ -236,6 +286,198 @@ export function grantAugment(state: GameState, p: PlayerState, id: AugmentId, wi
   p.augments.push(aug);
   state.stats.picks[id] = (state.stats.picks[id] ?? 0) + 1;
   return aug;
+}
+
+// ───────────────────────── 중도 참여 ─────────────────────────
+
+function rollJoinerOffer(state: GameState, j: Joiner): void {
+  j.player.pickOptions = null;
+  while (j.picksLeft > 0) {
+    const offer = rollAugmentOffer(state.levelIndex + 1, j.player.augments.map((a) => a.id), state.rng);
+    if (offer.length) {
+      j.player.pickOptions = offer;
+      j.pickSeq++;
+      return;
+    }
+    j.picksLeft = 0; // 더 고를 수 있는 증강이 없다
+  }
+}
+
+export function getJoiner(state: GameState, id: string): Joiner | undefined {
+  return state.joiners.find((j) => j.player.id === id);
+}
+
+/**
+ * 중도 참여 신청: 관전 상태로 공개 정보만 보면서, 다른 플레이어들이 지금까지 받은 증강 선택 횟수만큼
+ * 연속으로 증강을 고른다. 다 고른 뒤 다음 핸드가 시작될 때 자리에 앉는다 (진행 중인 핸드에는 끼어들지 않음).
+ */
+export function addJoiner(state: GameState, np: NewPlayer): ActionResult {
+  if (state.phase === 'gameOver') return { ok: false, error: '게임이 끝났습니다.' };
+  if (playerById(state, np.id) || getJoiner(state, np.id) || state.retired.some((p) => p.id === np.id)) {
+    return { ok: false, error: '이미 참여한 플레이어입니다.' };
+  }
+  const p = newPlayer(np, -1, 0);
+  p.logFrom = state.logSeq + 1;
+  const j: Joiner = { player: p, picksLeft: state.pickRounds, picksTotal: state.pickRounds, pickSeq: 0 };
+  state.joiners.push(j);
+  addLog(state, `${p.name}님이 참여했습니다 (다음 핸드부터)`);
+  rollJoinerOffer(state, j);
+  state.decisionSeq++;
+  return { ok: true };
+}
+
+/** 앉기 전에 나간 중도 참여자 제거 */
+export function removeJoiner(state: GameState, id: string): boolean {
+  const j = getJoiner(state, id);
+  if (!j) return false;
+  state.joiners = state.joiners.filter((x) => x !== j);
+  addLog(state, `${j.player.name}님이 참여를 취소했습니다`);
+  return true;
+}
+
+/** 중도 참여자의 증강 선택 (선택 하나마다 서버가 30초 제한 시간을 둔다) */
+function applyJoinerPick(state: GameState, j: Joiner, augment: AugmentId): string | null {
+  const p = j.player;
+  if (!p.pickOptions) return '선택할 증강이 없습니다.';
+  if (!p.pickOptions.includes(augment)) return '선택지에 없는 증강입니다.';
+  const aug = grantAugment(state, p, augment);
+  j.picksLeft--;
+  const extra = aug.wildRank ? ` — 와일드 숫자: ${rankName(aug.wildRank)} (나에게만 보임)` : '';
+  addLog(state, `증강 획득: ${augLabel(augment, aug.wildRank)}${extra} (${j.picksTotal - j.picksLeft}/${j.picksTotal})`, { to: [p.id] });
+  rollJoinerOffer(state, j);
+  state.decisionSeq++;
+  return null;
+}
+
+/** 선택 대기 중인 중도 참여자와 각자의 선택 번호 (서버 타이머용) */
+export function joinerPending(state: GameState): { id: string; seq: number }[] {
+  return state.joiners.filter((j) => j.player.pickOptions).map((j) => ({ id: j.player.id, seq: j.pickSeq }));
+}
+
+/** 중도 참여자의 선택 제한 시간 종료: 무작위 선택 */
+export function joinerTimeout(state: GameState, id: string): void {
+  const j = getJoiner(state, id);
+  if (j?.player.pickOptions) applyJoinerPick(state, j, pickOne(j.player.pickOptions, state.rng));
+}
+
+/** 좌석 배열을 바꾼 뒤에도 딜러 버튼 위치(좌석 번호)를 유지한다 */
+function reseat(state: GameState, mutate: () => void): void {
+  const dealerSeat = state.players[state.dealerIdx]?.seat ?? 0;
+  mutate();
+  state.players.sort((a, b) => a.seat - b.seat);
+  let idx = -1;
+  state.players.forEach((p, i) => {
+    if (p.seat <= dealerSeat) idx = i;
+  });
+  state.dealerIdx = idx >= 0 ? idx : state.players.length - 1;
+}
+
+/**
+ * 핸드와 핸드 사이에만 호출: 추방된 플레이어를 자리에서 빼고(남은 칩은 사라짐),
+ * 증강 선택을 마친 중도 참여자를 앉힌다. 남은 사람이 1명 이하가 되면 게임을 끝내고 false.
+ */
+function betweenHands(state: GameState): boolean {
+  const kicked = state.players.filter((p) => p.kicked);
+  const ready = state.joiners.filter((j) => j.picksLeft <= 0 && !j.player.pickOptions);
+  if (kicked.length || ready.length) {
+    reseat(state, () => {
+      for (const p of kicked) {
+        state.stats.kickedChips += p.chips;
+        p.chips = 0;
+      }
+      state.players = state.players.filter((p) => !p.kicked);
+      for (const j of ready) {
+        const alive = state.players.filter(active);
+        const used = new Set(state.players.map((p) => p.seat));
+        let seat = Array.from({ length: MAX_PLAYERS }, (_, i) => i).find((i) => !used.has(i));
+        if (seat === undefined) {
+          // 빈 좌석이 없으면 탈락자의 자리를 넘겨받는다 (탈락자는 계속 관전)
+          const gone = state.players.find((p) => p.out);
+          if (!gone || alive.length >= MAX_PLAYERS) continue;
+          seat = gone.seat;
+          state.players = state.players.filter((p) => p !== gone);
+          state.retired.push(gone);
+        }
+        const avg = alive.length ? Math.floor(alive.reduce((s, p) => s + p.chips, 0) / alive.length) : state.options.startingChips;
+        const chips = Math.max(1, Math.min(state.options.startingChips, avg));
+        const p = j.player;
+        p.seat = seat;
+        p.chips = chips;
+        state.stats.joinChips += chips;
+        state.players.push(p);
+        state.joiners = state.joiners.filter((x) => x !== j);
+        addLog(state, `${p.name}님이 자리에 앉았습니다 (칩 ${chips})`);
+      }
+    });
+  }
+  const remaining = state.players.filter(active);
+  if (remaining.length <= 1) {
+    endGame(state, remaining[0] ?? null);
+    return false;
+  }
+  return true;
+}
+
+function endGame(state: GameState, winner: PlayerState | null): void {
+  for (const p of state.players) {
+    if (!p.kicked) continue;
+    state.stats.kickedChips += p.chips;
+    p.chips = 0;
+  }
+  if (winner) {
+    winner.place = 1;
+    state.winnerId = winner.id;
+    addLog(state, `🏆 ${winner.name} 우승!`);
+  }
+  for (const p of state.players) p.attachPending = false;
+  state.toAct = null;
+  state.phase = 'gameOver';
+  state.decisionSeq++;
+}
+
+/**
+ * 추방: 즉시 표시하고, 진행 중인 핸드에 참여 중이면 폴드 처리(낸 칩은 팟에 남음)한다.
+ * 핸드가 끝나면 자리에서 제거되고 남은 칩은 사라진다. 선언했던 지속 효과(죽음과 세금, 다음 핸드 암전)는 즉시 끝난다.
+ */
+export function kickPlayer(state: GameState, id: string): ActionResult {
+  if (state.phase === 'gameOver') return { ok: false, error: '게임이 끝났습니다.' };
+  const j = getJoiner(state, id);
+  if (j) {
+    state.joiners = state.joiners.filter((x) => x !== j);
+    addLog(state, `${j.player.name}님이 추방되었습니다`);
+    state.decisionSeq++;
+    return { ok: true };
+  }
+  const p = playerById(state, id);
+  if (!p) return { ok: false, error: '플레이어를 찾을 수 없습니다.' };
+  if (p.out) return { ok: false, error: '이미 탈락한 플레이어입니다.' };
+  if (p.kicked) return { ok: false, error: '이미 추방되었습니다.' };
+  p.kicked = true;
+  p.sittingOut = true;
+  p.pickOptions = null;
+  p.attachPending = false;
+  addLog(state, `${p.name}님이 추방되었습니다`);
+  if (state.taxers.includes(p.id)) {
+    state.taxers = state.taxers.filter((x) => x !== p.id);
+    addLog(state, `${p.name}의 죽음과 세금 효과가 끝났습니다`);
+  }
+  if (state.blackoutNext && state.blackoutBy === p.id) {
+    state.blackoutNext = false;
+    state.blackoutBy = null;
+    addLog(state, `${p.name}이(가) 선언한 다음 핸드 암전이 취소되었습니다`);
+  }
+  if (live(p)) {
+    // 일반 폴드와 달리 보험 등 폴드 시 발동하는 효과는 적용하지 않는다 (낸 칩은 모두 팟에 남김)
+    p.folded = true;
+    p.forcedCall = false;
+    p.lastAction = '추방';
+    for (const c of p.hole) state.used.push({ card: c, kind: 'fold' });
+    // 반응 대기 중이면 대기가 끝난 뒤 흐름이 이어진다
+    if (state.phase === 'betting' || state.phase === 'discard' || state.phase === 'declare') continueAfterReaction(state);
+  }
+  if (state.phase === 'augmentSelect' && !state.players.some((x) => x.pickOptions)) beginHand(state);
+  state.decisionSeq++;
+  return { ok: true };
 }
 
 function applyPick(state: GameState, p: PlayerState, augment: AugmentId): string | null {
@@ -327,6 +569,8 @@ function dealCards(state: GameState): void {
     return out;
   };
   const fixedBoard = take(deal?.board, 5);
+  const fixedBurns = take(deal?.burns, 3);
+  const fixedDeck = take(deal?.deck, 52);
   const fixedHands = new Map<string, Card[]>();
   for (const p of state.players) {
     if (p.out) continue;
@@ -335,7 +579,7 @@ function dealCards(state: GameState): void {
   }
   // 보드 5장과 번 카드 3장은 핸드 시작 시 미리 떼어 둔다 (예지로 본 순서 그대로 나오도록)
   state.board = [...fixedBoard, ...pool.splice(0, 5 - fixedBoard.length)];
-  state.burns = pool.splice(0, 3);
+  state.burns = [...fixedBurns, ...pool.splice(0, 3 - fixedBurns.length)];
   for (const i of seatOrderFromDealer(state)) {
     const p = state.players[i];
     if (p.out) continue;
@@ -345,14 +589,16 @@ function dealCards(state: GameState): void {
     p.hole = [...(k ? [k] : []), ...fixed, ...pool.splice(0, n)];
     p.inHand = true;
   }
-  state.deck = pool;
+  state.deck = [...fixedDeck, ...pool];
 }
 
 function beginHand(state: GameState): void {
+  if (!betweenHands(state)) return;
   resetHandState(state);
   state.phase = 'betting';
   state.effects.blackout = state.blackoutNext;
   state.blackoutNext = false;
+  state.blackoutBy = null;
   const alive = state.players.filter((p) => !p.out);
   if (state.handNumber > 1 || state.players[state.dealerIdx].out) {
     state.dealerIdx = nextIdx(state, state.dealerIdx, (p) => !p.out);
@@ -805,7 +1051,7 @@ export function resolveReaction(state: GameState): void {
       addLog(state, `${owner.name}의 ${decl.anonymous ? '비공개 증강' : `「${decl.publicName}」`}이(가) 무효화되었습니다 (사용 횟수 소모)`);
       effect.onCountered?.(ctx, decl.params);
     } else {
-      const err = owner.out ? '탈락' : effect.check(ctx, decl.params, true);
+      const err = owner.out ? '탈락' : owner.kicked ? '추방됨' : effect.check(ctx, decl.params, true);
       if (err) {
         // 상황이 바뀌어 효과가 성립하지 않으면 사용 횟수를 돌려준다
         const def = AUGMENTS[decl.augment];
@@ -862,7 +1108,7 @@ export function counterCandidates(state: GameState): string[] {
   const head = state.reaction?.queue[0];
   if (state.phase !== 'reaction' || !head || head.countered) return [];
   return state.players
-    .filter((p) => !p.out && p.id !== head.ownerId && (findAug(p, 'counterSpell')?.usesLeft ?? 0) > 0)
+    .filter((p) => active(p) && p.id !== head.ownerId && (findAug(p, 'counterSpell')?.usesLeft ?? 0) > 0)
     .map((p) => p.id);
 }
 
@@ -994,9 +1240,9 @@ function finishHand(state: GameState, result: HandResult): void {
   state.declareQueue = [];
   runHandEndHooks(state, result);
   state.result = result;
-  const aliveBefore = state.players.filter((p) => !p.out).length;
+  const aliveBefore = state.players.filter(active).length;
   const busted = state.players
-    .filter((p) => !p.out && p.chips <= 0)
+    .filter((p) => active(p) && p.chips <= 0)
     .sort((a, b) => b.contributed + b.mulliganFee - (a.contributed + a.mulliganFee));
   busted.forEach((p, k) => {
     p.out = true;
@@ -1006,19 +1252,12 @@ function finishHand(state: GameState, result: HandResult): void {
     p.attachPending = false;
     addLog(state, `${p.name} 탈락 (${p.place}위)`);
   });
-  const remaining = state.players.filter((p) => !p.out);
+  const remaining = state.players.filter(active);
   if (remaining.length <= 1) {
-    const winner = remaining[0] ?? null;
-    if (winner) {
-      winner.place = 1;
-      state.winnerId = winner.id;
-      addLog(state, `🏆 ${winner.name} 우승!`);
-    }
-    for (const p of state.players) p.attachPending = false;
-    state.phase = 'gameOver';
-  } else {
-    state.phase = 'handEnd';
+    endGame(state, remaining[0] ?? null);
+    return;
   }
+  state.phase = 'handEnd';
   state.decisionSeq++;
 }
 
@@ -1042,14 +1281,17 @@ export function startNextHand(state: GameState): ActionResult {
       applyAttach(state, p, p.hole.indexOf(best));
     }
   }
+  if (!betweenHands(state)) return { ok: true };
   state.handNumber++;
-  const scheduled = Math.floor((state.handNumber - 1) / state.options.handsPerLevel);
-  const newLevel = Math.max(scheduled, state.levelIndex + (state.forceLevelUp ? 1 : 0));
-  state.forceLevelUp = false;
-  if (newLevel > state.levelIndex) {
-    state.levelIndex = newLevel;
+  const due = state.handNumber >= state.levelStartHand + state.levelHands;
+  if (due || state.forceLevelUp) {
+    state.forceLevelUp = false;
+    state.levelIndex++;
+    state.levelStartHand = state.handNumber;
+    // 자동 주기는 이 레벨이 시작될 때 남은 인원(중도 참여자 포함)으로 다시 계산한다
+    state.levelHands = levelHandsFor(state);
     const { sb, bb } = currentBlinds(state);
-    addLog(state, `블라인드 상승! 레벨 ${newLevel + 1}: ${sb}/${bb}`);
+    addLog(state, `블라인드 상승! 레벨 ${state.levelIndex + 1}: ${sb}/${bb} (${state.levelHands}핸드)`);
     startPickRound(state);
   } else {
     beginHand(state);
@@ -1120,9 +1362,17 @@ export function canUseNow(state: GameState, p: PlayerState, aug: OwnedAugment, p
 // ───────────────────────── 공개 API ─────────────────────────
 
 export function applyAction(state: GameState, playerId: string, action: GameAction): ActionResult {
+  const joiner = getJoiner(state, playerId);
+  if (joiner) {
+    // 자리에 앉기 전에는 증강 선택만 할 수 있다
+    if (!action || typeof action !== 'object' || action.type !== 'pick') return { ok: false, error: '다음 핸드부터 참여합니다.' };
+    const err = isAugmentId(action.augment) ? applyJoinerPick(state, joiner, action.augment) : '알 수 없는 증강입니다.';
+    return err ? { ok: false, error: err } : { ok: true };
+  }
   const idx = idxOf(state, playerId);
   if (idx < 0) return { ok: false, error: '플레이어를 찾을 수 없습니다.' };
   const p = state.players[idx];
+  if (p.kicked) return { ok: false, error: '추방된 플레이어입니다.' };
   if (!action || typeof action !== 'object' || typeof (action as { type?: unknown }).type !== 'string') {
     return { ok: false, error: '잘못된 요청입니다.' };
   }
@@ -1268,7 +1518,7 @@ export function legalActions(state: GameState, playerId: string): LegalActions |
 
 export function setSittingOut(state: GameState, playerId: string, value: boolean): void {
   const p = playerById(state, playerId);
-  if (!p || p.out) return;
+  if (!p || p.out || p.kicked) return;
   if (p.sittingOut !== value) {
     p.sittingOut = value;
     addLog(state, value ? `${p.name}: 자리 비움 (블라인드만 내고 자동 폴드)` : `${p.name}: 자리 복귀`);

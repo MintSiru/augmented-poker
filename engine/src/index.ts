@@ -6,8 +6,17 @@ export * from './pots.js';
 export * from './rng.js';
 export * from './types.js';
 export {
-  BLIND_LEVELS,
   blindsAt,
+  bigBlindAt,
+  niceRound,
+  STANDARD_MULTIPLIERS,
+  addJoiner,
+  removeJoiner,
+  getJoiner,
+  joinerPending,
+  joinerTimeout,
+  kickPlayer,
+  setLevelPlan,
   createGame,
   applyAction,
   applyTimeouts,

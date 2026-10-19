@@ -73,6 +73,8 @@ export interface PublicPlayerView {
   out: boolean;
   place: number | null;
   sittingOut: boolean;
+  /** 추방됨 (핸드가 끝나면 자리에서 사라짐) */
+  kicked: boolean;
   isDealer: boolean;
   isSB: boolean;
   isBB: boolean;
@@ -174,8 +176,16 @@ export interface PlayerView {
   handNumber: number;
   level: number;
   blinds: { sb: number; bb: number };
+  /** 이번 레벨의 핸드 수 */
   handsPerLevel: number;
   handsUntilLevelUp: number;
+  /** 블라인드 설정 (공개 정보) */
+  blindSchedule: 'standard' | 'x1.5';
+  levelMode: 'auto' | 'fixed';
+  /** 남은 인원 (탈락·추방 제외, 자리에 앉은 사람) */
+  alive: number;
+  /** 중도 참여 대기자 (이름만) */
+  joiners: { id: string; name: string }[];
   street: Street;
   /** 공개된 보드 (짙은 안개로 가려진 카드는 null) */
   board: (Card | null)[];
@@ -191,6 +201,10 @@ export interface PlayerView {
   reaction: ReactionView | null;
   you: {
     id: string;
+    /** 자리에 앉아 있는가 (중도 참여 대기자·자리를 비켜 준 탈락자는 false) */
+    seated: boolean;
+    /** 중도 참여 대기 중: 증강 선택 진행 상황 */
+    joining: { picksDone: number; picksTotal: number } | null;
     seat: number;
     chips: number;
     out: boolean;
@@ -275,10 +289,14 @@ function targetsFor(state: GameState, me: PlayerState, id: AugmentId): string[] 
 
 /** 보는 사람(viewerId)에게 허용된 정보만으로 만든 뷰 */
 export function getPlayerView(state: GameState, viewerId: string): PlayerView {
-  const me = state.players.find((p) => p.id === viewerId);
+  const seatedMe = state.players.find((p) => p.id === viewerId);
+  const joiner = state.joiners.find((j) => j.player.id === viewerId);
+  const me = seatedMe ?? joiner?.player ?? state.retired.find((p) => p.id === viewerId);
   if (!me) throw new Error('unknown player');
+  // 자리에 앉지 않은 사람(중도 참여 대기자 등)은 테이블의 공개 정보만 본다
+  const seated = !!seatedMe;
   const { sb, bb } = currentBlinds(state);
-  const hpl = state.options.handsPerLevel;
+  const hpl = state.levelHands;
   const board = visibleBoard(state, me);
   const pot = state.players.reduce((s, p) => s + p.contributed, 0) + state.deadMoney;
   const e = state.effects;
@@ -298,6 +316,7 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     out: p.out,
     place: p.place,
     sittingOut: p.sittingOut,
+    kicked: p.kicked,
     isDealer: state.dealerIdx === i && p.inHand,
     isSB: state.sbIdx === i && p.inHand,
     isBB: state.bbIdx === i && p.inHand,
@@ -365,7 +384,7 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
       mine,
       countered: head.countered,
       counteredBy: head.counteredBy ? nameById(head.counteredBy) : null,
-      canCounter: counterCandidates(state).includes(me.id),
+      canCounter: seated && counterCandidates(state).includes(me.id),
       queued: (state.reaction?.queue.length ?? 1) - 1,
     };
   }
@@ -386,13 +405,17 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     count: state.phase === 'augmentSelect' ? state.players.filter((p) => p.pickOptions).length : 0,
   };
 
-  const myHole = me.inHand && holeVisible(state, me, me) ? [...me.hole] : [];
-  const hand = me.inHand && !me.folded ? myHand(state, me, myHole, board) : null;
+  const myHole = seated && me.inHand && holeVisible(state, me, me) ? [...me.hole] : [];
+  const hand = seated && me.inHand && !me.folded ? myHand(state, me, myHole, board) : null;
 
   const myAugments: MyAugmentView[] = me.augments.map((a) => {
     const d = AUGMENTS[a.id];
-    const targets = targetsFor(state, me, a.id);
-    const why = d.trigger === 'button' ? canUseNow(state, me, a, d.target ? { targetId: targets[0] } : { cardIndex: 0 }) : null;
+    const targets = seated ? targetsFor(state, me, a.id) : [];
+    const why = !seated
+      ? '자리에 앉은 뒤에 쓸 수 있습니다.'
+      : d.trigger === 'button'
+        ? canUseNow(state, me, a, d.target ? { targetId: targets[0] } : { cardIndex: 0 })
+        : null;
     return {
       ...info(a.id),
       trigger: d.trigger,
@@ -410,19 +433,19 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
       armed: a.armed ?? null,
       fakeId: a.fakeId ?? null,
       fakeUsed: a.fakeUsed ?? null,
-      usableNow: d.trigger === 'button' && !why,
+      usableNow: seated && d.trigger === 'button' && !why,
       hint: why ?? d.timing,
     };
   });
 
   const log = state.log
-    .filter((x) => (!x.to || x.to.includes(viewerId)) && !(x.except && x.except.includes(viewerId)))
+    .filter((x) => x.seq >= me.logFrom && (!x.to || x.to.includes(viewerId)) && !(x.except && x.except.includes(viewerId)))
     .slice(-150)
     .map((x) => ({ seq: x.seq, hand: x.hand, text: x.text }));
 
-  const declOpts = declareOptions(state, me);
+  const declOpts = seated ? declareOptions(state, me) : [];
   const counting =
-    findAug(me, 'counting') && me.inHand && !me.out
+    seated && findAug(me, 'counting') && me.inHand && !me.out
       ? countingInfo(
           myHole,
           board.filter((c): c is Card => !!c),
@@ -438,7 +461,11 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     level: state.levelIndex + 1,
     blinds: { sb, bb },
     handsPerLevel: hpl,
-    handsUntilLevelUp: (state.levelIndex + 1) * hpl - state.handNumber + 1,
+    handsUntilLevelUp: state.levelStartHand + hpl - state.handNumber,
+    blindSchedule: state.options.blindSchedule,
+    levelMode: state.options.levelMode,
+    alive: state.players.filter((p) => !p.out && !p.kicked).length,
+    joiners: state.joiners.map((j) => ({ id: j.player.id, name: j.player.name })),
     street: state.street,
     board,
     sealed: [...e.sealed],
@@ -465,6 +492,8 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     reaction,
     you: {
       id: me.id,
+      seated,
+      joining: joiner ? { picksDone: joiner.picksTotal - joiner.picksLeft, picksTotal: joiner.picksTotal } : null,
       seat: me.seat,
       chips: me.chips,
       out: me.out,
@@ -475,15 +504,15 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
       notes: me.notes
         .filter((n) => n.hand === state.handNumber || n.kind === 'inquiry')
         .map((n) => ({ hand: n.hand, kind: n.kind, text: n.text, cards: n.cards ? [...n.cards] : null, targetId: n.targetId ?? null })),
-      legal: legalActions(state, me.id),
+      legal: seated ? legalActions(state, me.id) : null,
       pick: me.pickOptions ? me.pickOptions.map(info) : null,
-      pickDone: state.phase === 'augmentSelect' && !me.pickOptions,
+      pickDone: seated && state.phase === 'augmentSelect' && !me.pickOptions,
       discard:
-        state.phase === 'discard' && live(me) && me.hole.length === 3
+        seated && state.phase === 'discard' && live(me) && me.hole.length === 3
           ? { pending: me.pendingDiscard === null, chosen: me.pendingDiscard }
           : null,
       declare: declOpts.length ? { options: declOpts.map(info) } : null,
-      attach: me.attachPending && state.phase === 'handEnd' ? { cards: [...me.hole] } : null,
+      attach: seated && me.attachPending && state.phase === 'handEnd' ? { cards: [...me.hole] } : null,
       counting,
       tax: taxFor(state, me),
     },

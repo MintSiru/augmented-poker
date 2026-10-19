@@ -1,12 +1,49 @@
-// 서버 ↔ 클라이언트 메시지 형식. 클라이언트는 이 파일의 타입만 가져다 쓴다(런타임 코드 없음).
+// 서버 ↔ 클라이언트 메시지 형식과 설정 상수. 클라이언트도 이 파일을 가져다 쓴다(엔진 런타임 코드는 참조하지 않음).
 
 import type { PlayerView, DebugView, PendingKind } from '../../engine/src/index.js';
+
+export type BlindSchedule = 'standard' | 'x1.5';
+export type LevelMode = 'auto' | 'fixed';
+export const AUTO_KICK_CHOICES = [0, 3, 5, 10] as const;
 
 export interface RoomSettings {
   maxPlayers: number;
   fillBots: boolean;
   botCount: number;
+  /** 행동 제한 시간 (15~60초) */
   turnSeconds: number;
+  /** 시작 칩 (200~10,000) */
+  startingChips: number;
+  /** 시작 빅블라인드 (2~1,000). 스몰블라인드는 절반 */
+  bigBlind: number;
+  /** 블라인드 상승 주기: 자동(레벨 시작 시 남은 인원 × 2) / 고정 */
+  levelMode: LevelMode;
+  /** 고정 주기의 핸드 수 (4~30) */
+  levelHands: number;
+  /** 블라인드 상승 방식: 기본 표 / 1.5배씩 */
+  blindSchedule: BlindSchedule;
+  /** 중도 참여 허용 */
+  midJoin: boolean;
+  /** 연결 끊긴 플레이어 자동 추방 (분, 0 = 끄기) */
+  autoKickMinutes: number;
+}
+
+/** 게임이 시작된 뒤에도 바꿀 수 있는 설정 (+ 공개 여부). 상승 주기는 다음 레벨부터 적용 */
+export const IN_GAME_SETTINGS: (keyof RoomSettings)[] = ['maxPlayers', 'turnSeconds', 'midJoin', 'autoKickMinutes', 'levelMode', 'levelHands'];
+
+/** 공개 방 목록의 한 줄: 방 이름, 인원, 진행 상태, 설정값만 (게임 내용은 절대 포함하지 않는다) */
+export interface RoomListItem {
+  code: string;
+  name: string;
+  players: number;
+  maxPlayers: number;
+  status: 'waiting' | 'playing';
+  midJoin: boolean;
+  /** 지금 입장할 수 있는가 (꽉 찼거나 중도 참여가 꺼진 게임 중인 방은 false) */
+  joinable: boolean;
+  startingChips: number;
+  smallBlind: number;
+  bigBlind: number;
 }
 
 export interface LobbyPlayer {
@@ -16,7 +53,12 @@ export interface LobbyPlayer {
   isHost: boolean;
 }
 
-export interface LobbyState {
+export interface RoomInfo {
+  name: string;
+  isPublic: boolean;
+}
+
+export interface LobbyState extends RoomInfo {
   code: string;
   youId: string;
   hostId: string;
@@ -25,9 +67,12 @@ export interface LobbyState {
   debug: boolean;
 }
 
-export interface GameEnvelope {
+export interface GameEnvelope extends RoomInfo {
   code: string;
   view: PlayerView;
+  settings: RoomSettings;
+  /** 연결 상태 (중도 참여 대기자 포함) */
+  connected: Record<string, boolean>;
   /** 현재 결정의 마감 시각 (서버 시계, ms) */
   deadline: number | null;
   deadlineKind: PendingKind | null;
@@ -58,6 +103,7 @@ export interface ServerToClient {
   game: (s: GameEnvelope) => void;
   'debug:state': (s: DebugView | null) => void;
   kicked: (reason: string) => void;
+  rooms: (list: RoomListItem[]) => void;
   chat: (m: ChatMessage) => void;
   'chat:history': (list: ChatMessage[]) => void;
 }
