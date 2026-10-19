@@ -1,4 +1,6 @@
-// 화면 도우미: HTML 이스케이프, 카드 그리기, 로그 문장 안의 [As] 토큰 변환
+// 화면 도우미: HTML 이스케이프, 카드 그리기, 로그 문장 안의 [As] 토큰·증강 이름 변환
+
+import { AUGMENTS } from '../../engine/src/augments.js';
 
 const SUIT_SYMBOL: Record<string, string> = { s: '♠', h: '♥', d: '♦', c: '♣' };
 
@@ -21,9 +23,25 @@ export function cardBack(size: 'sm' | 'md' | 'lg' = 'sm'): string {
   return `<span class="card back ${size}"></span>`;
 }
 
-/** 서버 로그 문장(이미 신뢰할 수 없는 이름이 섞여 있음)을 이스케이프한 뒤 카드 토큰만 카드 모양으로 */
+/**
+ * 서버 로그 문장(이미 신뢰할 수 없는 이름이 섞여 있음)을 이스케이프한 뒤
+ * 카드 토큰([As], 무늬를 가린 [A?])은 카드 모양으로, 증강 이름(「유리 테이블 ★★」)은 마우스를 올리면 설명이 보이게 바꾼다.
+ */
 export function richText(text: string): string {
-  return esc(text).replace(/\[([2-9TJQKA][shdc])\]/g, (_, c: string) => cardHtml(c, { size: 'sm', extra: 'inline' }));
+  return esc(text)
+    .replace(/\[([2-9TJQKA][shdc?])\]/g, (_, c: string) => cardHtml(c, { size: 'sm', extra: 'inline' }))
+    .replace(/「([^」]+?) (★{1,3})」/g, (m, name: string) => {
+      const tip = augTip(name.replace(/\(.*\)$/, ''));
+      return tip ? `<span class="aug-ref" data-tip="${esc(tip)}">${m}</span>` : m;
+    });
+}
+
+const AUG_BY_NAME = new Map(Object.values(AUGMENTS).map((d) => [d.name, d]));
+
+/** 증강 이름 → 툴팁 문장 (이름·별·분류·설명, 모두 공개된 정의) */
+export function augTip(name: string): string | null {
+  const d = AUG_BY_NAME.get(name);
+  return d ? `${d.name} ${'★'.repeat(d.stars)} · ${d.category}\n${d.description}` : null;
 }
 
 export function stars(n: number): string {

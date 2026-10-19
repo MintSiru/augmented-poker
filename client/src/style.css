@@ -428,3 +428,72 @@ button.aug-btn { background: #2d2346; border-color: #6c4fb0; }
 }
 
 .rooms-tools { display: inline-flex; align-items: center; gap: 8px; }
+
+/* ───────── 화면 밀도·행동 표시·툴팁 ───────── */
+#tip { position: fixed; z-index: 100; max-width: 300px; padding: 8px 10px; background: #0b1210f7; border: 1px solid var(--accent); border-radius: 8px;
+  font-size: 12px; line-height: 1.45; white-space: pre-line; pointer-events: none; opacity: 0; transition: opacity .1s; box-shadow: 0 6px 20px #000a; }
+#tip.show { opacity: 1; }
+.aug-ref { text-decoration: underline dotted #ffffff66; text-underline-offset: 2px; cursor: help; }
+.pub[data-tip] { cursor: help; }
+
+/* 좌석: 더 크게, 아바타, 행동 표시 */
+.seat { width: 168px; padding: 7px 9px; font-size: 13px; transition: box-shadow .2s, border-color .2s; }
+.seat .avatar { flex: 0 0 22px; height: 22px; border-radius: 50%; display: inline-grid; place-items: center; background: #2b4a3c; color: #fff; font-size: 12px; font-weight: 800; }
+.seat.mine .avatar { background: var(--primary); }
+.seat.turn { animation: seat-pulse 1.2s ease-in-out infinite; }
+@keyframes seat-pulse { 0%, 100% { box-shadow: 0 0 0 2px var(--accent), 0 0 10px #f2c14e66; } 50% { box-shadow: 0 0 0 3px var(--accent), 0 0 26px #f2c14ecc; } }
+.seat-timer { height: 3px; background: #ffffff18; border-radius: 3px; overflow: hidden; margin: 3px 0 1px; }
+.seat-timer .fill { height: 100%; width: 100%; background: var(--accent); transition: width .25s linear; }
+.seat .card.sm { width: 26px; height: 36px; font-size: 13px; }
+.act-flash { position: absolute; left: 50%; top: -14px; transform: translate(-50%, -100%); z-index: 6; padding: 4px 12px; border-radius: 999px;
+  font-weight: 800; font-size: 14px; white-space: nowrap; color: #fff; box-shadow: 0 4px 14px #000a; animation: flash-in .25s ease-out, flash-out .5s ease-in 2.1s forwards; }
+.act-flash.fold { background: #5a5f63; }
+.act-flash.check { background: #2f6fb0; }
+.act-flash.call { background: #2e9a64; }
+.act-flash.raise { background: #d98a1c; }
+.act-flash.allin { background: #c8302a; font-size: 16px; }
+.act-flash.blind, .act-flash.other { background: #3d4a44; font-size: 12px; }
+@keyframes flash-in { from { opacity: 0; transform: translate(-50%, -60%) scale(.7); } to { opacity: 1; transform: translate(-50%, -100%) scale(1); } }
+@keyframes flash-out { to { opacity: 0; transform: translate(-50%, -130%); } }
+
+/* 테이블 가운데: 워터마크, 큰 보드, 팟, 최근 행동 */
+.felt-mark { font-size: 13px; letter-spacing: 2px; color: #ffffff2e; font-weight: 800; }
+.felt-mark span { display: block; font-size: 11px; letter-spacing: 1px; color: #ffffff55; margin-top: 2px; }
+.board .card.md { width: 46px; height: 64px; font-size: 19px; }
+.board.second { opacity: .9; }
+.board.second .card.md { width: 38px; height: 53px; font-size: 16px; }
+.pot { font-size: 17px; padding: 4px 16px; display: inline-flex; align-items: center; gap: 6px; }
+.pot-chips { width: 14px; height: 14px; border-radius: 50%; background: radial-gradient(circle, #f2c14e 0 40%, #b8862a 41% 60%, #f2c14e 61%); box-shadow: 3px -3px 0 -1px #c8302a, 6px 0 0 -1px #2f6fb0; margin-right: 6px; }
+.feed { display: flex; flex-direction: column; gap: 1px; font-size: 12px; color: #ffffffaa; max-width: 360px; }
+.feed-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.feed-line.last { color: #fff; font-weight: 600; }
+.reserved { display: flex; gap: 6px; font-size: 11px; color: var(--accent); }
+.bet { font-size: 13px; padding: 2px 10px; }
+
+/* 내 차례: 행동 영역 강조 */
+.my-turn-pill { display: none; }
+body.my-turn .my-turn-pill { display: inline-block; align-self: flex-start; background: var(--accent); color: #111; font-weight: 800; border-radius: 999px; padding: 2px 10px; font-size: 13px; animation: seat-pulse 1.2s ease-in-out infinite; }
+body.my-turn .me { box-shadow: inset 0 3px 0 var(--accent); }
+.my-turn-pill .cut { font-weight: 600; color: #7a1d18; }
+.timerbar.cut .fill { background: #c06cf0; }
+
+/* 가림 규칙: 테이블 가운데만 흐리게 (버튼·내 카드는 또렷하게) */
+body.blurred #g-center .board { filter: blur(1.2px) saturate(.6); }
+
+@media (max-height: 800px) and (min-width: 761px) {
+  .seat { width: 150px; padding: 5px 8px; font-size: 12px; }
+  .board .card.md { width: 40px; height: 56px; font-size: 17px; }
+}
+@media (max-width: 760px) {
+  .seat { width: 86px; font-size: 10.5px; }
+  .seat .avatar { display: none; }
+  .seat .card.sm { width: 17px; height: 23px; font-size: 9px; }
+  .board .card.md { width: 30px; height: 42px; font-size: 13px; }
+  .act-flash { font-size: 11px; padding: 2px 8px; top: -6px; }
+  .feed { display: none; }
+  .felt-mark { display: none; }
+}
+
+.aug.info-card { flex: 0 0 210px; border-top: 3px solid #5d7a6c; background: #16231e; }
+.info-row { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; border-bottom: 1px solid #ffffff0c; font-size: 12px; }
+.info-row span:last-child { text-align: right; }

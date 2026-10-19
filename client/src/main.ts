@@ -7,7 +7,8 @@ import type { ChatMessage, DebugView, GameEnvelope, LobbyState, RoomListItem, Ro
 import { blindsAt } from '../../engine/src/core.js';
 import type { MyAugmentView, PlayerView, PublicPlayerView } from '../../engine/src/view.js';
 import { AUGMENTS, type AugmentId } from '../../engine/src/augments.js';
-import { $, cardBack, cardHtml, esc, fmt, mount, patch, richText, stars } from './dom.js';
+import { $, augTip, cardBack, cardHtml, esc, fmt, mount, patch, richText, stars } from './dom.js';
+import { isMuted, play, setMuted, sfxForLog, type Sfx } from './sfx.js';
 import { handCardClass, handPanelHtml, handTableHtml } from './hand.js';
 
 type Screen = 'home' | 'lobby' | 'game';
@@ -50,6 +51,11 @@ const app = {
   betOpen: false,
   radarIdx: 0,
   rumor: 'observer' as string,
+  /** 좌석 위에 잠깐 크게 띄우는 행동 표시: playerId → 문구·종류·끝 시각 */
+  flashes: new Map<string, { text: string; kind: string; until: number }>(),
+  /** 효과음을 낸 마지막 로그 번호 */
+  sfxSeq: 0,
+  lastTickSec: -1,
   lastLogSeq: 0,
   showHandTable: false,
   chat: [] as ChatMessage[],
@@ -158,6 +164,7 @@ socket.on('lobby', (s: LobbyState) => {
   render();
 });
 socket.on('game', (e: GameEnvelope) => {
+  onGameUpdate(app.env?.view ?? null, e.view);
   app.env = e;
   app.offset = e.serverNow - Date.now();
   app.screen = 'game';
@@ -191,6 +198,43 @@ socket.on('kicked', (reason: string) => {
   app.homeError = reason;
   render();
 });
+
+// ───────── 행동 표시·효과음 ─────────
+
+const FLASH_MS = 2600;
+
+/** 행동 문구 → 표시 종류 (색) */
+function actionKind(text: string): string {
+  if (/폴드|추방/.test(text)) return 'fold';
+  if (/올인/.test(text)) return 'allin';
+  if (/레이즈|베팅/.test(text)) return 'raise';
+  if (/콜/.test(text)) return 'call';
+  if (/체크/.test(text)) return 'check';
+  if (/SB|BB|앤티|면제/.test(text)) return 'blind';
+  return 'other';
+}
+
+/** 새 뷰가 도착할 때: 바뀐 행동은 좌석 위에 크게 띄우고, 새 로그에 맞춰 효과음 */
+function onGameUpdate(prev: PlayerView | null, next: PlayerView) {
+  const now = Date.now();
+  if (prev && prev.handNumber === next.handNumber) {
+    for (const p of next.players) {
+      const before = prev.players.find((x) => x.id === p.id);
+      if (p.lastAction && before && before.lastAction !== p.lastAction) {
+        app.flashes.set(p.id, { text: p.lastAction, kind: actionKind(p.lastAction), until: now + FLASH_MS });
+      }
+    }
+  }
+  // 효과음: 처음 받은 뷰(입장·재접속)에서는 내지 않는다
+  const fresh = next.log.filter((e) => e.seq > app.sfxSeq);
+  if (app.sfxSeq > 0) {
+    const kinds = [...new Set(fresh.map((e) => sfxForLog(e.text)).filter((k): k is Sfx => !!k))].slice(0, 3);
+    kinds.forEach((k, i) => setTimeout(() => play(k), i * 110));
+  }
+  app.sfxSeq = Math.max(app.sfxSeq, next.log.at(-1)?.seq ?? 0);
+  // 내 차례가 새로 오면 알림음
+  if (next.toActId === next.you.id && prev?.toActId !== next.you.id) setTimeout(() => play('turn'), 150);
+}
 
 // ───────── 공통 ─────────
 
@@ -510,6 +554,8 @@ function remainingMs(): number | null {
 function renderGame() {
   const env = app.env!;
   const v = env.view;
+  document.body.classList.toggle('my-turn', !!v.you.legal);
+  document.body.classList.toggle('blurred', v.masks.suits || v.masks.board);
   if (!$('.game')) {
     mount($('#app'), GAME_SKELETON);
     renderChat();
@@ -560,6 +606,7 @@ function renderTop(env: GameEnvelope, v: PlayerView) {
       ${v.table.taxers.length ? `<span class="taxbadge" title="죽음과 세금 선언자: ${esc(v.table.taxers.join(', '))}">💀 세금 ${v.you.tax ? `${fmt(v.you.tax)}칩/사용` : '면제'}</span>` : ''}</div>
      <div class="tb-right"><span class="wait">${waitingText(v)} <span class="timer-text" data-timer></span></span>
       ${env.debug ? '<span class="debug-flag">DEBUG</span>' : ''}
+      <button class="small" data-a="mute" title="효과음 켜기/끄기">${isMuted() ? '🔇' : '🔊'}</button>
       <button class="small" data-a="settings">${env.youAreHost ? '방 설정' : '설정 보기'}</button>
       <button class="small" data-a="leave">나가기</button></div>`,
   );
@@ -597,8 +644,10 @@ function seatHtml(v: PlayerView, p: PublicPlayerView, k: number, n: number): str
           ? '올인'
           : (p.lastAction ?? '');
   const revealed = p.revealedAugments
-    .map((a) => `<span class="pub s${a.stars}" title="${esc(a.description)}">${esc(a.name)}${stars(a.stars)}</span>`)
+    .map((a) => `<span class="pub s${a.stars}" data-tip="${esc(augTip(a.name) ?? a.description)}">${esc(a.name)}${stars(a.stars)}</span>`)
     .join('');
+  const flash = app.flashes.get(p.id);
+  const flashHtml = flash && flash.until > Date.now() ? `<div class="act-flash ${flash.kind}">${esc(flash.text)}</div>` : '';
   const shep = p.shepherdShown.length
     ? `<div class="seat-shep" title="양치기 소년으로 공개한 카드 (진짜인지 알 수 없음)">공개 ${p.shepherdShown.map((c) => cardHtml(c, { size: 'sm', extra: 'inline' })).join('')}</div>`
     : '';
@@ -607,9 +656,10 @@ function seatHtml(v: PlayerView, p: PublicPlayerView, k: number, n: number): str
   const bubbleHtml = bubble && bubble.until > Date.now() ? `<div class="bubble${y < 30 ? ' below' : ''}">${esc(bubble.text)}</div>` : '';
   const bx = 50 + (x - 50) * 0.62;
   const by = 50 + (y - 50) * 0.55;
-  return `<div class="${cls}" style="left:${x}%;top:${y}%">${bubbleHtml}
-      <div class="seat-top"><span class="nm">${p.isBot ? '🤖 ' : ''}${esc(p.name)}</span>${badges}</div>
-      <div class="seat-mid"><span class="chips">${fmt(p.chips)}</span><span class="cards">${cards}</span></div>
+  return `<div class="${cls}" style="left:${x}%;top:${y}%">${bubbleHtml}${flashHtml}
+      <div class="seat-top"><span class="avatar">${p.isBot ? '🤖' : esc([...p.name][0] ?? '?')}</span><span class="nm">${esc(p.name)}</span>${badges}</div>
+      ${p.isTurn ? '<div class="seat-timer"><div class="fill" data-seat-timer></div></div>' : ''}
+      <div class="seat-mid"><span class="chips">${p.approx ? '약 ' : ''}${fmt(p.chips)}</span><span class="cards">${cards}</span></div>
       <div class="seat-status">${esc(status)}${!p.connected && !p.out && !p.kicked ? ' ⚠' : ''}</div>
       ${canKick(p) ? `<button class="small kick" data-a="kick" data-id="${esc(p.id)}" data-name="${esc(p.name)}">추방</button>` : ''}
       ${shep}
@@ -629,7 +679,8 @@ function reactionHtml(v: PlayerView): string {
   const r = v.reaction;
   if (!r) return '';
   const who = r.mine ? '내' : `${esc(r.declarerName)}님의`;
-  const what = r.anonymous && !r.mine ? '비공개 증강' : `「${esc(r.label)}」`;
+  const tip = r.anonymous && !r.mine ? null : augTip(r.label);
+  const what = r.anonymous && !r.mine ? '비공개 증강' : `<span class="aug-ref"${tip ? ` data-tip="${esc(tip)}"` : ''}>「${esc(r.label)}」</span>`;
   return `<div class="reaction ${r.countered ? 'countered' : ''}">
       <div>${who} ${what} 선언 <span class="timer-text" data-timer></span></div>
       ${r.countered ? `<div class="rx-sub">🛡 ${esc(r.counteredBy ?? '')}의 카운터 스펠로 무효화됨</div>` : '<div class="rx-sub">반응 대기 중…</div>'}
@@ -646,7 +697,7 @@ function renderTable(v: PlayerView) {
   const seats = v.players.map((p, i) => seatHtml(v, p, (i - mySeat + n) % n, n)).join('');
   patch($('#g-seats'), seats);
 
-  const slots = Array.from({ length: 5 }, (_, i) => {
+  const slots = Array.from({ length: Math.max(5, v.board.length) }, (_, i) => {
     if (i >= v.board.length) return '<span class="card slot md"></span>';
     const c = v.board[i];
     if (!c) return `<span class="card back md fog" title="짙은 안개: 쇼다운 때 공개"></span>`;
@@ -655,11 +706,28 @@ function renderTable(v: PlayerView) {
     return cardHtml(c, { size: 'md', extra: sealed ? 'sealed' : handCardClass(v, c) });
   }).join('');
   const notes = v.table.notes.map((t) => `<span class="tnote">${esc(t)}</span>`).join('');
+  // 이번 핸드의 최근 행동 몇 줄 (테이블 가운데에서 바로 보이도록)
+  const feed = v.log
+    .filter((e) => e.hand === v.handNumber && /: (폴드|체크|콜|레이즈|베팅|올인|강제 폴드|무임승차)|▸|비공개 증강을 사용|📢/.test(e.text))
+    .slice(-3)
+    .map((e, i, arr) => `<div class="feed-line${i === arr.length - 1 ? ' last' : ''}">${richText(e.text)}</div>`)
+    .join('');
+  const board2 = v.board2
+    ? `<div class="board second">${Array.from({ length: Math.max(5, v.board2.length) }, (_, i) => {
+        const c = v.board2![i];
+        if (i >= v.board2!.length) return '<span class="card slot md"></span>';
+        return c ? cardHtml(c, { size: 'md' }) : '<span class="card back md fog"></span>';
+      }).join('')}</div>`
+    : '';
+  const reserved = v.reserved.filter((r) => r.index >= v.board.length);
   patch(
     $('#g-center'),
-    `${notes ? `<div class="tnotes">${notes}</div>` : ''}
-     <div class="board">${slots}</div>
-     <div class="pot">팟 ${fmt(v.pot)}</div>
+    `<div class="felt-mark">♠ 증강 홀덤 <span>레벨 ${v.level} · ${fmt(v.blinds.sb)}/${fmt(v.blinds.bb)}</span></div>
+     ${notes ? `<div class="tnotes">${notes}</div>` : ''}
+     <div class="board">${slots}</div>${board2}
+     ${reserved.length ? `<div class="reserved">${reserved.map((r) => `<span class="res-card" title="${esc(r.label)}">${cardHtml(r.card, { size: 'sm', extra: 'inline' })} 예약</span>`).join('')}</div>` : ''}
+     <div class="pot"><span class="pot-chips"></span>팟 ${v.potApprox ? '약 ' : ''}${fmt(v.pot)}</div>
+     ${feed ? `<div class="feed">${feed}</div>` : ''}
      ${reactionHtml(v) || `<div class="center-wait">${waitingText(v)} <span class="timer-text" data-timer></span></div>`}`,
   );
 
@@ -747,7 +815,7 @@ function renderActions(v: PlayerView) {
   }
   const raiseLabel = l.opening ? '베팅' : '레이즈';
   const tax = v.you.tax ? ` · 세금 ${fmt(v.you.tax)}` : '';
-  const html = `<div class="timerbar"><div class="fill" data-timerbar></div></div>
+  const html = `<div class="my-turn-pill">내 차례!${v.you.turnCut ? ` <span class="cut">행동 시간 -${v.you.turnCut}초</span>` : ''}</div><div class="timerbar${v.you.turnCut ? ' cut' : ''}"><div class="fill" data-timerbar></div></div>
     ${l.forced ? '<div class="warn">강제 집행: 이번에는 폴드할 수 없고 콜해야 합니다</div>' : ''}
     <div class="btns">
       ${l.fold ? '<button class="fold" data-a="fold">폴드</button>' : ''}
@@ -911,7 +979,27 @@ function renderAugments(v: PlayerView) {
         })
         .join('')
     : '<div class="muted empty">보유한 증강이 없습니다</div>';
-  patch($('#g-augs'), html);
+  patch($('#g-augs'), html + infoCardHtml(v));
+}
+
+/** 핸드 정보 카드: 내 칩(BB 환산), 포지션, 팟 오즈, 다음 블라인드 (모두 내가 볼 수 있는 정보로 계산) */
+function infoCardHtml(v: PlayerView): string {
+  const me = v.players.find((p) => p.id === v.you.id);
+  const bb = v.blinds.bb;
+  const pos = !me ? '관전' : me.isDealer ? '딜러' : me.isSB ? '스몰 블라인드' : me.isBB ? '빅 블라인드' : me.inHand ? '일반' : '-';
+  const l = v.you.legal;
+  const odds = l?.call && l.callAmount > 0 ? Math.round((l.callAmount / (v.pot + l.callAmount)) * 100) : null;
+  const live = v.players.filter((p) => !p.out && !p.kicked);
+  const avg = live.length ? Math.round(live.reduce((s, p) => s + p.chips, 0) / live.length) : 0;
+  const rows = [
+    ['내 칩', `${fmt(v.you.chips)} <span class="muted">(${Math.floor(v.you.chips / bb)}BB)</span>`],
+    ['포지션', pos],
+    ['팟 오즈', odds !== null ? `콜 ${fmt(l!.callAmount)} → 필요 승률 ${odds}%` : '<span class="muted">-</span>'],
+    ['평균 칩', `${v.potApprox ? '약 ' : ''}${fmt(avg)}`],
+    ['다음 레벨', `${Math.max(0, v.handsUntilLevelUp)}핸드 뒤`],
+  ];
+  return `<div class="aug info-card"><div class="aug-head"><span class="st">ⓘ</span><span class="cat">핸드 정보</span></div>
+    ${rows.map(([k, val]) => `<div class="info-row"><span class="muted">${k}</span><span>${val}</span></div>`).join('')}</div>`;
 }
 
 function countingHtml(v: PlayerView): string {
@@ -1198,8 +1286,32 @@ function tick() {
     }
     if (expired && app.screen === 'game' && app.env) renderTable(app.env.view);
   }
+  // 좌석 위 행동 표시가 끝나면 다시 그린다
+  if (app.flashes.size) {
+    const now = Date.now();
+    let expired = false;
+    for (const [id, f] of app.flashes) {
+      if (f.until > now) continue;
+      app.flashes.delete(id);
+      expired = true;
+    }
+    if (expired && app.screen === 'game' && app.env) renderTable(app.env.view);
+  }
   const ms = remainingMs();
   const text = ms === null ? '' : `${Math.ceil(ms / 1000)}초`;
+  // 내 차례 남은 시간이 5초 아래면 1초마다 짧은 경고음
+  if (ms !== null && app.env?.view.toActId === app.env?.view.you.id && ms < 5000) {
+    const sec = Math.ceil(ms / 1000);
+    if (sec !== app.lastTickSec && sec > 0) {
+      app.lastTickSec = sec;
+      play('tick');
+    }
+  }
+  const seatBar = $('[data-seat-timer]');
+  if (seatBar && app.env && ms !== null && app.env.deadline) {
+    const total = Math.max(1, app.env.deadline - app.env.serverNow);
+    seatBar.style.width = `${Math.min(100, (ms / total) * 100)}%`;
+  }
   document.querySelectorAll('[data-timer]').forEach((el) => {
     if (el.textContent !== text) el.textContent = text;
   });
@@ -1227,6 +1339,11 @@ document.addEventListener('click', async (ev) => {
       return homeEnter('join');
     case 'joinList':
       return homeEnter('join', t.dataset.code);
+    case 'mute':
+      setMuted(!isMuted());
+      if (!isMuted()) play('check');
+      if (app.env) renderGame();
+      return;
     case 'roomsRefresh': {
       const r = await send('rooms:watch', { on: true });
       app.watchingRooms = r.ok;
@@ -1506,6 +1623,41 @@ document.addEventListener('keydown', (ev) => {
   const id = (ev.target as HTMLElement).id;
   if (id === 'home-code') homeEnter('join');
   else if (id === 'home-name') homeEnter(app.homeCode.trim() || ($('#home-code') as HTMLInputElement)?.value.trim() ? 'join' : 'create');
+});
+
+// ───────── 툴팁: 증강 이름에 마우스를 올리면 설명 (터치는 누르면 잠깐) ─────────
+
+const tipEl = document.createElement('div');
+tipEl.id = 'tip';
+document.body.appendChild(tipEl);
+let tipTimer: number | undefined;
+
+function showTip(target: HTMLElement, x: number, y: number) {
+  tipEl.textContent = target.dataset.tip ?? '';
+  tipEl.className = 'show';
+  const w = tipEl.offsetWidth;
+  const h = tipEl.offsetHeight;
+  tipEl.style.left = `${Math.max(8, Math.min(window.innerWidth - w - 8, x + 12))}px`;
+  tipEl.style.top = `${Math.max(8, y + h + 20 > window.innerHeight ? y - h - 12 : y + 16)}px`;
+}
+
+document.addEventListener('mouseover', (ev) => {
+  const t = (ev.target as HTMLElement).closest('[data-tip]') as HTMLElement | null;
+  if (t) showTip(t, ev.clientX, ev.clientY);
+  else tipEl.className = '';
+});
+document.addEventListener('mousemove', (ev) => {
+  if (!tipEl.className) return;
+  const t = (ev.target as HTMLElement).closest('[data-tip]') as HTMLElement | null;
+  if (t) showTip(t, ev.clientX, ev.clientY);
+});
+document.addEventListener('pointerdown', (ev) => {
+  if (ev.pointerType !== 'touch') return;
+  const t = (ev.target as HTMLElement).closest('[data-tip]') as HTMLElement | null;
+  if (!t) return;
+  showTip(t, ev.clientX, ev.clientY);
+  clearTimeout(tipTimer);
+  tipTimer = window.setTimeout(() => (tipEl.className = ''), 2500);
 });
 
 window.addEventListener('resize', () => {
