@@ -584,6 +584,8 @@ function waitingText(v: PlayerView): string {
       return v.you.declare ? '선언 기회: 내 차례' : '선언 기회 대기 중';
     case 'reaction':
       return '증강 반응 대기 중';
+    case 'respond':
+      return v.respond ? `${esc(v.respond.name)}: ${esc(v.respond.text)}` : '응답 대기 중';
     case 'handEnd':
       return '다음 핸드 준비 중';
     case 'gameOver':
@@ -1096,6 +1098,8 @@ function renderModal(env: GameEnvelope, v: PlayerView) {
       <div class="lobby-actions"><button data-a="settings">닫기</button></div></div></div>`;
   } else if (v.reaction) {
     html = '';
+  } else if (v.respond?.needMe && v.respond.input) {
+    html = respondModalHtml(v);
   } else if (you.discard?.pending) {
     html = `<div class="modal-bg"><div class="modal">
       <h3>세 번째 손: 버릴 카드 1장 <span class="timer-text" data-timer></span></h3>
@@ -1203,7 +1207,44 @@ function renderModal(env: GameEnvelope, v: PlayerView) {
   }
   // 설정 입력 중에는 다시 그리지 않는다
   if (typingIn(el?.querySelector('.settings-modal'))) return;
+  if (html.includes('respond-modal') && typingIn(el?.querySelector('.respond-modal'))) return;
   patch(el, html);
+}
+
+/** 제안·입찰·비공개 선언 응답 창 (15초, 응답하지 않으면 기본 응답) */
+function respondModalHtml(v: PlayerView): string {
+  const r = v.respond!;
+  const hole = v.you.hole.length ? v.you.hole : Array.from({ length: v.you.holeHidden }, () => '');
+  const holeBtn = (label: string, extra = '') =>
+    hole.map((c, i) => `<button class="card-btn" data-a="respond" data-i="${i}" ${extra}>${c ? cardHtml(c, { size: 'lg' }) : cardBack('lg')}<span>${label}</span></button>`).join('');
+  const bidInput = `<div class="bid-row"><input type="number" id="bid-num" min="${r.minBid}" max="${r.maxBid}" step="${r.minBid}" value="${Math.min(r.maxBid, r.minBid)}" />
+      <span class="muted">최소 ${fmt(r.minBid)} · 최대 ${fmt(r.maxBid)}</span></div>`;
+  let body = '';
+  switch (r.input) {
+    case 'accept':
+      body = `<div class="lobby-actions"><button class="primary" data-a="respond" data-accept="1">수락</button><button data-a="respond" data-accept="0">거절</button></div>`;
+      break;
+    case 'card':
+      body = `<div class="choose-row">${holeBtn('건네기')}</div>`;
+      break;
+    case 'bid':
+      body = `${bidInput}<div class="lobby-actions"><button class="primary" data-a="respondBid">입찰</button><button data-a="respond" data-bid="0">불참</button></div>`;
+      break;
+    case 'bidCard':
+      body = `${v.auctionCard ? `<div class="board-mini">경매 카드 ${cardHtml(v.auctionCard, { size: 'lg' })}</div>` : ''}${bidInput}
+        <p class="muted">낙찰되면 바꿀 홀카드를 눌러 입찰하세요.</p>
+        <div class="choose-row">${holeBtn('이 카드와 바꾸기', 'data-bidcard="1"')}</div>
+        <div class="lobby-actions"><button data-a="respond" data-bid="0">불참</button></div>`;
+      break;
+    case 'strongWeak':
+      body = `<div class="lobby-actions"><button class="primary" data-a="respond" data-choice="1">강함</button><button data-a="respond" data-choice="0">약함</button></div>`;
+      break;
+  }
+  return `<div class="modal-bg"><div class="modal respond-modal">
+      <h3>${esc(r.name)} <span class="timer-text" data-timer></span></h3>
+      <p>${richText(r.text)}</p>
+      <p class="muted small-note">응답은 나만 봅니다. 시간이 지나면 ${r.input === 'accept' ? '거절' : r.input === 'card' || r.input === 'strongWeak' ? '무작위로 정합니다' : '불참'}.</p>
+      ${body}</div></div>`;
 }
 
 // ───────── 디버그 패널 (서버가 DEBUG 모드일 때만 표시; 실제 차단은 서버에서) ─────────
@@ -1466,6 +1507,16 @@ document.addEventListener('click', async (ev) => {
       return act({ type: 'useAugment', augment: 'bet', choice: Number(t.dataset.choice) });
     case 'discard':
       return act({ type: 'discard', cardIndex: Number(t.dataset.i) });
+    case 'respond': {
+      const bidNow = () => Number(($('#bid-num') as HTMLInputElement | null)?.value ?? 0);
+      if (t.dataset.accept !== undefined) return act({ type: 'respond', accept: t.dataset.accept === '1' });
+      if (t.dataset.choice !== undefined) return act({ type: 'respond', choice: Number(t.dataset.choice) });
+      if (t.dataset.bid !== undefined) return act({ type: 'respond', bid: Number(t.dataset.bid) });
+      if (t.dataset.bidcard) return act({ type: 'respond', bid: bidNow(), cardIndex: Number(t.dataset.i) });
+      return act({ type: 'respond', cardIndex: Number(t.dataset.i) });
+    }
+    case 'respondBid':
+      return act({ type: 'respond', bid: Number(($('#bid-num') as HTMLInputElement | null)?.value ?? 0) });
     case 'declare': {
       const aug = t.dataset.aug || null;
       const i = t.dataset.i !== undefined ? Number(t.dataset.i) : undefined;

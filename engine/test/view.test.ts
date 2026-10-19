@@ -126,7 +126,16 @@ function perturb(s: GameState, viewerId: string, rng: Rng): GameState {
     q.lockerPending = rng.int(2) === 0;
     q.blindsPaid = rng.int(4);
     if (q.eitherOr) q.eitherOr.pick = rng.int(2) ? rng.int(2) : null;
+    if (q.contract !== null) q.contract = rng.int(2);
   }
+  // 제안·입찰: 다른 사람의 응답(입찰가·비공개 선언)과 다른 사람이 제안한 내용
+  if (c.respond) {
+    for (const id of Object.keys(c.respond.answers)) {
+      if (id !== viewerId) c.respond.answers[id] = { accept: rng.int(2) === 0, bid: rng.int(500), choice: rng.int(2), cardIndex: rng.int(2) };
+    }
+    if (c.respond.ownerId !== viewerId && c.respond.params.card) c.respond.params.card = '2c';
+  }
+  if (c.staredown) for (const id of Object.keys(c.staredown.claims)) if (id !== viewerId) c.staredown.claims[id] = rng.int(2);
   // 반응 대기 중인 남의 선언: 이름 숨김 선언의 실제 증강·대상
   for (const d of c.reaction?.queue ?? []) {
     if (d.ownerId === viewerId) continue;
@@ -166,6 +175,8 @@ function allowedCards(s: GameState, viewerId: string): Set<Card> {
     });
   }
   if (s.nextHand.freezeCard) ok.add(s.nextHand.freezeCard);
+  // 카드 경매로 공개된 카드 (실명 다트 대상 제외)
+  if (s.auctionCard && !(s.effects.blindDarted.includes(viewerId) && !s.effects.fogLifted)) ok.add(s.auctionCard);
   s.result?.entries.forEach((e) => e.cards.forEach((c) => ok.add(c)));
   return ok;
 }

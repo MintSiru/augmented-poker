@@ -11,6 +11,7 @@ import {
   counterCandidates,
   currentBlinds,
   declareOptions,
+  declareTargets,
   findAug,
   legalActions,
   LegalActions,
@@ -185,7 +186,29 @@ export interface ReactionView {
   queued: number;
 }
 
-export type WaitingKind = 'turn' | 'pick' | 'discard' | 'declare' | 'reaction' | 'handEnd' | 'gameOver' | 'none';
+export type WaitingKind = 'turn' | 'pick' | 'discard' | 'declare' | 'reaction' | 'respond' | 'handEnd' | 'gameOver' | 'none';
+
+/** 제안·입찰 창. 제안 내용·입찰가·비공개 선언은 결과가 나올 때까지 당사자에게만 */
+export interface RespondView {
+  augment: AugmentId;
+  name: string;
+  ownerId: string;
+  ownerName: string;
+  /** 응답할 사람 (공개) */
+  participants: string[];
+  /** 내가 지금 응답해야 하는가 */
+  needMe: boolean;
+  /** 응답 방식: 수락/거절, 입찰, 홀카드 고르기, 입찰+홀카드, 강함/약함 */
+  input: 'accept' | 'bid' | 'card' | 'bidCard' | 'strongWeak' | null;
+  /** 나에게 보여 줄 안내 (제안 내용 포함) */
+  text: string;
+  /** 골라 봐: 선언자 본인에게만, 보여 줄 카드 */
+  card: Card | null;
+  /** 내 응답 (나에게만) */
+  myAnswer: { accept: boolean | null; bid: number | null; choice: number | null; cardIndex: number | null } | null;
+  minBid: number;
+  maxBid: number;
+}
 
 export interface TableView {
   glass: boolean;
@@ -256,6 +279,9 @@ export interface PlayerView {
   waiting: { kind: WaitingKind; playerId: string | null; count: number };
   table: TableView;
   reaction: ReactionView | null;
+  respond: RespondView | null;
+  /** 카드 경매로 공개된 카드 (가림 규칙 적용) */
+  auctionCard: Card | null;
   you: {
     id: string;
     /** 자리에 앉아 있는가 (중도 참여 대기자·자리를 비켜 준 탈락자는 false) */
@@ -277,7 +303,7 @@ export interface PlayerView {
     pickDone: boolean;
     discard: { pending: boolean; chosen: number | null } | null;
     /** 선언 기회 (되감기·봉인·밥상 뒤집기) */
-    declare: { options: AugmentInfo[] } | null;
+    declare: { options: AugmentInfo[]; targets: Partial<Record<AugmentId, string[]>> } | null;
     /** 애착: 다음 핸드로 가져갈 카드 선택 */
     attach: { cards: Card[] } | null;
     counting: CountingView | null;
@@ -310,6 +336,8 @@ export interface PlayerView {
       turnRiver: { cards: Card[]; swap: boolean | null } | null;
       /** 무승부로 하지 않을래?: 제안할 수 있는 상대 */
       drawPrompt: { winnerName: string } | null;
+      /** 밀봉 계약: 내 예측 (0 = 전원 폴드, 1 = 한 명 이상 콜) */
+      contract: number | null;
     };
   };
   result: HandResultView | null;
@@ -361,7 +389,7 @@ function myHand(state: GameState, me: PlayerState, hole: Card[], board: (Card | 
 /** 버튼 사용 가능 여부를 판단할 기본 인자 (실제 값은 화면에서 고른다) */
 function sampleParams(state: GameState, me: PlayerState, id: AugmentId, targets: string[]): Record<string, unknown> {
   const d = AUGMENTS[id];
-  if (d.target) return { targetId: targets[0] };
+  if (d.target) return { targetId: targets[0], cardIndex: 0 };
   switch (id) {
     case 'radar':
       return { boardIndex: visibleBoard(state, me).findIndex((c) => !!c) };
@@ -369,6 +397,8 @@ function sampleParams(state: GameState, me: PlayerState, id: AugmentId, targets:
       return { card: fullDeck().find((c) => c !== me.keptCard && c !== me.lockerStored) };
     case 'bet':
     case 'magnet':
+    case 'truthGame':
+    case 'sealedContract':
       return { choice: 0 };
     case 'freeze':
       return { boardIndex: 0 };
@@ -385,7 +415,7 @@ function targetsFor(state: GameState, me: PlayerState, id: AugmentId): string[] 
   const def = AUGMENTS[id];
   if (!def.target || !ACTIVE[id]) return [];
   const aug = findAug(me, id)!;
-  return state.players.filter((t) => t !== me && !canUseNow(state, me, aug, { targetId: t.id })).map((t) => t.id);
+  return state.players.filter((t) => t !== me && !canUseNow(state, me, aug, { targetId: t.id, cardIndex: 0 })).map((t) => t.id);
 }
 
 /** 보는 사람(viewerId)에게 허용된 정보만으로 만든 뷰 */
@@ -511,6 +541,7 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     discard: 'discard',
     declare: 'declare',
     reaction: 'reaction',
+    respond: 'respond',
     handEnd: 'handEnd',
     gameOver: 'gameOver',
   };
@@ -634,6 +665,8 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
       revealPlan: [...state.revealPlan],
     },
     reaction,
+    respond: respondView(state, me, bb),
+    auctionCard: state.auctionCard && !mask.board ? blurCard(state.auctionCard) : null,
     you: {
       id: me.id,
       seated,
@@ -655,7 +688,7 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
         seated && state.phase === 'discard' && live(me) && me.hole.length === 3
           ? { pending: me.pendingDiscard === null, chosen: me.pendingDiscard }
           : null,
-      declare: declOpts.length ? { options: declOpts.map(info) } : null,
+      declare: declOpts.length ? { options: declOpts.map(info), targets: Object.fromEntries(declOpts.map((id) => [id, declareTargets(state, me, id)])) } : null,
       attach: seated && me.attachPending && state.phase === 'handEnd' ? { cards: [...me.hole] } : null,
       counting,
       tax: taxFor(state, me),
@@ -674,11 +707,79 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
         blackjackOn: me.blackjackOn,
         turnRiver: me.turnRiver ? { cards: [...me.turnRiver.cards], swap: me.turnRiver.swap } : null,
         drawPrompt: me.drawPrompt && state.phase === 'handEnd' ? { winnerName: nameById(me.drawPrompt.winnerId) } : null,
+        contract: me.contract,
       },
     },
     result,
     log,
     winnerId: state.winnerId,
+  };
+}
+
+function respondView(state: GameState, me: PlayerState, bb: number): RespondView | null {
+  const r = state.respond;
+  if (state.phase !== 'respond' || !r) return null;
+  const name = (id: string | undefined) => state.players.find((p) => p.id === id)?.name ?? '?';
+  const owner = name(r.ownerId);
+  const isOwner = me.id === r.ownerId;
+  const target = r.params.targetId;
+  const mine = r.answers[me.id];
+  const needMe = r.participants.includes(me.id) && !mine;
+  let input: RespondView['input'] = null;
+  let text: string;
+  switch (r.augment) {
+    case 'pickMe':
+      input = 'accept';
+      text =
+        me.id === target
+          ? `${owner}이(가) 제안: ${3 * bb}칩(3BB)을 내면 ${owner}이(가) 고른 홀카드 1장을 보여 줍니다.`
+          : isOwner
+            ? `${name(target)}의 응답을 기다리는 중`
+            : `${owner}이(가) ${name(target)}에게 제안 중`;
+      break;
+    case 'jointTransfer':
+      if (r.stage === 'pick') {
+        input = 'card';
+        text = r.participants.includes(me.id) ? '건넬 홀카드 1장을 고르세요 (두 사람이 동시에 맞바꿈)' : `${owner}와(과) ${name(target)}이(가) 바꿀 카드를 고르는 중`;
+      } else {
+        input = 'accept';
+        text = me.id === target ? `${owner}이(가) 홀카드 1장씩 맞바꾸자고 제안합니다.` : `${owner}이(가) ${name(target)}에게 교환 제안 중`;
+      }
+      break;
+    case 'loanShark':
+      input = 'accept';
+      text = me.id === target ? `${owner}이(가) ${5 * bb}칩(5BB)을 빌려주겠다고 제안합니다. 2핸드 뒤 ${7 * bb}칩(7BB)을 자동으로 갚습니다.` : `${owner}이(가) ${name(target)}에게 제안 중`;
+      break;
+    case 'infoAuction':
+      input = 'bid';
+      text = r.participants.includes(me.id) ? `정보 경매: 턴 카드를 미리 볼 권리 (0 = 불참, 최소 ${bb})` : '정보 경매 입찰 중';
+      break;
+    case 'cardAuction':
+      input = 'bidCard';
+      text = r.participants.includes(me.id) ? `카드 경매: 낙찰되면 공개된 카드를 고른 홀카드와 바꿉니다 (0 = 불참, 최소 ${bb})` : '카드 경매 입찰 중';
+      break;
+    case 'staredown': {
+      input = 'strongWeak';
+      const other = me.id === r.ownerId ? name(target) : owner;
+      text = r.participants.includes(me.id) ? `눈싸움: 내 패가 ${other}보다 강한가요? (비공개, 둘 다 쇼다운에 가면 공개)` : `${owner}와(과) ${name(target)}의 눈싸움`;
+      break;
+    }
+    default:
+      text = `${AUGMENTS[r.augment].name} 응답 대기 중`;
+  }
+  return {
+    augment: r.augment,
+    name: AUGMENTS[r.augment].name,
+    ownerId: r.ownerId,
+    ownerName: owner,
+    participants: [...r.participants],
+    needMe,
+    input: needMe ? input : null,
+    text,
+    card: isOwner && r.augment === 'pickMe' && holeVisible(state, me, me) ? (r.params.card ?? null) : null,
+    myAnswer: mine ? { accept: mine.accept ?? null, bid: mine.bid ?? null, choice: mine.choice ?? null, cardIndex: mine.cardIndex ?? null } : null,
+    minBid: bb,
+    maxBid: me.chips,
   };
 }
 
@@ -707,6 +808,13 @@ function tableNotes(state: GameState): string[] {
     if (e.magnet) out.push(`자석: ${({ s: '♠', h: '♥', d: '♦', c: '♣' } as Record<string, string>)[e.magnet.suit]}${e.magnet.used ? ' (사용됨)' : ''}`);
     if (state.board2) out.push(e.twoFates ? '두 번의 운명' : '더블 보드');
     if (state.revealPlan[0] !== 3) out.push('거꾸로 강을 거슬러 (1-1-3)');
+    const truthNames = ['하이카드', '원페어', '투페어', '트리플', '스트레이트', '플러시', '풀하우스', '포카드 이상'];
+    for (const p of state.players) {
+      if (p.truthClaim !== null && live(p)) out.push(`진실 게임: ${p.name} "${truthNames[p.truthClaim]} 이상"`);
+      if (p.contract !== null && live(p)) out.push(`밀봉 계약: ${p.name}`);
+    }
+    if (state.staredown) out.push(`눈싸움: ${state.players.find((p) => p.id === state.staredown!.a)?.name} vs ${state.players.find((p) => p.id === state.staredown!.b)?.name}`);
+    if (state.nameItWinner) out.push(`명추리 성공: ${state.players.find((p) => p.id === state.nameItWinner)?.name}`);
     if (e.glass) out.push('유리 테이블');
     if (e.blackout) out.push('암전');
     if (e.fogSeers.length && !e.fogLifted) out.push('짙은 안개');
@@ -719,6 +827,10 @@ function tableNotes(state: GameState): string[] {
   if (state.nextHand.prophecy) out.push('다음 핸드 미리 온 결말');
   if (state.nextHand.freezeCard) out.push(`다음 핸드 동결 [${state.nextHand.freezeCard}]`);
   if (state.underdogLeft > 0) out.push(`언더독 ${state.underdogLeft}핸드 남음`);
+  for (const t of state.tasks) {
+    const who = state.players.find((p) => p.id === t.playerId)?.name ?? '?';
+    if (t.kind === 'sharkRepay') out.push(`사채: ${who} → ${state.players.find((p) => p.id === t.otherId)?.name ?? '?'} 핸드 #${t.dueHand} 전 상환`);
+  }
   return out;
 }
 

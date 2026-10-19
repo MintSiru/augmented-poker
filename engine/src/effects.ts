@@ -6,9 +6,10 @@
 
 import { Card, cardToken, fullDeck, isCard, rankOf, rankName, suitOf } from './cards.js';
 import { AUGMENTS, AugmentId, isActiveAugment, isAugmentId } from './augments.js';
-import { blackjackCards, isMadeHand } from './evaluator.js';
+import { blackjackCards, isMadeHand, Category, CATEGORY_NAMES } from './evaluator.js';
 import { pickOne } from './rng.js';
-import { standingOf } from './standing.js';
+import { compareContenders } from './showdown.js';
+import { contenderFor, handEvalFor, standingOf } from './standing.js';
 import {
   active,
   addLog,
@@ -20,6 +21,7 @@ import {
   boardInfoHidden,
   flopCount,
   logBoard,
+  maskFor,
   invertedNow,
   ownCardsHidden,
   cardsText,
@@ -28,6 +30,7 @@ import {
   evalBoard,
   findAug,
   handInProgress,
+  holeVisible,
   idxOf,
   live,
   nameOf,
@@ -39,7 +42,7 @@ import {
   taxError,
   visibleBoard,
 } from './core.js';
-import type { ActiveParams, Declaration, GameState, HandResult, OwnedAugment, PlayerState } from './types.js';
+import type { ActiveParams, Declaration, GameState, HandResult, OwnedAugment, PlayerState, RespondAnswer, RespondState, ScheduledTask } from './types.js';
 
 /** 효과 함수가 게임 흐름을 건드릴 때 쓰는 엔진 기능 (game.ts 가 제공) */
 export interface EngineOps {
@@ -55,6 +58,8 @@ export interface EngineOps {
   addBoardCard(label: string): void;
   /** 베팅 행동 뒤 흐름 진행 (무임승차 콜) */
   afterBet(idx: number): void;
+  /** 제안·입찰 시작: 응답이 모두 모이거나 15초가 지나면 효과의 respond.done 이 불린다 */
+  startRespond(spec: Pick<RespondState, 'kind' | 'augment' | 'ownerId' | 'participants' | 'params'>): void;
 }
 
 export interface Ctx {
@@ -71,8 +76,17 @@ export interface ActiveEffect {
   consume?(ctx: Ctx, params: ActiveParams): void;
   resolve(ctx: Ctx, params: ActiveParams, decl: Declaration): void;
   onCountered?(ctx: Ctx, params: ActiveParams): void;
-  /** 본인에게만 보이는 선언 세부 (로그) */
+  /** 선언 세부 (로그, 공개) */
   detail?(ctx: Ctx, params: ActiveParams): string;
+  /** 제안·입찰형: 응답 검증, 기본 응답(시간 초과·자리 비움), 결과 처리 */
+  respond?: RespondHooks;
+}
+
+export interface RespondHooks {
+  error(ctx: Ctx, r: RespondState, p: PlayerState, a: RespondAnswer): string | null;
+  fallback(ctx: Ctx, r: RespondState, p: PlayerState): RespondAnswer;
+  /** 응답이 모두 모였을 때. true 를 돌려주면 r 을 고친 채로 응답을 더 받는다 (공동 환승의 카드 고르기) */
+  done(ctx: Ctx, r: RespondState): boolean;
 }
 
 export type InfoKind = 'clairvoyance' | 'thermal' | 'liedetector' | 'thermometer';
@@ -188,6 +202,92 @@ function turnRiverIdx(state: GameState): number[] {
 function realMade(state: GameState, p: PlayerState): boolean {
   return isMadeHand(p.hole, evalBoard(state), rulesFor(p));
 }
+
+// ───────────────────────── 제안·응답 공통 ─────────────────────────
+
+function bbOf(state: GameState): number {
+  return currentBlinds(state).bb;
+}
+
+function respondBusy(state: GameState): string | null {
+  return state.respond ? '다른 제안·입찰이 진행 중입니다.' : null;
+}
+
+/** 칩을 옮긴다 (to 가 null 이면 은행). 모자라면 있는 만큼. 핸드 중 칩이 0이 되면 올인 */
+export function transfer(state: GameState, from: PlayerState, to: PlayerState | null, amount: number): number {
+  const amt = Math.max(0, Math.min(amount, from.chips));
+  from.chips -= amt;
+  if (to) to.chips += amt;
+  else state.stats.bankPaid += amt;
+  if (from.chips === 0 && amt > 0 && live(from)) {
+    from.allIn = true;
+    from.wentAllIn = true;
+  }
+  return amt;
+}
+
+/** 입찰금을 팟(데드 머니)에 넣는다 */
+function payToPot(state: GameState, p: PlayerState, amount: number): number {
+  const amt = transfer(state, p, null, amount);
+  state.stats.bankPaid -= amt;
+  state.deadMoney += amt;
+  return amt;
+}
+
+const isInt = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v);
+
+/** 입찰 검증: 0(불참) 또는 1BB 이상 내 칩까지 */
+function bidError(state: GameState, p: PlayerState, bid: unknown): string | null {
+  if (!isInt(bid) || bid < 0) return '입찰가를 올바르게 정하세요.';
+  if (bid === 0) return null;
+  if (bid < bbOf(state)) return `입찰가는 0(불참) 또는 ${bbOf(state)} 이상이어야 합니다.`;
+  if (bid > p.chips) return '보유 칩보다 많이 입찰할 수 없습니다.';
+  return null;
+}
+
+/** 최고 입찰자 (동점이면 무작위) */
+function topBidder(state: GameState, r: RespondState): { p: PlayerState; bid: number } | null {
+  let best = 0;
+  let ids: string[] = [];
+  for (const id of r.participants) {
+    const b = r.answers[id]?.bid ?? 0;
+    const p = playerById(state, id);
+    if (!p || !live(p) || b <= 0 || b > p.chips) continue;
+    if (b > best) {
+      best = b;
+      ids = [id];
+    } else if (b === best) ids.push(id);
+  }
+  if (!ids.length) return null;
+  return { p: playerById(state, pickOne(ids, state.rng))!, bid: best };
+}
+
+/** 입찰 참여자: 핸드에 남아 1BB 이상 있고 보드를 볼 수 있는 사람 */
+function bidders(state: GameState, needHole: boolean): string[] {
+  return state.players.filter((p) => live(p) && p.chips >= bbOf(state) && !boardBlind(state, p) && (!needHole || p.hole.length > 0)).map((p) => p.id);
+}
+
+const truthNames = [...CATEGORY_NAMES.slice(0, 7), '포카드 이상'];
+
+/** 명추리: 선언자가 이미 아는 대상의 카드 (공개 카드·내 정보 기록·양치기 소년·경매 카드) */
+export function knownCardsFor(state: GameState, owner: PlayerState, target: PlayerState): Card[] {
+  const out = new Set<Card>([...owner.hole, ...publicCards(state), ...target.shepherdShown]);
+  for (const c of visibleBoard(state, owner)) if (c) out.add(c);
+  if (state.auctionCard) out.add(state.auctionCard);
+  for (const n of owner.notes) if (n.hand === state.handNumber && n.targetId === target.id) for (const c of n.cards ?? []) out.add(c);
+  return [...out];
+}
+
+/** 명추리 대상이 될 수 있는가: 이미 내가 홀카드를 모두 아는 상대는 안 된다 */
+function knownTargetError(state: GameState, owner: PlayerState, t: PlayerState): string | null {
+  // 내가 아는 정보만으로 판단한다 (진짜 카드와 비교하지 않음 — 역정보 여부가 드러나지 않게)
+  const about = new Set<Card>(t.shepherdShown);
+  if (holeVisible(state, t, owner)) for (const c of t.hole) about.add(c);
+  for (const n of owner.notes) if (n.hand === state.handNumber && n.targetId === t.id) for (const c of n.cards ?? []) about.add(c);
+  return about.size >= t.hole.length ? `${t.name}의 홀카드는 이미 모두 알고 있어 지목할 수 없습니다.` : null;
+}
+
+const yesNo = (v: unknown) => (typeof v === 'boolean' ? null : '수락 여부를 정하세요.');
 
 // ───────────────────────── 액티브 효과 ─────────────────────────
 
@@ -1105,6 +1205,318 @@ export const ACTIVE: Partial<Record<AugmentId, ActiveEffect>> = {
     },
   },
 
+  // ═════════════════════════ 3차 풀: 제안·응답 ═════════════════════════
+
+  pickMe: {
+    check(ctx, params) {
+      const err = opponentInHand(ctx, params);
+      if (err) return err;
+      const { state, owner } = ctx;
+      if (basePhase(state) !== 'betting' || (state.street !== 'flop' && state.street !== 'turn')) return '플랍·턴 베팅 라운드에서만 쓸 수 있습니다.';
+      if (state.toAct !== idxOf(state, owner.id)) return '내 차례(행동 전)에만 쓸 수 있습니다.';
+      if (!validHoleIndex(owner, params.cardIndex)) return '보여 줄 내 홀카드를 고르세요.';
+      return respondBusy(state);
+    },
+    detail: (ctx, p) => `— ${nameOf(ctx.state, p.targetId ?? '')}에게 제안`,
+    resolve(ctx, params) {
+      const { state, owner } = ctx;
+      const t = targetOf(ctx, params)!;
+      const card = owner.hole[params.cardIndex!];
+      ctx.ops.startRespond({ kind: 'offer', augment: 'pickMe', ownerId: owner.id, participants: [t.id], params: { targetId: t.id, cardIndex: params.cardIndex, card } });
+      if (!ownCardsHidden(state, owner)) addLog(state, `골라 봐: ${t.name}에게 보여 줄 카드 ${cardToken(card)}`, { to: [owner.id] });
+    },
+    respond: {
+      error: (_ctx, _r, _p, a) => yesNo(a.accept),
+      // 시간 초과는 거절
+      fallback: () => ({ accept: false }),
+      done(ctx, r) {
+        const { state, owner } = ctx;
+        const t = playerById(state, r.params.targetId)!;
+        if (!r.answers[t.id]?.accept || !live(t) || !live(owner)) {
+          addLog(state, `골라 봐: ${t.name}이(가) 제안을 거절했습니다`);
+          return false;
+        }
+        const card = owner.hole.includes(r.params.card!) ? r.params.card! : owner.hole[r.params.cardIndex ?? 0];
+        const paid = transfer(state, t, owner, 3 * bbOf(state));
+        addLog(state, `골라 봐: ${t.name}이(가) 수락 — ${owner.name}에게 ${paid}칩을 내고 홀카드 1장을 봅니다`);
+        note(state, t, 'info', `골라 봐: ${owner.name}의 홀카드 중 1장은 ${cardToken(card)}`, [card], owner.id);
+        return false;
+      },
+    },
+  },
+
+  jointTransfer: {
+    check(ctx, params) {
+      const { state } = ctx;
+      if (basePhase(state) !== 'declare' || state.windowStage !== 'flop') return '플랍 공개 직후 선언 기회에만 쓸 수 있습니다.';
+      return opponentInHand(ctx, params) ?? respondBusy(state);
+    },
+    detail: (ctx, p) => `— ${nameOf(ctx.state, p.targetId ?? '')}에게 교환 제안`,
+    resolve(ctx, params) {
+      const t = targetOf(ctx, params)!;
+      ctx.ops.startRespond({ kind: 'offer', augment: 'jointTransfer', ownerId: ctx.owner.id, participants: [t.id], params: { targetId: t.id } });
+    },
+    respond: {
+      error(_ctx, r, p, a) {
+        if (r.stage === 'offer') return yesNo(a.accept);
+        return validHoleIndex(p, a.cardIndex) ? null : '건넬 홀카드를 고르세요.';
+      },
+      fallback: (ctx, r, p) => (r.stage === 'offer' ? { accept: false } : { cardIndex: ctx.state.rng.int(Math.max(1, p.hole.length)) }),
+      done(ctx, r) {
+        const { state, owner } = ctx;
+        const t = playerById(state, r.params.targetId)!;
+        if (r.stage === 'offer') {
+          if (!r.answers[t.id]?.accept || !live(t) || !live(owner)) {
+            addLog(state, `공동 환승: ${t.name}이(가) 교환을 거절했습니다`);
+            return false;
+          }
+          addLog(state, `공동 환승: ${t.name}이(가) 수락 — 두 사람이 홀카드 1장씩을 비공개로 골라 맞바꿉니다`);
+          r.stage = 'pick';
+          r.participants = [owner.id, t.id];
+          r.answers = {};
+          return true;
+        }
+        if (!live(t) || !live(owner)) {
+          addLog(state, '공동 환승: 한 사람이 핸드를 떠나 교환이 취소되었습니다');
+          return false;
+        }
+        const ia = r.answers[owner.id]?.cardIndex ?? 0;
+        const ib = r.answers[t.id]?.cardIndex ?? 0;
+        const give = owner.hole[ia];
+        const get = t.hole[ib];
+        owner.hole[ia] = get;
+        t.hole[ib] = give;
+        note(state, owner, 'info', `공동 환승: ${cardToken(give)}을(를) 주고 ${cardToken(get)}을(를) 받았습니다`, [give, get], t.id);
+        note(state, t, 'info', `공동 환승: ${cardToken(get)}을(를) 주고 ${cardToken(give)}을(를) 받았습니다`, [get, give], owner.id);
+        addLog(state, `공동 환승: ${owner.name}와(과) ${t.name}이(가) 홀카드 1장씩을 맞바꿨습니다`);
+        return false;
+      },
+    },
+  },
+
+  loanShark: {
+    check(ctx, params) {
+      const { state, owner } = ctx;
+      const b = basePhase(state);
+      if (b !== 'betting' && b !== 'discard' && b !== 'declare' && b !== 'handEnd') return '핸드 진행 중이나 핸드 결과 화면에서 쓸 수 있습니다.';
+      if (!active(owner)) return '게임에 참여하고 있지 않습니다.';
+      const t = targetOf(ctx, params);
+      if (!t || !active(t)) return '빌려줄 상대를 고르세요.';
+      if (owner.chips < 5 * bbOf(state)) return `빌려줄 칩(${5 * bbOf(state)})이 부족합니다.`;
+      return respondBusy(state);
+    },
+    detail: (ctx, p) => `— ${nameOf(ctx.state, p.targetId ?? '')}에게 제안`,
+    resolve(ctx, params) {
+      const t = targetOf(ctx, params)!;
+      ctx.ops.startRespond({ kind: 'offer', augment: 'loanShark', ownerId: ctx.owner.id, participants: [t.id], params: { targetId: t.id } });
+    },
+    respond: {
+      error: (_ctx, _r, _p, a) => yesNo(a.accept),
+      fallback: () => ({ accept: false }),
+      done(ctx, r) {
+        const { state, owner } = ctx;
+        const t = playerById(state, r.params.targetId)!;
+        if (!r.answers[t.id]?.accept || !active(t) || !active(owner)) {
+          addLog(state, `사채업자: ${t.name}이(가) 제안을 거절했습니다`);
+          return false;
+        }
+        const bb = bbOf(state);
+        const lent = transfer(state, owner, t, 5 * bb);
+        if (t.chips > 0 && !t.wentAllIn) t.allIn = false;
+        // 2핸드 뒤 상환 (핸드 사이에 빌렸으면 다음 핸드부터 센다)
+        const due = state.handNumber + (basePhase(state) === 'handEnd' ? 3 : 2);
+        state.tasks.push({ kind: 'sharkRepay', playerId: t.id, otherId: owner.id, dueHand: due, amount: 7 * bb });
+        addLog(state, `사채업자: ${t.name}이(가) ${owner.name}에게서 ${lent}칩을 빌렸습니다 (핸드 #${due} 시작 전에 ${7 * bb}칩 상환)`);
+        return false;
+      },
+    },
+  },
+
+  infoAuction: {
+    check(ctx) {
+      const { state } = ctx;
+      if (basePhase(state) !== 'betting' || state.street !== 'flop') return '플랍 공개 후 플랍 베팅 라운드에서만 선언할 수 있습니다.';
+      if (state.boardRevealed >= state.board.length) return '남은 보드 카드가 없습니다.';
+      if (state.players.some((p) => p.eitherOr || p.turnRiver)) return '턴 카드가 이미 다른 효과로 정해지는 중입니다.';
+      return needLive(ctx) ?? respondBusy(state);
+    },
+    resolve(ctx) {
+      const { state, owner } = ctx;
+      const ids = bidders(state, false);
+      if (!ids.length) {
+        addLog(state, '정보 경매: 입찰할 수 있는 사람이 없습니다');
+        return;
+      }
+      addLog(state, `정보 경매: 턴 카드를 미리 볼 권리를 비공개로 입찰합니다 (0 = 불참, 최소 ${bbOf(state)})`);
+      ctx.ops.startRespond({ kind: 'collect', augment: 'infoAuction', ownerId: owner.id, participants: ids, params: {} });
+    },
+    respond: {
+      error: (ctx, _r, p, a) => bidError(ctx.state, p, a.bid),
+      fallback: () => ({ bid: 0 }),
+      done(ctx, r) {
+        const { state } = ctx;
+        const top = topBidder(state, r);
+        if (!top) {
+          addLog(state, '정보 경매: 입찰자가 없어 유찰되었습니다');
+          return false;
+        }
+        const paid = payToPot(state, top.p, top.bid);
+        const i = state.boardRevealed;
+        const card = state.board[i];
+        // 본 카드가 그대로 나오도록 고정 (자석·되감기 등으로 바뀌지 않음)
+        if (!state.fixedIdx.includes(i)) state.fixedIdx.push(i);
+        addLog(state, `정보 경매: ${top.p.name}이(가) ${paid}칩에 낙찰 (낙찰금은 팟으로)`);
+        if (maskFor(state, top.p).suits) note(state, top.p, 'info', `정보 경매: 다음 보드 카드는 ${rankName(rankOf(card))} (무늬는 안 보임)`, undefined);
+        else note(state, top.p, 'info', `정보 경매: 다음 보드 카드는 ${cardToken(card)}`, [card]);
+        return false;
+      },
+    },
+  },
+
+  cardAuction: {
+    check(ctx) {
+      const { state } = ctx;
+      if (basePhase(state) !== 'betting' || state.street !== 'flop') return '플랍 공개 후 플랍 베팅 라운드에서만 선언할 수 있습니다.';
+      if (state.auctionCard) return '이번 핸드에는 이미 카드 경매가 열렸습니다.';
+      if (!state.deck.length) return '덱에 남은 카드가 없습니다.';
+      return needLive(ctx) ?? respondBusy(state);
+    },
+    resolve(ctx) {
+      const { state, owner } = ctx;
+      const card = state.deck.shift()!;
+      state.auctionCard = card;
+      logBoard(state, `카드 경매: ${cardToken(card)} — 비공개로 입찰하세요 (0 = 불참, 최소 ${bbOf(state)})`, '카드 경매: 덱에서 1장이 공개되었습니다 (보드를 볼 수 없음)', false);
+      const ids = bidders(state, true);
+      if (!ids.length) {
+        state.used.push({ card, kind: 'shown' });
+        addLog(state, '카드 경매: 입찰할 수 있는 사람이 없습니다');
+        return;
+      }
+      ctx.ops.startRespond({ kind: 'collect', augment: 'cardAuction', ownerId: owner.id, participants: ids, params: { card } });
+    },
+    respond: {
+      error(ctx, _r, p, a) {
+        const err = bidError(ctx.state, p, a.bid);
+        if (err) return err;
+        if (a.bid && a.cardIndex !== undefined && !validHoleIndex(p, a.cardIndex)) return '바꿀 홀카드를 고르세요.';
+        return null;
+      },
+      fallback: () => ({ bid: 0 }),
+      done(ctx, r) {
+        const { state } = ctx;
+        const card = r.params.card!;
+        const top = topBidder(state, r);
+        if (!top) {
+          state.used.push({ card, kind: 'shown' });
+          addLog(state, '카드 경매: 입찰자가 없어 유찰되었습니다');
+          return false;
+        }
+        const w = top.p;
+        const paid = payToPot(state, w, top.bid);
+        const ci = r.answers[w.id]?.cardIndex;
+        const idx = validHoleIndex(w, ci) ? ci : state.rng.int(w.hole.length);
+        const old = w.hole[idx];
+        w.hole[idx] = card;
+        w.discarded.push(old);
+        state.used.push({ card: old, kind: 'discard' });
+        addLog(state, `카드 경매: ${w.name}이(가) ${paid}칩에 낙찰 — 공개된 카드를 홀카드 1장과 바꿨습니다 (낙찰금은 팟으로)`);
+        note(state, w, 'info', `카드 경매: ${cardToken(old)}을(를) 버리고 ${cardToken(card)}을(를) 받았습니다`, [old, card]);
+        return false;
+      },
+    },
+  },
+
+  truthGame: {
+    check(ctx, params) {
+      const { state, owner } = ctx;
+      if (basePhase(state) !== 'betting' || state.street !== 'river') return '리버 베팅 라운드에서만 쓸 수 있습니다.';
+      if (state.toAct !== idxOf(state, owner.id) || !live(owner)) return '내 차례에만 쓸 수 있습니다.';
+      if (owner.truthClaim !== null) return '이미 선언했습니다.';
+      const c = params.choice;
+      return isInt(c) && c >= 0 && c <= 7 ? null : '족보 종류를 고르세요.';
+    },
+    detail: (_ctx, p) => `— "내 패는 ${truthNames[p.choice ?? 0]} 이상"`,
+    resolve(ctx, params) {
+      ctx.owner.truthClaim = params.choice!;
+    },
+  },
+
+  staredown: {
+    check(ctx, params) {
+      const { state } = ctx;
+      if (basePhase(state) !== 'betting' || state.street !== 'river') return '리버 베팅 라운드에서만 쓸 수 있습니다.';
+      const err = opponentInHand(ctx, params);
+      if (err) return err;
+      if (state.staredown) return '이번 핸드에는 이미 눈싸움이 있었습니다.';
+      return targetable(targetOf(ctx, params)!) ?? respondBusy(state);
+    },
+    detail: (ctx, p) => `— ${nameOf(ctx.state, p.targetId ?? '')}와(과) 눈싸움`,
+    resolve(ctx, params) {
+      const { state, owner } = ctx;
+      const t = targetOf(ctx, params)!;
+      addLog(state, `눈싸움: ${owner.name}와(과) ${t.name}이(가) 상대보다 "강함/약함"을 동시에 비공개로 선언합니다`);
+      ctx.ops.startRespond({ kind: 'collect', augment: 'staredown', ownerId: owner.id, participants: [owner.id, t.id], params: { targetId: t.id } });
+    },
+    respond: {
+      error: (_ctx, _r, _p, a) => (a.choice === 0 || a.choice === 1 ? null : '"강함" 또는 "약함"을 고르세요.'),
+      fallback: (ctx) => ({ choice: ctx.state.rng.int(2) }),
+      done(ctx, r) {
+        const { state, owner } = ctx;
+        const t = playerById(state, r.params.targetId)!;
+        const claims: Record<string, number> = { [owner.id]: r.answers[owner.id]?.choice ?? 0, [t.id]: r.answers[t.id]?.choice ?? 0 };
+        state.staredown = { a: owner.id, b: t.id, claims };
+        for (const p of [owner, t]) addLog(state, `눈싸움: 내 선언은 "${claims[p.id] ? '강함' : '약함'}" (쇼다운 때 공개)`, { to: [p.id] });
+        addLog(state, '눈싸움: 두 사람 모두 선언을 마쳤습니다 (둘 다 쇼다운에 가면 공개)');
+        return false;
+      },
+    },
+  },
+
+  sealedContract: {
+    check(ctx, params) {
+      const { state, owner } = ctx;
+      if (basePhase(state) !== 'betting' || state.street !== 'river') return '리버 베팅 라운드에서만 쓸 수 있습니다.';
+      if (state.toAct !== idxOf(state, owner.id) || !live(owner)) return '내 차례(베팅·레이즈 직전)에만 쓸 수 있습니다.';
+      if (owner.contract !== null) return '이미 계약했습니다.';
+      return params.choice === 0 || params.choice === 1 ? null : '"전원 폴드" 또는 "한 명 이상 콜"을 고르세요.';
+    },
+    // 고른 내용은 비공개: 공개 로그에는 계약 사실만
+    resolve(ctx, params) {
+      const { state, owner } = ctx;
+      owner.contract = params.choice!;
+      addLog(state, `밀봉 계약: 내 예측은 "${params.choice ? '한 명 이상 콜' : '전원 폴드'}" (핸드가 끝나면 공개)`, { to: [owner.id] });
+    },
+  },
+
+  nameIt: {
+    check(ctx, params, atResolve) {
+      const { state, owner } = ctx;
+      if (basePhase(state) !== 'declare' || state.windowStage !== 'preShowdown') return '리버 베팅이 끝난 뒤 쇼다운 직전 선언 기회에만 쓸 수 있습니다.';
+      const err = opponentInHand(ctx, params);
+      if (err) return err;
+      const t = targetOf(ctx, params)!;
+      if (state.nameItWinner) return '이미 명추리가 성공했습니다.';
+      if (!isCard(params.card)) return '부를 카드를 고르세요.';
+      // 대상 지목 가능 여부는 선언 시점에만 (반응 대기 중 바뀐 정보로 거절하지 않음)
+      return targetable(t) ?? (atResolve ? null : knownTargetError(state, owner, t));
+    },
+    detail: (ctx, p) => `— 대상: ${nameOf(ctx.state, p.targetId ?? '')}`,
+    resolve(ctx, params) {
+      const { state, owner } = ctx;
+      const t = targetOf(ctx, params)!;
+      const card = params.card!;
+      const known = knownCardsFor(state, owner, t).includes(card);
+      if (!known && t.hole.includes(card)) {
+        state.nameItWinner = owner.id;
+        addLog(state, `명추리 성공: ${owner.name}이(가) ${t.name}의 홀카드 ${cardToken(card)}을(를) 맞혔습니다 — 참여할 수 있는 팟을 모두 가져갑니다`);
+        return;
+      }
+      const paid = transfer(state, owner, t, 2 * bbOf(state));
+      addLog(state, `명추리 실패: ${owner.name}이(가) 부른 ${cardToken(card)}은(는) ${known ? '이미 알려진 카드라 인정되지 않습니다' : `${t.name}의 카드가 아닙니다`} — 폴드하고 ${t.name}에게 ${paid}칩을 냅니다`);
+      ctx.ops.fold(owner, false);
+    },
+  },
+
   // 면제권: 블라인드 차례에 엔진이 자동으로 선언한다
   exemption: {
     check: (ctx) => (ctx.owner.inHand ? null : '핸드에 참여하지 않았습니다.'),
@@ -1311,6 +1723,71 @@ export const PASSIVE: Partial<Record<AugmentId, PassiveEffect>> = {
     },
   },
 
+  // 진실 게임: 콜한 상대(쇼다운 참가자) 각각과 3BB 정산
+  truthGame: {
+    onHandEnd(ctx, result) {
+      const { state, owner } = ctx;
+      const claim = owner.truthClaim;
+      const me = result.entries.find((e) => e.id === owner.id);
+      if (claim === null || !result.showdown || !me) return;
+      const others = result.entries.filter((e) => e.id !== owner.id).map((e) => playerById(state, e.id)!);
+      if (!others.length) return;
+      const cat = Math.min(Category.Quads, me.score[0]);
+      const truth = cat >= claim;
+      const amt = 3 * bbOf(state);
+      let total = 0;
+      for (const o of others) total += truth ? transfer(state, o, owner, amt) : transfer(state, owner, o, amt);
+      const text = `${owner.name}: 진실 게임 "${truthNames[claim]} 이상" — ${truth ? `진실, ${total}칩을 받음` : `거짓, ${total}칩을 냄`}`;
+      result.extras.push(text);
+      addLog(state, text);
+    },
+  },
+
+  // 눈싸움: 둘 다 쇼다운에 가면 공개, 한 명만 정직했다면 2BB
+  staredown: {
+    onHandEnd(ctx, result) {
+      const { state, owner } = ctx;
+      const sd = state.staredown;
+      if (!sd || sd.a !== owner.id || !result.showdown) return;
+      const a = playerById(state, sd.a)!;
+      const b = playerById(state, sd.b)!;
+      if (!result.entries.some((e) => e.id === a.id) || !result.entries.some((e) => e.id === b.id)) return;
+      const board = evalBoard(state);
+      const cmp = compareContenders(contenderFor(state, a, handEvalFor(state, a, board)), contenderFor(state, b, handEvalFor(state, b, board)), { inverted: invertedNow(state), board }).result;
+      const honest = (p: PlayerState, sign: number) => (sd.claims[p.id] === 1 ? sign > 0 : sign < 0);
+      const ha = honest(a, cmp);
+      const hb = honest(b, -cmp);
+      const word = (p: PlayerState) => (sd.claims[p.id] ? '강함' : '약함');
+      let tail = '둘 다 정직하거나 둘 다 정직하지 않아 정산 없음';
+      if (ha !== hb) {
+        const [w, l] = ha ? [a, b] : [b, a];
+        const paid = transfer(state, l, w, 2 * bbOf(state));
+        tail = `${w.name}만 정직 — ${l.name}이(가) ${paid}칩을 냄`;
+      }
+      const text = `눈싸움 공개: ${a.name} "${word(a)}", ${b.name} "${word(b)}" — ${tail}`;
+      result.extras.push(text);
+      addLog(state, text);
+    },
+  },
+
+  // 밀봉 계약: 핸드가 끝나면 공개, 맞히면 은행에서 3BB
+  sealedContract: {
+    onHandEnd(ctx, result) {
+      const { state, owner } = ctx;
+      const c = owner.contract;
+      if (c === null || !owner.inHand || owner.folded) return;
+      const outcome = result.showdown ? 1 : (result.won[owner.id] ?? 0) > 0 ? 0 : null;
+      if (outcome === null) return;
+      const hit = outcome === c;
+      const bonus = hit ? 3 * bbOf(state) : 0;
+      owner.chips += bonus;
+      state.stats.bankChips += bonus;
+      const text = `${owner.name}: 밀봉 계약 "${c ? '한 명 이상 콜' : '전원 폴드'}" — ${hit ? `적중, 은행에서 ${bonus}칩` : '빗나감'}`;
+      result.extras.push(text);
+      addLog(state, text);
+    },
+  },
+
   vest: {
     blockForcedFold(ctx) {
       if ((ctx.aug.usesLeft ?? 0) <= 0) return false;
@@ -1326,17 +1803,56 @@ export function holeCardCount(p: PlayerState): number {
   return Math.max(2, ...p.augments.map((a) => PASSIVE[a.id]?.holeCards ?? 2));
 }
 
-/** 정해진 선언 기회에 쓸 수 있는 증강 (되감기·봉인·밥상 뒤집기) */
+// ───────────────────────── 예약 작업 (사채·대출 상환, 부활) ─────────────────────────
+
+export const TASKS: Record<ScheduledTask['kind'], (state: GameState, t: ScheduledTask) => void> = {
+  sharkRepay(state, t) {
+    const borrower = playerById(state, t.playerId);
+    const lender = playerById(state, t.otherId);
+    if (!borrower || !active(borrower)) return;
+    if (!lender || !active(lender)) {
+      addLog(state, `사채업자: 빌려준 사람이 자리에 없어 ${borrower.name}의 빚이 사라졌습니다`);
+      return;
+    }
+    const paid = transfer(state, borrower, lender, t.amount);
+    countUse(state, 'loanShark');
+    addLog(state, `사채업자: ${borrower.name}이(가) ${lender.name}에게 ${paid}칩을 갚았습니다${paid < t.amount ? ' (모자라 있는 만큼)' : ''}`);
+  },
+  loanRepay() {},
+  revive() {},
+};
+
+/** 선언 기회 판단용 대상 후보 (지목형 창 증강: 공동 환승·명추리·기생) */
+function windowSamples(state: GameState, p: PlayerState, id: AugmentId): ActiveParams[] {
+  if (id === 'seal') return [{ boardIndex: [0, 1, 2, 3, 4].find((i) => !state.effects.sealed.includes(i)) }];
+  if (id === 'lastFork') return [{ cardIndex: 0 }];
+  if (!AUGMENTS[id].target) return [{}];
+  return state.players.filter((t) => t !== p).map((t) => {
+    // 명추리: 이미 아는 카드가 아닌 아무 카드 (판단용)
+    const known = id === 'nameIt' ? new Set(knownCardsFor(state, p, t)) : null;
+    return { targetId: t.id, ...(known ? { card: fullDeck().find((c) => !known.has(c)) } : {}) };
+  });
+}
+
+/** 선언 기회에 이 증강으로 지목할 수 있는 대상 */
+export function windowTargets(state: GameState, ops: EngineOps, p: PlayerState, id: AugmentId): string[] {
+  const a = findAug(p, id);
+  if (!a || !AUGMENTS[id].target) return [];
+  return windowSamples(state, p, id)
+    .filter((params) => !ACTIVE[id]?.check({ state, ops, owner: p, aug: a }, params, false))
+    .map((params) => params.targetId!);
+}
+
+/** 정해진 선언 기회에 쓸 수 있는 증강 (되감기·봉인·밥상 뒤집기 등) */
 export function windowOptions(state: GameState, ops: EngineOps, p: PlayerState): AugmentId[] {
   const out: AugmentId[] = [];
   if (taxError(state, p)) return out;
   for (const a of p.augments) {
     const def = AUGMENTS[a.id];
-    if (def.trigger !== 'window' || (a.usesLeft ?? 0) <= 0) continue;
-    // 봉인은 카드 선택 전이므로 아무 칸이나 가능한지만 본다
-    const params: ActiveParams =
-      a.id === 'seal' ? { boardIndex: [0, 1, 2, 3, 4].find((i) => !state.effects.sealed.includes(i)) } : a.id === 'lastFork' ? { cardIndex: 0 } : {};
-    if (!ACTIVE[a.id]?.check({ state, ops, owner: p, aug: a }, params, false)) out.push(a.id);
+    if (def.trigger !== 'window') continue;
+    if (def.uses?.per === 'hand' ? a.usedThisHand : (a.usesLeft ?? 0) <= 0) continue;
+    const ctx = { state, ops, owner: p, aug: a };
+    if (windowSamples(state, p, a.id).some((params) => !ACTIVE[a.id]?.check(ctx, params, false))) out.push(a.id);
   }
   return out;
 }

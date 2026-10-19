@@ -40,8 +40,8 @@ import {
   seatOrderFromDealer,
   taxError,
 } from './core.js';
-import { ACTIVE, Ctx, EngineOps, holeCardCount, PASSIVE, windowOptions } from './effects.js';
-import { decidePot, type Contender } from './showdown.js';
+import { ACTIVE, Ctx, EngineOps, holeCardCount, PASSIVE, TASKS, windowOptions, windowTargets } from './effects.js';
+import { decidePot, type Contender, type PotDecision } from './showdown.js';
 import { contenderFor, handEvalFor } from './standing.js';
 import type {
   ActionResult,
@@ -55,6 +55,8 @@ import type {
   PotResult,
   PotUnit,
   OwnedAugment,
+  RespondAnswer,
+  RespondState,
   Pending,
   Phase,
   PlayerState,
@@ -154,6 +156,8 @@ function newPlayer(np: NewPlayer, seat: number, chips: number): PlayerState {
     showPending: false,
     turnRiver: null,
     drawPrompt: null,
+    truthClaim: null,
+    contract: null,
   };
 }
 
@@ -246,6 +250,12 @@ export function createGame(players: NewPlayer[], opts: CreateGameOptions = {}): 
     nextHand: { reverse: false, prophecy: false, freezeCard: null },
     windowStage: null,
     capitalChooser: null,
+    respond: null,
+    respondSeq: 0,
+    auctionCard: null,
+    staredown: null,
+    nameItWinner: null,
+    tasks: [],
     used: [],
     effects: freshEffects(),
     blackoutNext: false,
@@ -316,6 +326,7 @@ function opsFor(state: GameState): EngineOps {
       state.betActionSeq++;
       afterBetAction(state, idx);
     },
+    startRespond: (spec) => startRespond(state, spec),
   };
 }
 
@@ -570,6 +581,10 @@ export function kickPlayer(state: GameState, id: string): ActionResult {
     // 반응 대기 중이면 대기가 끝난 뒤 흐름이 이어진다
     if (state.phase === 'betting' || state.phase === 'discard' || state.phase === 'declare') continueAfterReaction(state);
   }
+  // 제안·입찰 응답을 기다리던 사람이면 기다리지 않는다
+  if (state.phase === 'respond' && !respondPending(state).length) finishRespond(state);
+  // 빌린 칩은 사라진다
+  dropTasksOf(state, p.id);
   if (state.phase === 'augmentSelect' && !state.players.some((x) => x.pickOptions)) beginHand(state);
   state.decisionSeq++;
   return { ok: true };
@@ -627,6 +642,8 @@ function resetHandState(state: GameState): void {
     p.showPending = false;
     p.turnRiver = null;
     p.drawPrompt = null;
+    p.truthClaim = null;
+    p.contract = null;
     for (const a of p.augments) a.usedThisHand = false;
   }
   state.board = [];
@@ -637,6 +654,10 @@ function resetHandState(state: GameState): void {
   state.fixedIdx = [];
   state.windowStage = null;
   state.capitalChooser = null;
+  state.respond = null;
+  state.auctionCard = null;
+  state.staredown = null;
+  state.nameItWinner = null;
   state.burns = [];
   state.boardRevealed = 0;
   state.deck = [];
@@ -1276,6 +1297,11 @@ function startDeclareWindow(state: GameState, stage: 'flop' | 'turn' | 'river' |
   return true;
 }
 
+/** 선언 기회에 지목형 증강(공동 환승·명추리 등)으로 고를 수 있는 대상 */
+export function declareTargets(state: GameState, p: PlayerState, id: AugmentId): string[] {
+  return declareOptions(state, p).includes(id) ? windowTargets(state, opsFor(state), p, id) : [];
+}
+
 export function declareOptions(state: GameState, p: PlayerState): AugmentId[] {
   if (state.phase !== 'declare' || state.players[state.declareQueue[0]] !== p) return [];
   if (state.capitalChooser) return state.capitalChooser === p.id ? ['capitalism'] : [];
@@ -1568,6 +1594,76 @@ export function immunityCandidates(state: GameState): string[] {
   return state.players.filter((p) => findAug(p, 'immunity') && !immunityError(state, p)).map((p) => p.id);
 }
 
+// ───────────────────────── 제안·응답 ─────────────────────────
+
+/** 제안·입찰 시작: 진행 중인 단계를 멈추고 응답을 모은다 (서버는 15초 제한, 턴 타이머는 일시정지) */
+function startRespond(state: GameState, spec: Pick<RespondState, 'kind' | 'augment' | 'ownerId' | 'participants' | 'params'>): void {
+  if (state.respond) return;
+  state.respond = { ...spec, answers: {}, stage: 'offer', resume: state.phase, seq: ++state.respondSeq };
+  state.phase = 'respond';
+  state.decisionSeq++;
+}
+
+/** 아직 응답하지 않은 사람 (추방된 사람은 기다리지 않는다) */
+function respondPending(state: GameState): PlayerState[] {
+  const r = state.respond;
+  if (state.phase !== 'respond' || !r) return [];
+  return r.participants.map((id) => playerById(state, id)).filter((p): p is PlayerState => !!p && !p.kicked && !r.answers[p.id]);
+}
+
+function respondCtx(state: GameState, r: RespondState): Ctx {
+  const owner = playerById(state, r.ownerId)!;
+  // 증강이 옮겨 갔어도(증강 셔플 등) 진행 중인 제안은 끝까지 처리한다
+  const aug = findAug(owner, r.augment) ?? { id: r.augment, usesLeft: 0, usedThisHand: true, revealed: true, publicId: r.augment, acquiredHand: state.handNumber };
+  return ctxFor(state, owner, aug);
+}
+
+function applyRespond(state: GameState, p: PlayerState, a: Extract<GameAction, { type: 'respond' }>): string | null {
+  const r = state.respond;
+  if (state.phase !== 'respond' || !r) return '지금은 응답할 제안이 없습니다.';
+  if (!r.participants.includes(p.id)) return '응답할 대상이 아닙니다.';
+  if (r.answers[p.id]) return '이미 응답했습니다.';
+  const ans: RespondAnswer = {};
+  if (typeof a.accept === 'boolean') ans.accept = a.accept;
+  if (typeof a.bid === 'number') ans.bid = a.bid;
+  if (typeof a.choice === 'number') ans.choice = a.choice;
+  if (typeof a.cardIndex === 'number') ans.cardIndex = a.cardIndex;
+  const err = ACTIVE[r.augment]!.respond!.error(respondCtx(state, r), r, p, ans);
+  if (err) return err;
+  r.answers[p.id] = ans;
+  if (!respondPending(state).length) finishRespond(state);
+  return null;
+}
+
+/** 응답을 마감한다 (모두 응답했거나 시간 초과). 응답하지 않은 사람은 기본 응답 */
+function finishRespond(state: GameState): void {
+  const r = state.respond;
+  if (state.phase !== 'respond' || !r) return;
+  const hooks = ACTIVE[r.augment]!.respond!;
+  const ctx = respondCtx(state, r);
+  for (const id of r.participants) {
+    const p = playerById(state, id);
+    if (p && !r.answers[id]) r.answers[id] = hooks.fallback(ctx, r, p);
+  }
+  state.respond = null;
+  state.phase = r.resume;
+  if (hooks.done(ctx, r)) {
+    // 다음 단계 응답 (공동 환승의 카드 고르기)
+    r.seq = ++state.respondSeq;
+    state.respond = r;
+    state.phase = 'respond';
+    state.decisionSeq++;
+    return;
+  }
+  continueAfterReaction(state);
+}
+
+/** 기본 응답 (시간 초과·자리 비움) */
+function respondDefault(state: GameState, p: PlayerState): RespondAnswer {
+  const r = state.respond!;
+  return ACTIVE[r.augment]!.respond!.fallback(respondCtx(state, r), r, p);
+}
+
 // ───────────────────────── 서킷브레이커 · 하이카드 · 나 다시 돌아갈래 ─────────────────────────
 
 /** 서킷브레이커: 이번 라운드에 낸 칩을 모두 돌려주고 라운드 첫 행동자부터 다시 (레이즈 1회 제한) */
@@ -1770,7 +1866,33 @@ function judgeUnits(state: GameState): { boards: { label: string; cards: Card[] 
   return { boards, units };
 }
 
+/** 명추리 성공: 쇼다운 없이 참여할 수 있는 팟을 모두 가져간다 (모든 팟이면 카드 공개 없이 끝) */
+function nameItWin(state: GameState, w: PlayerState, pots: { amount: number; eligible: string[] }[]): void {
+  const total = pots.reduce((s, p) => s + p.amount, 0);
+  w.chips += total;
+  addLog(state, `${w.name} 팟 ${total}칩 획득 (명추리, 쇼다운 없음)`);
+  finishHand(state, {
+    hand: state.handNumber,
+    showdown: false,
+    board: state.board.slice(0, state.boardRevealed),
+    sealed: [...state.effects.sealed],
+    entries: [],
+    pots: pots.map((p) => ({ amount: p.amount, eligible: p.eligible, winners: [w.id] })),
+    won: { [w.id]: total },
+    table: tableEffectNotes(state),
+    extras: [`${w.name}: 명추리 성공`],
+  });
+}
+
 function showdown(state: GameState): void {
+  const potsOf = () =>
+    computePots(
+      state.players.filter((p) => p.inHand).map((p) => ({ id: p.id, contributed: p.contributed, folded: p.folded })),
+      state.deadMoney,
+    );
+  const nw = playerById(state, state.nameItWinner);
+  const nameIt = nw && live(nw) ? nw : null;
+  if (nameIt && potsOf().every((pot) => pot.eligible.includes(nameIt.id))) return nameItWin(state, nameIt, potsOf());
   state.effects.fogLifted = true;
   const order = seatOrderFromDealer(state);
   const seatRank = (id: string) => order.findIndex((i) => state.players[i].id === id);
@@ -1809,13 +1931,12 @@ function showdown(state: GameState): void {
       }
     }
   }
-  const pots = computePots(
-    state.players.filter((p) => p.inHand).map((p) => ({ id: p.id, contributed: p.contributed, folded: p.folded })),
-    state.deadMoney,
-  );
-  // 팟마다 판정 단위별 승자
+  const pots = potsOf();
+  // 팟마다 판정 단위별 승자 (명추리 성공자가 참여한 팟은 그 사람이 모두 가져간다)
   const decisions = pots.map((pot) =>
-    units.map((u) => decidePot(pot.eligible.map((id) => contenders[u.boardIdx].get(id)!).filter(Boolean), { inverted: u.inverted, board: boards[u.boardIdx].cards })),
+    nameIt && pot.eligible.includes(nameIt.id)
+      ? units.map((): PotDecision => ({ winners: [nameIt.id], decidedBy: {} }))
+      : units.map((u) => decidePot(pot.eligible.map((id) => contenders[u.boardIdx].get(id)!).filter(Boolean), { inverted: u.inverted, board: boards[u.boardIdx].cards })),
   );
   const extras: string[] = [];
   // 내기할래?: 쇼다운까지 가서 졌는데 우승 족보 예측이 맞으면 낸 칩의 50%를 팟에서 환급
@@ -2003,6 +2124,22 @@ function finishHand(state: GameState, result: HandResult): void {
   state.decisionSeq++;
 }
 
+/** 탈락·추방된 사람의 상환 예약은 사라진다 (빌린 칩은 돌려받지 못함) */
+function dropTasksOf(state: GameState, id: string): void {
+  const gone = state.tasks.filter((t) => t.playerId === id && (t.kind === 'sharkRepay' || t.kind === 'loanRepay'));
+  if (!gone.length) return;
+  state.tasks = state.tasks.filter((t) => !gone.includes(t));
+  addLog(state, `${playerById(state, id)?.name ?? '?'}의 빚이 사라졌습니다`);
+}
+
+/** 다음 핸드(upcoming)가 시작되기 전에 처리할 예약 작업 */
+function runTasks(state: GameState, upcoming: number): void {
+  const due = state.tasks.filter((t) => t.dueHand <= upcoming);
+  if (!due.length) return;
+  state.tasks = state.tasks.filter((t) => t.dueHand > upcoming);
+  for (const t of due) TASKS[t.kind](state, t);
+}
+
 /** 칩이 0이 된 사람을 탈락시킨다. 남은 사람이 1명 이하면 게임을 끝내고 true */
 function bustSweep(state: GameState): boolean {
   const aliveBefore = state.players.filter(active).length;
@@ -2018,6 +2155,7 @@ function bustSweep(state: GameState): boolean {
     p.lockerPending = false;
     p.showPending = false;
     addLog(state, `${p.name} 탈락 (${p.place}위)`);
+    dropTasksOf(state, p.id);
   });
   const remaining = state.players.filter(active);
   if (remaining.length <= 1) {
@@ -2101,7 +2239,9 @@ export function startNextHand(state: GameState): ActionResult {
     p.showPending = false;
     p.drawPrompt = null;
   }
-  // 핸드가 끝난 뒤 칩이 바뀌었을 수 있다 (쇼맨십 등)
+  // 예약 작업 (사채 상환 등)
+  runTasks(state, state.handNumber + 1);
+  // 핸드가 끝난 뒤 칩이 바뀌었을 수 있다 (쇼맨십·상환 등)
   if (bustSweep(state)) return { ok: true };
   if (!betweenHands(state)) return { ok: true };
   state.handNumber++;
@@ -2129,6 +2269,7 @@ export function startNextHand(state: GameState): ActionResult {
 function applyUseAugment(state: GameState, p: PlayerState, a: Extract<GameAction, { type: 'useAugment' }>): string | null {
   if (state.phase === 'gameOver') return '게임이 끝났습니다.';
   if (p.out) return '탈락한 플레이어는 증강을 쓸 수 없습니다.';
+  if (state.respond) return '제안·입찰에 대한 응답을 기다리는 중입니다.';
   if (!isAugmentId(a.augment)) return '알 수 없는 증강입니다.';
   const aug = findAug(p, a.augment);
   if (!aug) return '보유하지 않은 증강입니다.';
@@ -2179,6 +2320,7 @@ function applyUseAugment(state: GameState, p: PlayerState, a: Extract<GameAction
 /** 지금 버튼으로 선언할 수 있는가 (화면 안내용; 최종 검증은 applyAction) */
 export function canUseNow(state: GameState, p: PlayerState, aug: OwnedAugment, params: ActiveParams = {}): string | null {
   if (state.phase === 'gameOver' || p.out) return '게임에 참여하고 있지 않습니다.';
+  if (state.respond) return '제안·입찰에 대한 응답을 기다리는 중입니다.';
   const def = AUGMENTS[aug.id];
   if (def.uses?.per === 'game' && (aug.usesLeft ?? 0) <= 0) return '남은 사용 횟수가 없습니다.';
   if (def.uses?.per === 'hand' && aug.usedThisHand) return '이번 핸드에 이미 사용했습니다.';
@@ -2244,6 +2386,9 @@ export function applyAction(state: GameState, playerId: string, action: GameActi
     case 'draw':
       err = applyDraw(state, p, action.accept === true);
       break;
+    case 'respond':
+      err = applyRespond(state, p, action);
+      break;
     case 'turnRiver':
       err = !p.turnRiver || p.turnRiver.swap !== null ? '정할 순서가 없습니다.' : null;
       if (!err) p.turnRiver!.swap = action.swap === true;
@@ -2270,6 +2415,8 @@ export function getPending(state: GameState): Pending {
       return { seq, kind: 'declare', playerIds: state.declareQueue.length ? [state.players[state.declareQueue[0]].id] : [] };
     case 'reaction':
       return { seq, kind: 'reaction', playerIds: [] };
+    case 'respond':
+      return { seq, kind: 'respond', playerIds: respondPending(state).map((p) => p.id) };
     case 'handEnd':
       return { seq, kind: 'handEnd', playerIds: state.players.filter((p) => p.attachPending || p.lockerPending || p.showPending || p.drawPrompt).map((p) => p.id) };
     default:
@@ -2292,6 +2439,8 @@ export function defaultActionFor(state: GameState, playerId: string): GameAction
       return { type: 'discard', cardIndex: state.rng.int(3) };
     case 'declare':
       return { type: 'declare', augment: null };
+    case 'respond':
+      return { type: 'respond', ...respondDefault(state, p) };
     case 'handEnd': {
       const best = Math.max(0, p.hole.indexOf([...p.hole].sort((a, b) => rankOf(b) - rankOf(a))[0]));
       if (p.attachPending) return { type: 'attach', cardIndex: best };
@@ -2310,6 +2459,10 @@ export function applyTimeouts(state: GameState): string[] {
   if (pending.kind === 'reaction') {
     resolveReaction(state);
     return [];
+  }
+  if (pending.kind === 'respond') {
+    finishRespond(state);
+    return pending.playerIds;
   }
   const affected: string[] = [];
   for (const id of pending.playerIds) {

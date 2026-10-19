@@ -131,7 +131,9 @@ export const VARIANT_AUG: Record<AppliedVariant, AugmentId> = {
 
 /** 반응 대기 중이면 대기가 끝난 뒤 돌아갈 단계 */
 export function basePhase(state: GameState): Phase {
-  return state.phase === 'reaction' && state.reaction ? state.reaction.resume : state.phase;
+  const ph = state.phase === 'reaction' && state.reaction ? state.reaction.resume : state.phase;
+  // 제안·입찰 응답 대기 중이면 그 전 단계
+  return ph === 'respond' && state.respond ? state.respond.resume : ph;
 }
 
 export function handInProgress(state: GameState): boolean {

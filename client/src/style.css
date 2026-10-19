@@ -497,3 +497,8 @@ body.blurred #g-center .board { filter: blur(1.2px) saturate(.6); }
 .aug.info-card { flex: 0 0 210px; border-top: 3px solid #5d7a6c; background: #16231e; }
 .info-row { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; border-bottom: 1px solid #ffffff0c; font-size: 12px; }
 .info-row span:last-child { text-align: right; }
+
+/* 제안·입찰 응답 창 */
+.respond-modal p { margin: 6px 0; }
+.bid-row { display: flex; gap: 10px; align-items: center; justify-content: center; margin: 10px 0; }
+.bid-row input { width: 120px; }

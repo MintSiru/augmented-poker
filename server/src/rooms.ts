@@ -39,6 +39,8 @@ export interface ServerOptions {
   debug: boolean;
   /** 핸드 종료 후 결과를 보여 주는 시간 */
   handEndDelayMs: number;
+  /** 제안·입찰 응답 제한 시간 (초) */
+  respondSeconds: number;
   botDelayMs: [number, number];
   pickSeconds: number;
   /** 자리 비움 플레이어 자동 행동까지의 지연 */
@@ -54,6 +56,7 @@ export interface ServerOptions {
 export const DEFAULT_OPTIONS: ServerOptions = {
   debug: false,
   handEndDelayMs: 5000,
+  respondSeconds: 15,
   botDelayMs: [1000, 2000],
   pickSeconds: 30,
   sitOutDelayMs: 500,
@@ -140,6 +143,8 @@ export class Room {
   private deadline: number | null = null;
   private deadlineKind: PendingKind | null = null;
   private decisionTimer: NodeJS.Timeout | null = null;
+  /** 제안·입찰로 멈춘 턴: 그 사람의 남은 시간 (응답이 끝나 같은 사람 차례로 돌아오면 이어서) */
+  private pausedTurn: { id: string; ms: number; viaRespond: boolean } | null = null;
   private autoTimers = new Map<string, NodeJS.Timeout>();
   private deleteTimer: NodeJS.Timeout | null = null;
   private kickTimers = new Map<string, NodeJS.Timeout>();
@@ -699,6 +704,15 @@ export class Room {
   private onNewDecision(kind: PendingKind, seq: number): void {
     if (this.decisionTimer) clearTimeout(this.decisionTimer);
     this.decisionTimer = null;
+    const g0 = this.game!;
+    // 턴이 반응 대기·제안으로 멈추면 남은 시간을 기억해 둔다
+    if (this.deadlineKind === 'turn' && this.deadline && g0.toAct !== null && (kind === 'reaction' || kind === 'respond')) {
+      this.pausedTurn = { id: g0.players[g0.toAct].id, ms: Math.max(0, this.deadline - Date.now()), viaRespond: kind === 'respond' };
+    } else if (this.pausedTurn && kind === 'respond') {
+      this.pausedTurn.viaRespond = true;
+    } else if (kind !== 'reaction' && kind !== 'respond' && kind !== 'turn') {
+      this.pausedTurn = null;
+    }
     this.deadline = null;
     this.deadlineKind = null;
     let base: number;
@@ -708,8 +722,16 @@ export class Room {
         const g = this.game!;
         const id = g.toAct !== null ? g.players[g.toAct]?.id : undefined;
         base = (id ? turnSecondsFor(g, id, this.settings.turnSeconds) : this.settings.turnSeconds) * 1000;
+        // 제안·입찰 응답이 끝나 같은 사람 차례로 돌아오면 멈췄던 시간부터 이어 간다 (최소 5초)
+        const pt = this.pausedTurn;
+        this.pausedTurn = null;
+        if (pt && pt.viaRespond && pt.id === id) base = Math.min(base, Math.max(5000, pt.ms));
         break;
       }
+      case 'respond':
+        // 제안·입찰·비공개 선언: 15초 (응답하지 않으면 기본 응답)
+        base = this.opts.respondSeconds * 1000;
+        break;
       case 'discard':
       case 'declare':
         base = this.settings.turnSeconds * 1000;

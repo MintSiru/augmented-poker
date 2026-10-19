@@ -124,6 +124,8 @@ export function chooseBotOpportunistic(view: PlayerView, rng: Rng): GameAction |
     return use('destinyDraw', { card: pickOne(aces, rng) });
   }
   if (usable(view, 'padlock') && chance(rng, 8)) return use('padlock');
+  const ls = usable(view, 'loanShark');
+  if (ls && ls.targets.length && chance(rng, 5)) return use('loanShark', { targetId: pickOne(ls.targets, rng) });
   if (usable(view, 'rumor') && chance(rng, 4)) return use('rumor', { rumor: pickOne(ALL_AUGMENT_IDS, rng) });
   return null;
 }
@@ -138,6 +140,38 @@ export function chooseBotAction(view: PlayerView, rng: Rng): GameAction | null {
     if (view.reaction.canCounter && chance(rng, view.reaction.anonymous ? 15 : 35)) return { type: 'counter' };
     if (view.reaction.canImmune && chance(rng, 40)) return { type: 'immunity' };
     return null;
+  }
+
+  // 제안·입찰·비공개 선언: 싸면 수락, 입찰은 핸드 강도에 따라 0~3BB, 선언은 정직하게
+  const rs = view.respond;
+  if (rs && rs.needMe && rs.input) {
+    const bb = view.blinds.bb;
+    const low = () => {
+      const ranks = you.hole.map(rankOf);
+      return Math.max(0, ranks.indexOf(Math.min(...ranks)));
+    };
+    const strength = () => estimateEquity(view, rng, { hole: you.hole, board: view.board, excluded: view.sealed }, 60);
+    const bidFor = (eq: number) => {
+      const b = Math.min(3, Math.floor(eq * 4)) * bb;
+      return b >= bb && b <= you.chips ? b : 0;
+    };
+    switch (rs.input) {
+      case 'accept':
+        if (rs.augment === 'pickMe') return { type: 'respond', accept: true };
+        if (rs.augment === 'loanShark') return { type: 'respond', accept: you.chips < 15 * bb };
+        return { type: 'respond', accept: chance(rng, 50) };
+      case 'card':
+        return { type: 'respond', cardIndex: low() };
+      case 'bid':
+        return { type: 'respond', bid: bidFor(strength()) };
+      case 'bidCard': {
+        const card = view.auctionCard;
+        const worth = !!card && card[1] !== '?' && you.hole.length > 0 && rankOf(card) > Math.min(...you.hole.map(rankOf));
+        return worth ? { type: 'respond', bid: bidFor(Math.max(0.3, strength())), cardIndex: low() } : { type: 'respond', bid: 0 };
+      }
+      case 'strongWeak':
+        return { type: 'respond', choice: strength() >= 0.5 ? 1 : 0 };
+    }
   }
 
   if (you.pick && you.pick.length) return { type: 'pick', augment: pickOne(you.pick, rng).id };
@@ -200,6 +234,13 @@ export function chooseBotAction(view: PlayerView, rng: Rng): GameAction | null {
       if (bestIdx !== null) return { type: 'declare', augment: 'seal', boardIndex: bestIdx };
     }
     if (opts.includes('rewind') && base < 0.3 && chance(rng, 50)) return { type: 'declare', augment: 'rewind' };
+    const jt = you.declare.targets.jointTransfer;
+    if (opts.includes('jointTransfer') && jt?.length && base < 0.4 && chance(rng, 25)) return { type: 'declare', augment: 'jointTransfer', targetId: pickOne(jt, rng) };
+    const ni = you.declare.targets.nameIt;
+    if (opts.includes('nameIt') && ni?.length && chance(rng, 5)) {
+      const seen = new Set<Card>([...you.hole, ...view.board.filter((c): c is Card => !!c)]);
+      return { type: 'declare', augment: 'nameIt', targetId: pickOne(ni, rng), card: pickOne(fullDeck().filter((c) => c[0] === 'A' && !seen.has(c)), rng) };
+    }
     return { type: 'declare', augment: null };
   }
 
@@ -272,6 +313,19 @@ export function chooseBotAction(view: PlayerView, rng: Rng): GameAction | null {
     const ranks = you.hole.map(rankOf);
     return use('shepherd', { cardIndex: ranks.indexOf(Math.max(...ranks)) });
   }
+
+  // 3차: 제안·입찰
+  const pm = usable(view, 'pickMe');
+  if (pm && pm.targets.length && chance(rng, 12)) {
+    const ranks = you.hole.map(rankOf);
+    return use('pickMe', { targetId: pickOne(pm.targets, rng), cardIndex: Math.max(0, ranks.indexOf(Math.min(...ranks))) });
+  }
+  if (usable(view, 'infoAuction') && chance(rng, 15)) return use('infoAuction');
+  if (usable(view, 'cardAuction') && chance(rng, 15)) return use('cardAuction');
+  if (usable(view, 'truthGame') && you.hand && chance(rng, 40)) return use('truthGame', { choice: Math.min(7, you.hand.category) });
+  const sd = usable(view, 'staredown');
+  if (sd && sd.targets.length && chance(rng, 20)) return use('staredown', { targetId: pickOne(sd.targets, rng) });
+  if (usable(view, 'sealedContract') && chance(rng, 30)) return use('sealedContract', { choice: eq > 0.6 ? 1 : 0 });
 
   // 베팅 결정: 핸드 강도(증강·역전 반영) · 팟 오즈 · 남은 인원
   const opp2 = Math.max(1, live.length);

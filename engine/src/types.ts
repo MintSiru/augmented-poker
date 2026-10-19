@@ -13,7 +13,43 @@ export type Street = 'preflop' | 'flop' | 'turn' | 'river';
  * declare: 턴·리버 공개 직후 선언 기회(되감기·봉인·밥상 뒤집기) / reaction: 증강 선언 후 3초 반응 대기
  * handEnd: 핸드 결과 / gameOver
  */
-export type Phase = 'augmentSelect' | 'betting' | 'discard' | 'declare' | 'reaction' | 'handEnd' | 'gameOver';
+export type Phase = 'augmentSelect' | 'betting' | 'discard' | 'declare' | 'reaction' | 'respond' | 'handEnd' | 'gameOver';
+
+/** 제안·응답: 한 명에게 제안해 수락/거절을 받거나(offer), 여러 명에게서 비공개 입찰·선언을 동시에 모은다(collect) */
+export interface RespondAnswer {
+  accept?: boolean;
+  bid?: number;
+  choice?: number;
+  cardIndex?: number;
+}
+
+export interface RespondState {
+  kind: 'offer' | 'collect';
+  augment: AugmentId;
+  ownerId: string;
+  /** 응답해야 하는 사람 */
+  participants: string[];
+  /** 응답 (결과가 나올 때까지 당사자 뷰에만) */
+  answers: Record<string, RespondAnswer>;
+  /** 제안 내용 (선언자가 고른 카드 등, 당사자 뷰에만) */
+  params: { targetId?: string; cardIndex?: number; card?: Card };
+  /** 공동 환승: 수락 후 각자 카드 고르기 단계 */
+  stage: 'offer' | 'pick';
+  /** 응답이 끝나면 돌아갈 단계 */
+  resume: Phase;
+  seq: number;
+}
+
+/** N핸드 뒤 자동으로 처리되는 예약 작업 */
+export interface ScheduledTask {
+  kind: 'sharkRepay' | 'loanRepay' | 'revive';
+  playerId: string;
+  /** 사채: 빌려준 사람 */
+  otherId?: string;
+  /** 이 핸드가 시작되기 직전에 처리 */
+  dueHand: number;
+  amount: number;
+}
 
 export interface OwnedAugment {
   id: AugmentId;
@@ -143,6 +179,10 @@ export interface PlayerState {
   turnRiver: { idx: number[]; cards: Card[]; swap: boolean | null } | null;
   /** 무승부로 하지 않을래?: 쇼다운 직후 제안할 수 있는 상대와 팟 */
   drawPrompt: { winnerId: string; pots: number[] } | null;
+  /** 진실 게임: 공개 선언한 족보 종류 (0~7) */
+  truthClaim: number | null;
+  /** 밀봉 계약: 0 = 전원 폴드, 1 = 한 명 이상 콜 (비공개) */
+  contract: number | null;
   /** 이 플레이어에게 보여 줄 로그의 시작 번호 (중도 참여자는 참여 이후 로그만 본다) */
   logFrom: number;
 }
@@ -392,6 +432,17 @@ export interface GameState {
   windowStage: 'flop' | 'turn' | 'river' | 'preShowdown' | null;
   /** 자본주의: 보드 추가 여부를 정하는 사람 */
   capitalChooser: string | null;
+  /** 진행 중인 제안·입찰 */
+  respond: RespondState | null;
+  respondSeq: number;
+  /** 카드 경매로 앞면 공개된 카드 */
+  auctionCard: Card | null;
+  /** 눈싸움: 두 사람과 비공개 선언 (1 = 강함, 0 = 약함) */
+  staredown: { a: string; b: string; claims: Record<string, number> } | null;
+  /** 명추리 성공: 쇼다운 없이 이 사람이 참여할 수 있는 팟을 모두 가져간다 */
+  nameItWinner: string | null;
+  /** 예약 작업 (사채·대출 상환, 부활) */
+  tasks: ScheduledTask[];
   used: UsedCard[];
   effects: TableEffects;
   /** 다음 핸드에 암전 적용 */
@@ -466,6 +517,8 @@ export type GameAction =
   | { type: 'turnRiver'; swap: boolean }
   /** 무승부로 하지 않을래?: 쇼다운 직후 제안 여부 */
   | { type: 'draw'; accept: boolean }
+  /** 제안·입찰·비공개 선언에 대한 응답 */
+  | { type: 'respond'; accept?: boolean; bid?: number; choice?: number; cardIndex?: number }
   | {
       type: 'useAugment';
       augment: AugmentId;
@@ -481,7 +534,7 @@ export type GameAction =
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
-export type PendingKind = 'turn' | 'pick' | 'discard' | 'declare' | 'reaction' | 'handEnd' | 'none';
+export type PendingKind = 'turn' | 'pick' | 'discard' | 'declare' | 'reaction' | 'respond' | 'handEnd' | 'none';
 
 export interface Pending {
   seq: number;

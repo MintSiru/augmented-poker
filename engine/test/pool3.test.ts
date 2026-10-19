@@ -16,6 +16,7 @@ import {
   evaluatePlayerHand,
   Category,
   turnSecondsFor,
+  kickPlayer,
   AUGMENTS,
   ALL_AUGMENT_IDS,
   type AugmentId,
@@ -435,5 +436,204 @@ describe('2. 보드·팟 구조', () => {
     expect(P(t, 'p2').out).toBe(false);
     ok(startNextHand(t));
     expect(P(t, 'p2').out).toBe(true);
+  });
+});
+
+// ───────────────────────── 3. 제안·응답 ─────────────────────────
+
+const respond = (s: GameState, id: string, a: Record<string, unknown>) => act(s, id, { type: 'respond', ...a } as GameAction);
+
+describe('3. 제안·응답', () => {
+  const HANDS = { p1: cards('9c 9d'), p2: cards('Kc Qh'), p3: cards('3c 5d') };
+
+  it('골라 봐: 수락하면 3BB를 내고 고른 카드를 그 상대만 본다, 제안 중에는 다른 행동·증강이 멈춘다', () => {
+    const s = setup(3, { augs: { p2: ['pickMe', 'heaven'] }, deal: { board: cards(BOARD), hands: HANDS } });
+    passUntil(s, () => s.street === 'flop');
+    expect(toAct(s)).toBe('p2');
+    expect(tryUse(s, 'p2', 'pickMe', { targetId: 'p3', cardIndex: 0 }).ok).toBe(true);
+    resolveAll(s);
+    expect(s.phase).toBe('respond');
+    expect(getPending(s)).toMatchObject({ kind: 'respond', playerIds: ['p3'] });
+    // 제안 내용: 선언자는 보여 줄 카드, 대상은 가격만, 다른 사람은 아무것도
+    expect(view(s, 'p2').respond!.card).toBe('Kc');
+    expect(view(s, 'p3').respond).toMatchObject({ needMe: true, input: 'accept', card: null });
+    expect(JSON.stringify(view(s, 'p3'))).not.toMatch(/"Kc"|\[Kc\]/);
+    expect(JSON.stringify(view(s, 'p1'))).not.toMatch(/"Kc"|\[Kc\]/);
+    expect(view(s, 'p1').respond!.needMe).toBe(false);
+    // 응답 대기 중에는 베팅·증강 사용 불가
+    expect(applyAction(s, 'p2', { type: 'check' }).ok).toBe(false);
+    expect(tryUse(s, 'p2', 'heaven').ok).toBe(false);
+    expect(applyAction(s, 'p1', { type: 'respond', accept: true }).ok).toBe(false);
+    respond(s, 'p3', { accept: true });
+    expect(P(s, 'p3').chips).toBe(980 - 60);
+    expect(P(s, 'p2').chips).toBe(980 + 60);
+    expect(lastNote(s, 'p3')).toContain('[Kc]');
+    expect(s.phase).toBe('betting');
+    expect(toAct(s)).toBe('p2');
+  });
+
+  it('골라 봐: 응답이 없으면(시간 초과) 거절', () => {
+    const s = setup(3, { augs: { p2: ['pickMe'] }, deal: { board: cards(BOARD), hands: HANDS } });
+    passUntil(s, () => s.street === 'flop');
+    use(s, 'p2', 'pickMe', { targetId: 'p3', cardIndex: 1 });
+    resolveAll(s);
+    applyTimeouts(s);
+    expect(s.phase).toBe('betting');
+    expect(P(s, 'p3').chips).toBe(980);
+    expect(view(s, 'p1').log.some((e) => e.text.includes('거절'))).toBe(true);
+  });
+
+  it('공동 환승: 수락하면 두 사람이 동시에 1장씩 골라 맞바꾸고, 바꾼 카드는 두 사람에게만', () => {
+    const s = setup(3, { augs: { p1: ['jointTransfer'] }, deal: { board: cards(BOARD), hands: HANDS } });
+    toWindow(s, 'flop');
+    expect(view(s, 'p1').you.declare!.targets.jointTransfer!.sort()).toEqual(['p2', 'p3']);
+    act(s, 'p1', { type: 'declare', augment: 'jointTransfer', targetId: 'p2' });
+    resolveAll(s);
+    respond(s, 'p2', { accept: true });
+    expect(getPending(s).playerIds.sort()).toEqual(['p1', 'p2']);
+    expect(view(s, 'p2').respond!.input).toBe('card');
+    respond(s, 'p1', { cardIndex: 0 });
+    // 상대가 고르기 전에는 아무것도 바뀌지 않는다
+    expect(P(s, 'p1').hole).toEqual(['9c', '9d']);
+    respond(s, 'p2', { cardIndex: 1 });
+    expect(P(s, 'p1').hole).toEqual(['Qh', '9d']);
+    expect(P(s, 'p2').hole).toEqual(['Kc', '9c']);
+    expect(JSON.stringify(view(s, 'p3'))).not.toMatch(/\[9c\]|\[Qh\]/);
+    expect(s.phase).toBe('betting');
+  });
+
+  it('사채업자: 수락하면 5BB를 빌려주고 2핸드 뒤 7BB를 자동으로 받는다, 추방되면 사라진다', () => {
+    const s = setup(3, { augs: { p1: ['loanShark'] } });
+    use(s, 'p1', 'loanShark', { targetId: 'p2' });
+    resolveAll(s);
+    respond(s, 'p2', { accept: true });
+    expect(P(s, 'p1').chips).toBe(1000 - 100);
+    expect(P(s, 'p2').chips).toBe(990 + 100);
+    expect(s.tasks).toEqual([{ kind: 'sharkRepay', playerId: 'p2', otherId: 'p1', dueHand: 3, amount: 140 }]);
+    toShowdown(s);
+    ok(startNextHand(s));
+    expect(s.tasks).toHaveLength(1);
+    toShowdown(s);
+    const before = { p1: P(s, 'p1').chips, p2: P(s, 'p2').chips };
+    ok(startNextHand(s));
+    expect(s.tasks).toHaveLength(0);
+    expect(P(s, 'p1').chips + P(s, 'p1').contributed).toBe(before.p1 + 140);
+    expect(P(s, 'p2').chips + P(s, 'p2').contributed).toBe(before.p2 - 140);
+
+    const t = setup(3, { augs: { p1: ['loanShark'] } });
+    use(t, 'p1', 'loanShark', { targetId: 'p2' });
+    resolveAll(t);
+    respond(t, 'p2', { accept: true });
+    ok(kickPlayer(t, 'p2'));
+    expect(t.tasks).toHaveLength(0);
+  });
+
+  it('정보 경매: 비공개 입찰, 최고 입찰자만 턴 카드를 보고 낙찰금은 팟으로', () => {
+    const s = setup(3, { augs: { p2: ['infoAuction'] }, deal: { board: cards(BOARD), hands: HANDS } });
+    passUntil(s, () => s.street === 'flop');
+    use(s, 'p2', 'infoAuction');
+    resolveAll(s);
+    expect(getPending(s).playerIds.sort()).toEqual(['p1', 'p2', 'p3']);
+    expect(applyAction(s, 'p1', { type: 'respond', bid: 10 }).ok).toBe(false); // 최소 1BB
+    respond(s, 'p1', { bid: 40 });
+    respond(s, 'p3', { bid: 0 });
+    // 다른 사람의 입찰가는 보이지 않는다
+    expect(view(s, 'p3').respond!.myAnswer).toEqual({ accept: null, bid: 0, choice: null, cardIndex: null });
+    expect(JSON.stringify(view(s, 'p3').respond)).not.toContain('40');
+    respond(s, 'p2', { bid: 60 });
+    expect(P(s, 'p2').chips).toBe(980 - 60);
+    expect(s.deadMoney).toBe(60);
+    expect(lastNote(s, 'p2')).toContain('[4h]');
+    expect(JSON.stringify(view(s, 'p1'))).not.toMatch(/\[4h\]|"4h"/);
+    expect(view(s, 'p1').log.some((e) => e.text.includes('P2이(가) 60칩에 낙찰'))).toBe(true);
+    passUntil(s, () => s.street === 'turn');
+    expect(s.board[3]).toBe('4h');
+  });
+
+  it('카드 경매: 덱에서 공개한 카드를 낙찰자가 홀카드와 바꾼다 (버린 카드는 비공개), 실명 다트 대상은 볼 수 없다', () => {
+    const s = setup(3, { augs: { p2: ['cardAuction'], p3: ['blindDart'] }, deal: { board: cards(BOARD), hands: HANDS, deck: ['Ah'] } });
+    act(s, 'p1', { type: 'call' });
+    act(s, 'p2', { type: 'call' });
+    use(s, 'p3', 'blindDart', { targetId: 'p1' });
+    resolveAll(s);
+    passUntil(s, () => s.street === 'flop');
+    use(s, 'p2', 'cardAuction');
+    resolveAll(s);
+    expect(view(s, 'p3').auctionCard).toBe('Ah');
+    expect(view(s, 'p1').auctionCard).toBeNull();
+    expect(JSON.stringify(view(s, 'p1'))).not.toMatch(/\[Ah\]|"Ah"/);
+    expect(getPending(s).playerIds.sort()).toEqual(['p2', 'p3']);
+    respond(s, 'p3', { bid: 40, cardIndex: 1 });
+    respond(s, 'p2', { bid: 20 });
+    expect(P(s, 'p3').hole).toEqual(['3c', 'Ah']);
+    expect(s.deadMoney).toBe(40);
+    expect(JSON.stringify(view(s, 'p2'))).not.toMatch(/\[5d\]|"5d"/);
+  });
+
+  it('진실 게임: 리버에서 공개 선언, 쇼다운에서 진실이면 콜한 상대 각각에게 3BB', () => {
+    const s = setup(3, { augs: { p2: ['truthGame'] }, deal: { board: cards(BOARD), hands: HANDS } });
+    passUntil(s, () => s.street === 'river');
+    use(s, 'p2', 'truthGame', { choice: 1 });
+    resolveAll(s);
+    expect(view(s, 'p3').table.notes).toContain('진실 게임: P2 "원페어 이상"');
+    toShowdown(s);
+    // p2 원페어(K) → 진실: p1, p3 각각 60 (팟은 휠 스트레이트인 p3)
+    expect(s.result!.extras.some((x) => x.includes('진실'))).toBe(true);
+    expect(P(s, 'p2').chips).toBe(980 + 120);
+    expect(P(s, 'p1').chips).toBe(980 - 60);
+  });
+
+  it('눈싸움: 둘이 동시에 비공개 선언, 쇼다운에서 공개하고 한 명만 정직하면 2BB', () => {
+    const s = setup(3, { augs: { p2: ['staredown'] }, deal: { board: cards(BOARD), hands: { ...HANDS, p3: cards('3c 8d') } } });
+    passUntil(s, () => s.street === 'river');
+    use(s, 'p2', 'staredown', { targetId: 'p3' });
+    resolveAll(s);
+    expect(getPending(s).playerIds.sort()).toEqual(['p2', 'p3']);
+    respond(s, 'p3', { choice: 1 });
+    expect(JSON.stringify(view(s, 'p2'))).not.toMatch(/"choice":1/);
+    respond(s, 'p2', { choice: 1 });
+    expect(view(s, 'p1').log.some((e) => e.text.includes('"강함"'))).toBe(false);
+    const p3Before = P(s, 'p3').chips;
+    toShowdown(s);
+    expect(s.result!.extras.find((x) => x.startsWith('눈싸움 공개'))).toContain('P2만 정직');
+    expect(P(s, 'p3').chips).toBe(p3Before - 40);
+  });
+
+  it('밀봉 계약: 비공개 예측, 핸드가 끝나면 공개하고 맞히면 은행에서 3BB', () => {
+    const s = setup(3, { augs: { p2: ['sealedContract'] }, deal: { board: cards(BOARD), hands: HANDS } });
+    passUntil(s, () => s.street === 'river');
+    use(s, 'p2', 'sealedContract', { choice: 0 });
+    resolveAll(s);
+    expect(view(s, 'p2').you.extra.contract).toBe(0);
+    expect(JSON.stringify(view(s, 'p1').log)).not.toContain('전원 폴드');
+    expect(view(s, 'p1').table.notes).toContain('밀봉 계약: P2');
+    act(s, 'p2', { type: 'raise', amount: 100 });
+    act(s, 'p3', { type: 'fold' });
+    act(s, 'p1', { type: 'fold' });
+    expect(s.result!.extras.some((x) => x.includes('적중'))).toBe(true);
+    expect(P(s, 'p2').chips).toBe(980 + 60 + 60);
+    expect(s.stats.bankChips).toBe(60);
+  });
+
+  it('명추리: 맞히면 쇼다운 없이 팟을 가져가고, 틀리면 폴드하고 2BB, 이미 아는 카드는 실패', () => {
+    const s = setup(3, { augs: { p3: ['nameIt'] }, deal: { board: cards(BOARD), hands: HANDS } });
+    toWindow(s, 'preShowdown');
+    expect(view(s, 'p3').you.declare!.targets.nameIt!.sort()).toEqual(['p1', 'p2']);
+    act(s, getPending(s).playerIds[0], { type: 'declare', augment: 'nameIt', targetId: 'p1', card: '9d' });
+    // 반응 대기 중에도 부른 카드는 다른 사람에게 보이지 않는다
+    expect(JSON.stringify(view(s, 'p1').log.slice(-3))).not.toContain('9d');
+    resolveAll(s);
+    expect(s.phase).toBe('handEnd');
+    expect(s.result!.showdown).toBe(false);
+    expect(s.result!.won).toEqual({ p3: 60 });
+
+    const t = setup(3, { augs: { p3: ['nameIt'] }, deal: { board: cards(BOARD), hands: HANDS } });
+    toWindow(t, 'preShowdown');
+    act(t, 'p3', { type: 'declare', augment: 'nameIt', targetId: 'p1', card: 'As' }); // 보드 카드 = 이미 아는 카드
+    resolveAll(t);
+    expect(P(t, 'p3').folded).toBe(true);
+    expect(P(t, 'p1').chips).toBe(980 + 40);
+    expect(t.phase).toBe('handEnd');
+    expect(t.result!.entries.map((e) => e.id).sort()).toEqual(['p1', 'p2']);
   });
 });
