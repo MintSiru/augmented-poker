@@ -306,6 +306,8 @@ export interface GameOptions {
   recharge: boolean;
   /** 플레이어당 게임 전체 증강 리롤 횟수 */
   rerolls: number;
+  /** 이번 게임의 증강 풀 (null = 전체). 새 증강을 뽑는 모든 곳에 적용 */
+  pool: AugmentId[] | null;
 }
 
 /** 사용된 카드 (카운팅 보유자에게만 보임) */
@@ -426,6 +428,8 @@ export interface GameStats {
   kickedChips: number;
   /** 플레이어별 재충전한 증강 */
   recharges: Record<string, AugmentId[]>;
+  /** 증강별 선택지에 나온 횟수 */
+  offered: Partial<Record<AugmentId, number>>;
 }
 
 export interface GameState {

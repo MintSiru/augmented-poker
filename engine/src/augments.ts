@@ -916,13 +916,71 @@ export function rollTier(level: number, rng: Rng): Stars {
  * 선택지 생성: 별 개수를 레벨 확률로 뽑고, 그 별에서 보유 가능한 증강을 최대 3개 고른다.
  * 3개 미만이면 한 단계 낮은 별에서 채운다(그래도 모자라면 그 아래 별에서).
  */
-export function rollAugmentOffer(level: number, owned: AugmentId[], rng: Rng, tier?: Stars, taken: readonly AugmentId[] = []): AugmentId[] {
+export function rollAugmentOffer(
+  level: number,
+  owned: AugmentId[],
+  rng: Rng,
+  tier?: Stars,
+  taken: readonly AugmentId[] = [],
+  /** 이번 게임의 증강 풀 (없으면 전체) */
+  allowed: ReadonlySet<AugmentId> | null = null,
+): AugmentId[] {
   const t = tier ?? rollTier(level, rng);
   const offer: AugmentId[] = [];
-  for (let s = t; s >= 1 && offer.length < 3; s--) {
-    // taken: 다른 사람이 이미 가진 유일 증강
-    const avail = ALL_AUGMENT_IDS.filter((id) => AUGMENTS[id].stars === s && canHold(owned, id) && !taken.includes(id) && !offer.includes(id));
+  // 뽑은 별 → 한 단계씩 낮은 별 → 그래도 모자라면 높은 별
+  const order: Stars[] = [t, ...([3, 2, 1] as Stars[]).filter((s) => s < t), ...([1, 2, 3] as Stars[]).filter((s) => s > t)];
+  for (const s of order) {
+    if (offer.length >= 3) break;
+    // taken: 다른 사람이 이미 가진 유일 증강 (또는 지금 보이던 선택지)
+    const avail = ALL_AUGMENT_IDS.filter(
+      (id) => AUGMENTS[id].stars === s && (!allowed || allowed.has(id)) && canHold(owned, id) && !taken.includes(id) && !offer.includes(id),
+    );
     offer.push(...sample(avail, 3 - offer.length, rng));
   }
   return offer;
+}
+
+/** 무작위 새 증강 1개 (대격변 등): 정한 별에서 풀·보유 규칙에 맞는 것 */
+export function rollOneAugment(stars: Stars, owned: readonly AugmentId[], rng: Rng, taken: readonly AugmentId[] = [], allowed: ReadonlySet<AugmentId> | null = null): AugmentId | null {
+  const avail = ALL_AUGMENT_IDS.filter((id) => AUGMENTS[id].stars === stars && (!allowed || allowed.has(id)) && canHold(owned, id) && !taken.includes(id));
+  return avail.length ? sample(avail, 1, rng)[0] : null;
+}
+
+// ───────────────────────── 증강 풀 설정 ─────────────────────────
+
+export type PoolPreset = 'p1' | 'p12' | 'p123' | 'all' | 'custom';
+
+export const POOL_PRESET_LABEL: Record<PoolPreset, string> = { p1: '1차만', p12: '1~2차', p123: '1~3차', all: '전체', custom: '직접 고름' };
+
+/** 프리셋의 증강 목록 (custom 이면 고른 목록 중 실제 있는 것만) */
+export function poolIds(preset: PoolPreset, custom: readonly unknown[] = []): AugmentId[] {
+  switch (preset) {
+    case 'p1':
+      return ALL_AUGMENT_IDS.filter((id) => (AUGMENTS[id].pool ?? 1) === 1);
+    case 'p12':
+      return ALL_AUGMENT_IDS.filter((id) => (AUGMENTS[id].pool ?? 1) <= 2);
+    case 'p123':
+      return ALL_AUGMENT_IDS.filter((id) => (AUGMENTS[id].pool ?? 1) <= 3);
+    case 'custom': {
+      const set = new Set(custom.filter(isAugmentId));
+      return ALL_AUGMENT_IDS.filter((id) => set.has(id));
+    }
+    default:
+      return [...ALL_AUGMENT_IDS];
+  }
+}
+
+/** 별 개수별 증강 수 [★, ★★, ★★★] */
+export function poolStarCounts(ids: readonly AugmentId[]): [number, number, number] {
+  const c: [number, number, number] = [0, 0, 0];
+  for (const id of ids) c[AUGMENTS[id].stars - 1]++;
+  return c;
+}
+
+/** 별 개수마다 최소 3개가 있어야 시작할 수 있다. 부족하면 안내 문장 */
+export const POOL_MIN_PER_STAR = 3;
+export function poolError(ids: readonly AugmentId[]): string | null {
+  const c = poolStarCounts(ids);
+  const short = c.map((n, i) => (n < POOL_MIN_PER_STAR ? `${'★'.repeat(i + 1)} ${POOL_MIN_PER_STAR - n}개` : '')).filter(Boolean);
+  return short.length ? `증강 풀이 부족합니다: ${short.join(', ')} 더 필요 (별마다 최소 ${POOL_MIN_PER_STAR}개)` : null;
 }

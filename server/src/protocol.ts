@@ -1,6 +1,6 @@
 // 서버 ↔ 클라이언트 메시지 형식과 설정 상수. 클라이언트도 이 파일을 가져다 쓴다(엔진 런타임 코드는 참조하지 않음).
 
-import type { PlayerView, DebugView, PendingKind } from '../../engine/src/index.js';
+import type { PlayerView, DebugView, PendingKind, PoolPreset } from '../../engine/src/index.js';
 
 export type BlindSchedule = 'standard' | 'x1.5';
 export type LevelMode = 'auto' | 'fixed';
@@ -30,6 +30,10 @@ export interface RoomSettings {
   recharge: boolean;
   /** 플레이어당 게임 전체 증강 리롤 횟수 (0~3, 기본 2, 시작 후 변경 불가) */
   rerolls: number;
+  /** 증강 풀: 1차만 / 1~2차 / 1~3차 / 전체(기본) / 직접 고르기 (시작 후 변경 불가) */
+  augPool: PoolPreset;
+  /** 직접 고르기에서 켠 증강 */
+  augCustom: string[];
 }
 
 /** 게임이 시작된 뒤에도 바꿀 수 있는 설정 (+ 공개 여부). 상승 주기는 다음 레벨부터 적용 */
@@ -48,6 +52,8 @@ export interface RoomListItem {
   startingChips: number;
   smallBlind: number;
   bigBlind: number;
+  /** 증강 풀 표시 ("전체", "1~2차", "직접 고름(12개)") */
+  augPool: string;
 }
 
 export interface LobbyPlayer {

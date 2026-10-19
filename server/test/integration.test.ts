@@ -421,7 +421,7 @@ describe('공개 방 목록과 방 설정', () => {
     await waitFor(() => list.length === 1 && list[0].name === '즐거운 방', 2000, 'public list');
     expect(list[0]).toEqual({
       code, name: '즐거운 방', players: 1, maxPlayers: 8, status: 'waiting', midJoin: true, joinable: true,
-      startingChips: 1000, smallBlind: 10, bigBlind: 20,
+      startingChips: 1000, smallBlind: 10, bigBlind: 20, augPool: '전체',
     });
     // 비공개 방의 기본 이름
     const priv = [...s.rooms.rooms.values()].find((r) => !r.isPublic)!;
@@ -525,6 +525,33 @@ describe('공개 방 목록과 방 설정', () => {
     expect(room.settings.turnSeconds).toBe(20);
     expect(room.game!.options.fixedLevelHands).toBe(8);
     expect((await b.emit('room:settings', { turnSeconds: 30 })).ok).toBe(false);
+  });
+
+  it('증강 풀: 프리셋·직접 고르기, 별마다 3개 미만이면 시작 불가, 목록 표시, 시작 후 잠금, 게임에 반영', async () => {
+    const s = await start(false, 1);
+    const a = new VClient(s.port);
+    a.auto = false;
+    await a.create('A');
+    await a.emit('room:settings', { fillBots: true, botCount: 1 });
+    expect((await a.emit('room:settings', { augPool: 'x' })).ok).toBe(false);
+    expect((await a.emit('room:settings', { augCustom: 'thermal' })).ok).toBe(false);
+    // 직접 고르기: ★만 4개 → 부족
+    expect((await a.emit('room:settings', { augPool: 'custom', augCustom: ['thermal', 'observer', 'mulligan', 'insurance', 'nope'] })).ok).toBe(true);
+    const room = s.rooms.rooms.get(a.code)!;
+    expect(room.settings.augCustom).toEqual(['observer', 'thermal', 'mulligan', 'insurance']);
+    expect(s.rooms.publicList().find((r) => r.code === a.code)!.augPool).toBe('직접 고름(4개)');
+    const r = await a.emit('room:start');
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('★★ 3개');
+    expect(r.error).toContain('★★★ 3개');
+    // 10개: 별마다 3개 이상
+    const ten = ['thermal', 'observer', 'mulligan', 'insurance', 'clairvoyance', 'foresight', 'counting', 'rewind', 'restart', 'seal'];
+    expect((await a.emit('room:settings', { augCustom: ten })).ok).toBe(true);
+    expect((await a.emit('room:start')).ok).toBe(true);
+    await waitFor(() => !!a.env, 2000, 'start');
+    expect(new Set(room.game!.options.pool)).toEqual(new Set(ten));
+    expect((await a.emit('room:settings', { augPool: 'all' })).ok).toBe(false);
+    for (const p of room.game!.players) for (const id of p.pickOptions ?? []) expect(ten).toContain(id);
   });
 });
 

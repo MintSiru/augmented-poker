@@ -95,6 +95,8 @@ export interface CreateGameOptions {
   recharge?: boolean;
   /** 플레이어당 증강 리롤 횟수 (기본 0) */
   rerolls?: number;
+  /** 이번 게임의 증강 풀 (생략하면 전체) */
+  pool?: AugmentId[] | null;
   /** 테스트 편의: 지정하면 고정 주기 N핸드 */
   handsPerLevel?: number;
   /** false 면 첫 증강 선택 없이 '핸드 종료' 상태로 만들어 두고, 호출 측이 startNextHand 로 첫 핸드를 시작한다 */
@@ -242,6 +244,7 @@ export function createGame(players: NewPlayer[], opts: CreateGameOptions = {}): 
       debug: !!opts.debug,
       recharge: !!opts.recharge,
       rerolls: Math.max(0, Math.floor(opts.rerolls ?? 0)),
+      pool: opts.pool ? [...opts.pool] : null,
     },
     rng,
     players: players.map((np, seat) => newPlayer(np, seat, startingChips)),
@@ -307,7 +310,7 @@ export function createGame(players: NewPlayer[], opts: CreateGameOptions = {}): 
     nextDeal: null,
     forceLevelUp: false,
     taxers: [],
-    stats: { picks: {}, uses: {}, bankChips: 0, bankTaxed: 0, bankPaid: 0, joinChips: 0, kickedChips: 0, heavenFolds: 0, recharges: {} },
+    stats: { picks: {}, uses: {}, bankChips: 0, bankTaxed: 0, bankPaid: 0, joinChips: 0, kickedChips: 0, heavenFolds: 0, recharges: {}, offered: {} },
   };
   state.levelHands = levelHandsFor(state);
   for (const p of state.players) p.rerolls = state.options.rerolls;
@@ -387,7 +390,8 @@ function startPickRound(state: GameState): void {
       addLog(state, '하이리스크 패배로 이번 증강 선택 기회를 잃었습니다.', { to: [p.id] });
       continue;
     }
-    const offer = rollAugmentOffer(level, p.augments.map((a) => a.id), state.rng, undefined, takenByOthers(state, p));
+    const offer = rollAugmentOffer(level, p.augments.map((a) => a.id), state.rng, undefined, takenByOthers(state, p), poolSet(state));
+    countOffer(state, offer);
     if (offer.length) p.pickOptions = offer;
     for (const a of [...p.augments]) PASSIVE[a.id]?.onPickRound?.(ctxFor(state, p, a));
   }
@@ -397,6 +401,16 @@ function startPickRound(state: GameState): void {
   } else {
     beginHand(state);
   }
+}
+
+/** 이번 게임의 증강 풀 (null = 전체) */
+export function poolSet(state: GameState): ReadonlySet<AugmentId> | null {
+  return state.options.pool ? new Set(state.options.pool) : null;
+}
+
+/** 개발용 통계: 선택지에 나온 횟수 */
+function countOffer(state: GameState, offer: AugmentId[]): void {
+  for (const id of offer) state.stats.offered[id] = (state.stats.offered[id] ?? 0) + 1;
 }
 
 /** 다른 사람이 가진 유일 증강 (선택지에서 뺀다) */
@@ -431,7 +445,8 @@ export function grantAugment(state: GameState, p: PlayerState, id: AugmentId, wi
 function rollJoinerOffer(state: GameState, j: Joiner): void {
   j.player.pickOptions = null;
   while (j.picksLeft > 0) {
-    const offer = rollAugmentOffer(state.levelIndex + 1, j.player.augments.map((a) => a.id), state.rng, undefined, takenByOthers(state, j.player));
+    const offer = rollAugmentOffer(state.levelIndex + 1, j.player.augments.map((a) => a.id), state.rng, undefined, takenByOthers(state, j.player), poolSet(state));
+    countOffer(state, offer);
     if (offer.length) {
       j.player.pickOptions = offer;
       j.pickSeq++;
@@ -672,8 +687,9 @@ function applyReroll(state: GameState, p: PlayerState): string | null {
   if (p.rerolls <= 0) return '남은 리롤이 없습니다.';
   if (p.rechargePending) return '재충전할 증강을 고르는 중입니다.';
   const owned = p.augments.map((a) => a.id);
-  const offer = rollAugmentOffer(state.levelIndex + 1, owned, state.rng, undefined, [...takenByOthers(state, p), ...p.pickOptions]);
+  const offer = rollAugmentOffer(state.levelIndex + 1, owned, state.rng, undefined, [...takenByOthers(state, p), ...p.pickOptions], poolSet(state));
   if (!offer.length) return '새로 뽑을 수 있는 증강이 없습니다.';
+  countOffer(state, offer);
   p.rerolls--;
   p.pickOptions = offer;
   addLog(state, `증강 리롤: 선택지를 새로 뽑았습니다 (남은 리롤 ${p.rerolls}회)`, { to: [p.id] });

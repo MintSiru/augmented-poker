@@ -6,7 +6,7 @@ import './style.css';
 import type { ChatMessage, DebugView, GameEnvelope, LobbyState, RoomListItem, RoomSettings } from '../../server/src/protocol.js';
 import { blindsAt } from '../../engine/src/core.js';
 import type { MyAugmentView, PlayerView, PublicPlayerView } from '../../engine/src/view.js';
-import { AUGMENTS, type AugmentId } from '../../engine/src/augments.js';
+import { ALL_AUGMENT_IDS, AUGMENTS, POOL_PRESET_LABEL, poolError, poolIds, poolStarCounts, type AugmentId, type PoolPreset } from '../../engine/src/augments.js';
 import { $, augTip, cardBack, cardHtml, esc, fmt, mount, patch, richText, stars } from './dom.js';
 import { isMuted, play, setMuted, sfxForLog, type Sfx } from './sfx.js';
 import { handCardClass, handPanelHtml, handTableHtml } from './hand.js';
@@ -62,7 +62,8 @@ const app = {
   showHandTable: false,
   chat: [] as ChatMessage[],
   unread: 0,
-  sideTab: 'log' as 'log' | 'chat',
+  /** 오른쪽 패널 탭: 기본은 채팅 */
+  sideTab: 'chat' as 'log' | 'chat',
   /** 좌석 위 말풍선: playerId → 표시 끝 시각 */
   bubbles: new Map<string, { text: string; until: number }>(),
 };
@@ -364,7 +365,7 @@ function renderRoomList() {
         const mid = r.status === 'playing' ? (r.midJoin ? '<span class="tag">중도 참여 가능</span>' : '<span class="tag off">중도 참여 불가</span>') : '';
         return `<li class="${r.joinable ? '' : 'full'}">
           <div class="rl-main"><b class="rl-name">${esc(r.name)}</b> ${status} ${mid}
-            <div class="muted rl-meta">${r.players}/${r.maxPlayers}명 · 시작 칩 ${fmt(r.startingChips)} · 블라인드 ${fmt(r.smallBlind)}/${fmt(r.bigBlind)}</div></div>
+            <div class="muted rl-meta">${r.players}/${r.maxPlayers}명 · 시작 칩 ${fmt(r.startingChips)} · 블라인드 ${fmt(r.smallBlind)}/${fmt(r.bigBlind)} · 증강 풀: ${esc(r.augPool)}</div></div>
           <button class="small primary" data-a="joinList" data-code="${esc(r.code)}" ${r.joinable ? '' : 'disabled'} title="${r.joinable ? '' : r.players >= r.maxPlayers ? '방이 가득 찼습니다' : '중도 참여가 꺼져 있습니다'}">입장</button></li>`;
       })
       .join('')}</ul>`,
@@ -410,9 +411,19 @@ function chatListHtml(): string {
     .map((m) => {
       const t = new Date(m.ts);
       const hhmm = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
-      return `<div class="cm ${m.fromId === me ? 'mine' : ''}${m.fromId === '' ? ' sys' : ''}"><span class="cm-name">${esc(m.name)}</span><span class="cm-text">${esc(m.text)}</span><span class="cm-time">${hhmm}</span></div>`;
+      if (m.fromId === '') return `<div class="cm sys"><span class="cm-text">${esc(m.text)}</span><span class="cm-time">${hhmm}</span></div>`;
+      const mine = m.fromId === me;
+      return `<div class="cm ${mine ? 'mine' : ''}" style="--who:${nameColor(m.fromId)}">${mine ? '' : `<span class="cm-name">${esc(m.name)}</span>`}<span class="cm-text">${esc(m.text)}</span><span class="cm-time">${hhmm}</span></div>`;
     })
     .join('');
+}
+
+const NAME_COLORS = ['#7cc4ff', '#ffb36b', '#c79bff', '#7fe0a8', '#ff8fa3', '#ffe07a', '#6fe0d8', '#b8c4ff'];
+/** 보낸 사람마다 고정된 이름 색 */
+function nameColor(id: string): string {
+  let h = 0;
+  for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return NAME_COLORS[h % NAME_COLORS.length];
 }
 
 /** 대기실·게임 화면의 채팅 목록과 안 읽은 수 갱신 */
@@ -455,7 +466,58 @@ function settingsSummary(s: RoomSettings, bots: number | null): string {
     <li class="muted">${blindPreview(s)}</li>
     <li>중도 참여 ${s.midJoin ? '허용' : '끔'} · 연결 끊긴 플레이어 자동 추방 ${KICK_LABEL[s.autoKickMinutes] ?? `${s.autoKickMinutes}분`}</li>
     <li>재충전 선택 ${s.recharge ? '켜짐' : '꺼짐'} · 증강 리롤 ${s.rerolls ? `1인당 ${s.rerolls}회` : '없음'}</li>
+    <li>증강 풀 ${esc(s.augPool === 'custom' ? `직접 고름(${poolIds('custom', s.augCustom).length}개)` : POOL_PRESET_LABEL[s.augPool])} · ${poolCountsText(s)}</li>
   </ul>`;
+}
+
+/** 현재 증강 풀의 별 개수별 수 ("★ 40 / ★★ 30 / ★★★ 12") */
+function poolCountsText(s: RoomSettings): string {
+  const [a, b, c] = poolStarCounts(poolIds(s.augPool, s.augCustom));
+  return `★ ${a} / ★★ ${b} / ★★★ ${c}`;
+}
+
+/** 대기실 증강 풀 패널: 프리셋 선택, 별 개수별 수, 부족 경고, 직접 고르기 목록 */
+function poolPanelHtml(s: RoomSettings, isHost: boolean): string {
+  const ids = poolIds(s.augPool, s.augCustom);
+  const err = poolError(ids);
+  const head = `<h3>증강 풀 <span class="muted">${ids.length}개</span></h3>
+    <div class="pool-counts">${poolCountsText(s)}</div>
+    ${err ? `<div class="warn">${esc(err)}</div>` : ''}`;
+  if (!isHost) return `${head}<p class="muted small-note">${esc(POOL_PRESET_LABEL[s.augPool])}</p>`;
+  const presets = (['all', 'p123', 'p12', 'p1', 'custom'] as PoolPreset[])
+    .map((p) => `<option value="${p}" ${p === s.augPool ? 'selected' : ''}>${esc(POOL_PRESET_LABEL[p])}</option>`)
+    .join('');
+  let html = `${head}<label class="settings">풀 선택 <select data-setting="augPool" data-kind="str">${presets}</select></label>`;
+  if (s.augPool !== 'custom') return html;
+  const on = new Set(ids);
+  const cats = [...new Set(ALL_AUGMENT_IDS.map((id) => AUGMENTS[id].category))];
+  html += `<div class="pool-tools">
+      <button class="small" data-a="poolAll" data-on="1">전체 켜기</button><button class="small" data-a="poolAll" data-on="0">전체 끄기</button>
+      <select id="pool-load">${(['all', 'p123', 'p12', 'p1'] as PoolPreset[]).map((p) => `<option value="${p}">${esc(POOL_PRESET_LABEL[p])}</option>`).join('')}</select>
+      <button class="small" data-a="poolLoad">프리셋 불러오기</button></div>`;
+  for (const cat of cats) {
+    const inCat = ALL_AUGMENT_IDS.filter((id) => AUGMENTS[id].category === cat);
+    const n = inCat.filter((id) => on.has(id)).length;
+    html += `<div class="pool-cat"><div class="pool-cat-head"><b>${esc(cat)}</b> <span class="muted">${n}/${inCat.length}</span>
+        <button class="small" data-a="poolCat" data-cat="${esc(cat)}" data-on="1">켜기</button><button class="small" data-a="poolCat" data-cat="${esc(cat)}" data-on="0">끄기</button></div>`;
+    for (const st of [1, 2, 3]) {
+      const list = inCat.filter((id) => AUGMENTS[id].stars === st);
+      if (!list.length) continue;
+      html += `<div class="pool-row"><span class="pool-star s${st}">${stars(st)}</span>${list
+        .map(
+          (id) =>
+            `<label class="pool-aug${on.has(id) ? ' on' : ''}" data-tip="${esc(augTip(AUGMENTS[id].name) ?? '')}"><input type="checkbox" data-augtoggle="${id}" ${on.has(id) ? 'checked' : ''}/>${esc(AUGMENTS[id].name)}</label>`,
+        )
+        .join('')}</div>`;
+    }
+    html += '</div>';
+  }
+  return html;
+}
+
+async function setCustomPool(ids: AugmentId[]) {
+  const r = await send('room:settings', { augCustom: ids });
+  if (!r.ok) toast(r.error ?? '설정 실패');
 }
 
 /** 방장용 설정 폼. inGame 이면 칩·블라인드·봇은 잠근다 */
@@ -544,8 +606,9 @@ function renderLobby() {
         <h3>설정</h3>
         ${settings}
       </div>
+      <div class="panel pool-panel">${poolPanelHtml(s, isHost)}</div>
       <div class="lobby-actions">
-        ${isHost ? `<button class="primary big" data-a="start" ${humans + bots >= 2 && !tooFewChips ? '' : 'disabled'}>게임 시작</button>` : ''}
+        ${isHost ? `<button class="primary big" data-a="start" ${humans + bots >= 2 && !tooFewChips && !poolError(poolIds(s.augPool, s.augCustom)) ? '' : 'disabled'}>게임 시작</button>` : ''}
         <button data-a="leave">나가기</button>
       </div>
       ${humans + bots < 2 && isHost ? '<p class="muted tcenter">친구에게 링크를 보내거나 봇으로 빈자리를 채우세요.</p>' : ''}
@@ -560,8 +623,8 @@ const GAME_SKELETON = `<div class="game">
   <header class="topbar" id="g-top"></header>
   <div class="table-wrap"><div class="table" id="g-table"><div class="felt"></div><div id="g-seats"></div><div class="center" id="g-center"></div><div id="g-result"></div></div></div>
   <section class="me" id="g-me"><div class="me-left"><div id="g-hand"></div><div id="g-actions"></div></div><div class="augs" id="g-augs"></div></section>
-  <aside class="side" data-tab="log"><div id="g-notes"></div>
-    <div class="side-tabs"><button data-a="sideTab" data-tab="log">게임 로그</button><button data-a="sideTab" data-tab="chat">채팅 <span class="badge" id="chat-unread"></span></button></div>
+  <aside class="side" data-tab="chat"><div id="g-notes"></div>
+    <div class="side-tabs"><button data-a="sideTab" data-tab="chat">💬 채팅 <span class="badge" id="chat-unread"></span></button><button data-a="sideTab" data-tab="log">📜 게임 로그</button></div>
     <div class="log" id="g-log"></div><div class="chat-list" id="g-chat"></div>${CHAT_FORM}
     <div id="g-debug"></div></aside>
   <div id="g-handtable"></div>
@@ -1614,6 +1677,17 @@ document.addEventListener('click', async (ev) => {
       app.showSettings = !app.showSettings;
       if (app.env) renderGame();
       return;
+    case 'poolAll':
+      return setCustomPool(t.dataset.on === '1' ? [...ALL_AUGMENT_IDS] : []);
+    case 'poolLoad':
+      return setCustomPool(poolIds((($('#pool-load') as HTMLSelectElement | null)?.value ?? 'all') as PoolPreset));
+    case 'poolCat': {
+      const s = app.lobby?.settings;
+      if (!s) return;
+      const cur = new Set(poolIds('custom', s.augCustom));
+      for (const id of ALL_AUGMENT_IDS) if (AUGMENTS[id].category === t.dataset.cat) t.dataset.on === '1' ? cur.add(id) : cur.delete(id);
+      return setCustomPool([...cur]);
+    }
     case 'giveHost': {
       if (!confirm(`${t.dataset.name}님에게 방장을 넘길까요?`)) return;
       const r = await send('room:host', { playerId: t.dataset.id });
@@ -1869,6 +1943,14 @@ document.addEventListener('change', async (ev) => {
       }
     }
     return;
+  }
+  if (t.dataset.augtoggle) {
+    const s = app.lobby?.settings;
+    if (!s) return;
+    const cur = new Set(poolIds('custom', s.augCustom));
+    if ((t as HTMLInputElement).checked) cur.add(t.dataset.augtoggle as AugmentId);
+    else cur.delete(t.dataset.augtoggle as AugmentId);
+    return setCustomPool([...cur]);
   }
   if ((t as HTMLInputElement).name === 'vis') {
     app.homePublic = (t as HTMLInputElement).value === 'public';
