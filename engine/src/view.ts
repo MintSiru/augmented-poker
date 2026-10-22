@@ -11,8 +11,10 @@ import {
   counterCandidates,
   currentBlinds,
   declareOptions,
+  timeBombed,
   declareTargets,
   alchemyChoices,
+  shadowChoices,
   findAug,
   legalActions,
   LegalActions,
@@ -34,6 +36,7 @@ import {
   VARIANT_AUG,
   visibleBoard,
   type MaskRules,
+  foreheadOf,
 } from './core.js';
 import { fullDeck } from './cards.js';
 import { immunityCandidates, rechargeError, rechargeTargets, stealOptions } from './game.js';
@@ -69,8 +72,8 @@ export interface MyAugmentView extends AugmentInfo {
   fakeUsed: boolean | null;
   /** 짝수/홀수 동맹: 고른 쪽 */
   parity: 'even' | 'odd' | null;
-  /** 1차 / 2차 / 3차 풀 */
-  pool: 1 | 2 | 3;
+  /** 1~4차 풀 */
+  pool: 1 | 2 | 3 | 4;
   /** 잠복으로 숨긴 증강 */
   hidden: boolean;
   /** 지금 버튼으로 쓸 수 있는가 (최종 검증은 서버) */
@@ -122,6 +125,13 @@ export interface PublicPlayerView {
   streak: number | null;
   /** 운명 공동체: 이번 핸드 팀 번호 (팀 색) */
   team: number | null;
+  /** 공개된 홀카드 1장씩 (미끼 공개·반쪽짜리 비밀·배짱 시험 등) */
+  exposed: Card[];
+  /** 예약 주문으로 고른 숫자 (공개) */
+  reserveRank: number | null;
+  /** 인디언 포커: 이마 카드 (본인 뷰에서는 null, 대신 hasForehead) */
+  forehead: Card | null;
+  hasForehead: boolean;
 }
 
 export interface NoteView {
@@ -201,7 +211,8 @@ export type WaitingKind = 'turn' | 'pick' | 'discard' | 'declare' | 'reaction' |
 
 /** 제안·입찰 창. 제안 내용·입찰가·비공개 선언은 결과가 나올 때까지 당사자에게만 */
 export interface RespondView {
-  augment: AugmentId;
+  /** 정보 통행료·선택적 노출처럼 당사자만 아는 응답이면 null */
+  augment: AugmentId | null;
   name: string;
   ownerId: string;
   ownerName: string;
@@ -209,8 +220,10 @@ export interface RespondView {
   participants: string[];
   /** 내가 지금 응답해야 하는가 */
   needMe: boolean;
-  /** 응답 방식: 수락/거절, 입찰, 홀카드 고르기, 입찰+홀카드, 강함/약함 */
-  input: 'accept' | 'bid' | 'card' | 'bidCard' | 'strongWeak' | null;
+  /** 응답 방식: 수락/거절, 입찰, 홀카드 고르기, 입찰+홀카드, 강함/약함, 후보 카드와 홀카드 바꾸기(안 바꿀 수 있음) */
+  input: 'accept' | 'bid' | 'card' | 'bidCard' | 'strongWeak' | 'pickSwap' | 'cardOrKeep' | null;
+  /** 후보 카드 (교환 진열대·재활용, 응답하는 본인에게만) */
+  offered: Card[] | null;
   /** 나에게 보여 줄 안내 (제안 내용 포함) */
   text: string;
   /** 골라 봐: 선언자 본인에게만, 보여 줄 카드 */
@@ -252,6 +265,15 @@ export interface TableView {
   twoFates: boolean;
   /** 스트리트별 누적 공개 장수 (거꾸로 강을 거슬러면 1-2-5) */
   revealPlan: number[];
+  /** 공용 카드 (모두가 보드처럼 씀) */
+  shared: Card[];
+  /** 딜러의 변덕: 이번 핸드가 반시계인가, 반시계로 남은 핸드 수 (이번 핸드 포함) */
+  reversed: boolean;
+  whimHands: number;
+  /** 침묵의 리버·시한폭탄·한 번만 더 */
+  silentRiver: boolean;
+  timeBomb: boolean;
+  oneMore: boolean;
 }
 
 export interface PlayerView {
@@ -293,6 +315,8 @@ export interface PlayerView {
   respond: RespondView | null;
   /** 카드 경매로 공개된 카드 (가림 규칙 적용) */
   auctionCard: Card | null;
+  /** 교환 진열대로 공개된 후보 카드 */
+  offerCards: Card[];
   /** 나만 미리 본 앞으로의 보드 카드 (예지·턴과 리버 사이). 보드 칸 위치와 함께 */
   peek: { index: number; card: Card; label: string }[];
   you: {
@@ -330,7 +354,12 @@ export interface PlayerView {
     dormant: number | null;
     discard: { pending: boolean; chosen: number | null } | null;
     /** 선언 기회 (되감기·봉인·밥상 뒤집기) */
-    declare: { options: AugmentInfo[]; targets: Partial<Record<AugmentId, string[]>>; alchemy: { cardIndex: number; choice: number }[] } | null;
+    declare: {
+      options: AugmentInfo[];
+      targets: Partial<Record<AugmentId, string[]>>;
+      alchemy: { cardIndex: number; choice: number }[];
+      shadow: { cardIndex: number; boardIndex: number }[];
+    } | null;
     /** 애착: 다음 핸드로 가져갈 카드 선택 */
     attach: { cards: Card[] } | null;
     counting: CountingView | null;
@@ -367,6 +396,22 @@ export interface PlayerView {
       contract: number | null;
       /** 잠복: 숨길 증강을 고를 수 있는가 */
       lurkChoose: boolean;
+      /** 덫을 설치해 두었는가 (나에게만) */
+      trapArmed: boolean;
+      /** 봉인 봉투의 예비 카드 / 냉동 보관한 카드 (나에게만) */
+      envelope: Card | null;
+      frozen: Card | null;
+      /** 적금 적립액 (칩) · 복수 대상 이름 · 사이드 베팅/빨대 꼽기 지목 · 현상수배 대상 (나에게만) */
+      savings: number;
+      nemesis: string | null;
+      sideBetOn: string | null;
+      strawOn: string | null;
+      wanted: string | null;
+      /** 한도 설정: 이번 핸드 상한 / 다음 핸드 예약 */
+      betCap: number | null;
+      betCapNext: boolean;
+      /** 시한폭탄: 내 체크가 폴드로 처리되는가 */
+      checkFolds: boolean;
       /** 기록관: 상대별 프리플랍 참여율(%)과 쇼다운에서 드러난 블러프 횟수 */
       recorder: Record<string, { hands: number; vpip: number; bluffs: number }> | null;
     };
@@ -430,7 +475,10 @@ function sampleParams(state: GameState, me: PlayerState, id: AugmentId, targets:
     case 'magnet':
     case 'truthGame':
     case 'sealedContract':
+    case 'catchThief':
       return { choice: 0 };
+    case 'reserveOrder':
+      return { choice: 2 };
     case 'freeze':
       return { boardIndex: 0 };
     case 'swapBoard':
@@ -502,12 +550,17 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
         return { name: p === me ? d.name : publicAugName(p, a.id), stars: d.stars, description: d.description };
       }),
     // 홀카드는 볼 수 있는 경우에만 (쇼다운·유리 테이블, 본인은 암전이 아닐 때)
-    shownCards: p.inHand && (p.shown || glassShows(state, p)) && holeVisible(state, p, me) ? [...p.hole] : null,
+    shownCards: p.inHand && (p.shown || glassShows(state, p)) && holeVisible(state, p, me) ? p.hole.map((c) => (p !== me && c === p.smoked ? '??' : c)) : null,
     shepherdShown: [...p.shepherdShown],
     connected: true,
     isHost: false,
     dormant: p.dormant !== null ? Math.max(0, p.dormant - state.handNumber) : null,
-    streak: p.streak > 0 && findAug(p, 'runaway') ? p.streak : null,
+    // 연승 수는 공개 정보 (연승을 세는 증강 보유자만 쌓인다)
+    streak: p.streak > 0 ? p.streak : null,
+    exposed: p.inHand ? p.exposed.filter((c) => p.hole.includes(c)) : [],
+    reserveRank: p.inHand ? p.reserveRank : null,
+    forehead: p !== me && p.inHand ? foreheadOf(p) : null,
+    hasForehead: p.inHand && !!foreheadOf(p),
     team: (() => {
       const k = state.teams.findIndex((t) => t.includes(p.id));
       return k >= 0 ? k : null;
@@ -529,7 +582,8 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
         return {
           id: x.id,
           name: owner.name,
-          cards: [...x.cards],
+          // 연막탄으로 숨긴 카드는 본인 외에는 ??
+          cards: x.cards.map((c) => (owner !== me && c === owner.smoked ? '??' : c)),
           handName: x.handName,
           bestCards: [...x.bestCards],
           applied: x.applied.map((v) => nameOfAug(VARIANT_AUG[v])),
@@ -591,10 +645,12 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
     count: state.phase === 'augmentSelect' ? state.players.filter((p) => p.pickOptions).length : 0,
   };
 
-  const myHole = seated && me.inHand && holeVisible(state, me, me) ? [...me.hole] : [];
+  // 인디언 포커: 내 이마 카드는 ?? (그 카드로 계산되는 현재 족보도 보내지 않는다)
+  const myForehead = foreheadOf(me);
+  const myHole = seated && me.inHand && holeVisible(state, me, me) ? me.hole.map((c) => (c === myForehead ? '??' : c)) : [];
   // 실명 다트 대상에게는 보드로 계산되는 정보(현재 족보 등)도 보내지 않는다
   const blind = boardBlind(state, me) || boardInfoHidden(state, me);
-  const hand = seated && me.inHand && !me.folded && !blind ? myHand(state, me, myHole, board) : null;
+  const hand = seated && me.inHand && !me.folded && !blind && !myForehead ? myHand(state, me, myHole, [...board, ...e.shared]) : null;
 
   const myAugments: MyAugmentView[] = me.augments.map((a) => {
     const d = AUGMENTS[a.id];
@@ -647,7 +703,7 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
   const counting =
     seated && !blind && findAug(me, 'counting') && me.inHand && !me.out
       ? countingInfo(
-          myHole,
+          myHole.filter((c) => c !== '??'),
           board.filter((c): c is Card => !!c),
           state.used,
           publicCards(state).filter((c) => !me.hole.includes(c)),
@@ -704,10 +760,17 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
       magnetSuit: e.magnet?.suit ?? null,
       twoFates: e.twoFates,
       revealPlan: [...state.revealPlan],
+      shared: e.shared.map(blurCard),
+      reversed: state.reversed,
+      whimHands: (state.reversed ? 1 : 0) + state.whimLeft,
+      silentRiver: e.silentRiver,
+      timeBomb: e.timeBomb,
+      oneMore: state.round.oneMore && (state.phase === 'betting' || state.phase === 'reaction'),
     },
     reaction,
     respond: respondView(state, me, bb),
     auctionCard: state.auctionCard && !mask.board ? blurCard(state.auctionCard) : null,
+    offerCards: [...state.offerCards],
     peek: seated && !mask.board ? peekCards(state, me).map((x) => ({ ...x, card: blurCard(x.card) })) : [],
     you: {
       id: me.id,
@@ -743,7 +806,12 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
           ? { pending: me.pendingDiscard === null, chosen: me.pendingDiscard }
           : null,
       declare: declOpts.length
-        ? { options: declOpts.map(info), targets: Object.fromEntries(declOpts.map((id) => [id, declareTargets(state, me, id)])), alchemy: alchemyChoices(state, me) }
+        ? {
+            options: declOpts.map(info),
+            targets: Object.fromEntries(declOpts.map((id) => [id, declareTargets(state, me, id)])),
+            alchemy: alchemyChoices(state, me),
+            shadow: shadowChoices(state, me),
+          }
         : null,
       attach: seated && me.attachPending && state.phase === 'handEnd' ? { cards: [...me.hole] } : null,
       counting,
@@ -765,6 +833,17 @@ export function getPlayerView(state: GameState, viewerId: string): PlayerView {
         drawPrompt: me.drawPrompt && state.phase === 'handEnd' ? { winnerName: nameById(me.drawPrompt.winnerId) } : null,
         contract: me.contract,
         lurkChoose: me.lurkChoose,
+        trapArmed: !!findAug(me, 'trap')?.armed,
+        envelope: me.envelope,
+        frozen: me.frozen,
+        savings: Math.floor((me.savings * bb) / 10),
+        nemesis: me.nemesis ? nameById(me.nemesis) : null,
+        sideBetOn: me.sideBetOn ? nameById(me.sideBetOn) : null,
+        strawOn: me.strawOn ? nameById(me.strawOn) : null,
+        wanted: me.wanted ?? me.wantedNext ? nameById((me.wanted ?? me.wantedNext)!) : null,
+        betCap: me.betCap,
+        betCapNext: me.betCapNext,
+        checkFolds: seated && timeBombed(state, me),
         recorder: findAug(me, 'recorder')
           ? Object.fromEntries(
               state.players
@@ -844,14 +923,59 @@ function respondView(state: GameState, me: PlayerState, bb: number): RespondView
       input = 'bidCard';
       text = r.participants.includes(me.id) ? `카드 경매: 낙찰되면 공개된 카드를 고른 홀카드와 바꿉니다 (0 = 불참, 최소 ${bb})` : '카드 경매 입찰 중';
       break;
+    case 'showcase':
+      input = 'pickSwap';
+      text = isOwner ? '교환 진열대: 후보 카드 중 1장과 홀카드 1장을 바꿀 수 있습니다 (거절해도 횟수 소모)' : `${owner}이(가) 교환 진열대에서 고르는 중`;
+      break;
+    case 'recycle':
+      input = 'pickSwap';
+      text = isOwner ? '재활용: 이번 핸드의 번 카드 중 1장과 홀카드 1장을 바꿀 수 있습니다' : `${owner}이(가) 재활용 중`;
+      break;
+    case 'infoToll': {
+      const augName = AUGMENTS[(r.params.extra?.augment as AugmentId) ?? 'thermal'].name;
+      input = 'accept';
+      text = r.participants.includes(me.id) ? `${owner}의 정보 통행료: ${2 * bb}칩(2BB)을 내고 「${augName}」 결과를 볼까요? 취소하면 사용 횟수를 돌려받습니다.` : isOwner ? `${name(target)}의 응답을 기다리는 중` : '응답 대기 중';
+      break;
+    }
+    case 'selectiveReveal':
+      input = 'card';
+      text = isOwner ? `${name(target)}이(가) 투시로 내 홀카드 1장을 확인합니다. 보여 줄 카드를 고르세요.` : '응답 대기 중';
+      break;
     case 'staredown': {
       input = 'strongWeak';
       const other = me.id === r.ownerId ? name(target) : owner;
       text = r.participants.includes(me.id) ? `눈싸움: 내 패가 ${other}보다 강한가요? (비공개, 둘 다 쇼다운에 가면 공개)` : `${owner}와(과) ${name(target)}의 눈싸움`;
       break;
     }
+    case 'commonWell':
+      input = 'card';
+      text = r.participants.includes(me.id) ? '공동 우물: 가운데에 낼 홀카드 1장을 고르세요 (섞어서 무작위로 다시 나눔)' : '공동 우물: 카드를 고르는 중';
+      break;
+    case 'catchThief':
+      input = 'card';
+      text = r.participants.includes(me.id)
+        ? `도둑잡기: ${r.params.extra?.dir === 1 ? '오른쪽' : '왼쪽'} 사람에게 넘길 홀카드 1장을 고르세요`
+        : '도둑잡기: 넘길 카드를 고르는 중';
+      break;
+    case 'sharedCard':
+      input = 'card';
+      text = r.participants.includes(me.id) ? '공용 카드: 공개해 모두가 쓰게 할 홀카드 1장을 고르세요' : '공용 카드: 카드를 고르는 중';
+      break;
+    case 'halfSecret':
+      input = 'card';
+      text = r.participants.includes(me.id) ? '반쪽짜리 비밀: 공개할 홀카드 1장을 고르세요 (모두 동시에 공개)' : '반쪽짜리 비밀: 카드를 고르는 중';
+      break;
+    case 'lastChoice':
+      input = 'cardOrKeep';
+      text = r.participants.includes(me.id) ? '마지막 선택: 홀카드를 그대로 둘까요, 1장 바꿀까요? (비공개, 동시에 공개)' : '마지막 선택: 고르는 중';
+      break;
     default:
       text = `${AUGMENTS[r.augment].name} 응답 대기 중`;
+  }
+  // 정보 통행료·선택적 노출: 누가 누구를 확인하는지는 당사자만 안다
+  const privateOffer = (r.augment === 'infoToll' || r.augment === 'selectiveReveal') && !isOwner && !r.participants.includes(me.id);
+  if (privateOffer) {
+    return { augment: null, name: '응답 대기', ownerId: '', ownerName: '', participants: [], needMe: false, input: null, offered: null, text: '응답 대기 중', card: null, myAnswer: null, minBid: bb, maxBid: me.chips };
   }
   return {
     augment: r.augment,
@@ -861,6 +985,7 @@ function respondView(state: GameState, me: PlayerState, bb: number): RespondView
     participants: [...r.participants],
     needMe,
     input: needMe ? input : null,
+    offered: needMe && r.augment === 'showcase' ? [...state.offerCards] : needMe && r.augment === 'recycle' ? state.used.filter((u) => u.kind === 'burn').map((u) => u.card) : null,
     text,
     card: isOwner && r.augment === 'pickMe' && holeVisible(state, me, me) ? (r.params.card ?? null) : null,
     myAnswer: mine ? { accept: mine.accept ?? null, bid: mine.bid ?? null, choice: mine.choice ?? null, cardIndex: mine.cardIndex ?? null } : null,
@@ -886,7 +1011,11 @@ function tableNotes(state: GameState): string[] {
     else if (e.underdog) out.push('언더독 + 밥상 뒤집기: 역전 상쇄');
     if (e.bomb) out.push('폭탄 팟');
     if (e.blindDarted.length && !e.fogLifted) out.push(`실명 다트: ${e.blindDarted.map((id) => state.players.find((p) => p.id === id)?.name ?? '?').join(', ')}`);
-    if (state.round.raiseCap !== null && (state.phase === 'betting' || state.phase === 'reaction')) out.push('서킷브레이커: 레이즈 1회 제한');
+    if (state.round.raiseCap !== null && (state.phase === 'betting' || state.phase === 'reaction')) out.push(state.round.oneMore ? '한 번만 더: 레이즈 1회 제한' : '서킷브레이커: 레이즈 1회 제한');
+    if (state.reversed) out.push(`딜러의 변덕: 반시계 (${state.whimLeft + 1}핸드)`);
+    if (e.silentRiver) out.push('침묵의 리버');
+    if (e.timeBomb) out.push('시한폭탄: 체크 = 폴드');
+    if (e.shared.length) out.push('공용 카드');
     if (state.round.locked) out.push('자물쇠: 증강 사용 불가');
     if (e.highLow) out.push('하이로우');
     if (e.lastStand) out.push('배수진: 폴드·레이즈 금지');

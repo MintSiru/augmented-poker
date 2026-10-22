@@ -1,6 +1,6 @@
 // 엔진 공통 도우미: 게임 흐름(game.ts)과 증강 효과(effects.ts)가 함께 쓴다.
 
-import { Card, cardToken, rankName } from './cards.js';
+import { Card, cardToken, rankName, rankOf } from './cards.js';
 import { AUGMENTS, AugmentId } from './augments.js';
 import type { AppliedVariant, EvalRules } from './evaluator.js';
 import type { BlindSchedule, GameState, LogEntry, NoteKind, OwnedAugment, Phase, PlayerState } from './types.js';
@@ -64,8 +64,10 @@ export function playerById(state: GameState, id: string | undefined | null): Pla
 /** from 다음 좌석부터 한 바퀴 돌며 조건을 만족하는 첫 인덱스 */
 export function nextIdx(state: GameState, from: number, pred: (p: PlayerState) => boolean): number {
   const n = state.players.length;
+  // 딜러의 변덕: 반시계 방향
+  const dir = state.reversed ? -1 : 1;
   for (let k = 1; k <= n; k++) {
-    const i = (from + k) % n;
+    const i = (((from + dir * k) % n) + n) % n;
     if (pred(state.players[i])) return i;
   }
   return -1;
@@ -74,7 +76,8 @@ export function nextIdx(state: GameState, from: number, pred: (p: PlayerState) =
 /** 딜러 왼쪽부터의 좌석 순서 */
 export function seatOrderFromDealer(state: GameState): number[] {
   const n = state.players.length;
-  return Array.from({ length: n }, (_, k) => (state.dealerIdx + 1 + k) % n);
+  const dir = state.reversed ? -1 : 1;
+  return Array.from({ length: n }, (_, k) => (((state.dealerIdx + dir * (1 + k)) % n) + n) % n);
 }
 
 export function addLog(state: GameState, text: string, opts: { to?: string[]; except?: string[] } = {}): void {
@@ -114,6 +117,12 @@ export function rulesFor(p: PlayerState): EvalRules {
     fourStraight: !!findAug(p, 'fourStraight'),
     doubleStep: !!findAug(p, 'doubleStep'),
     parity: findAug(p, 'parity')?.parity ?? null,
+    numberMirror: !!findAug(p, 'numberMirror'),
+    royalty: !!findAug(p, 'royalty'),
+    colorFlush: p.colorBlindOn,
+    crown: findAug(p, 'underdogCrown') ? p.hole.filter((c) => rankOf(c) === 2) : undefined,
+    neighbors: !!findAug(p, 'neighbors'),
+    triplets: !!findAug(p, 'triplets'),
   };
 }
 
@@ -127,6 +136,14 @@ export const VARIANT_AUG: Record<AppliedVariant, AugmentId> = {
   doubleStep: 'doubleStep',
   parity: 'parity',
   blackjack: 'blackjack',
+  numberMirror: 'numberMirror',
+  royalty: 'royalty',
+  colorFlush: 'colorBlind',
+  crown: 'underdogCrown',
+  neighbors: 'neighbors',
+  triplets: 'triplets',
+  omaha: 'omahaBlood',
+  shadow: 'shadow',
 };
 
 /** 반응 대기 중이면 대기가 끝난 뒤 돌아갈 단계 */
@@ -182,16 +199,54 @@ export function announceAnonymous(state: GameState, p: PlayerState): void {
   addLog(state, `${p.name}님이 비공개 증강을 사용했습니다`, { except: [p.id] });
 }
 
+/** 이번 핸드에 더 낼 수 있는 칩 (한도 설정이 걸려 있으면 한도까지) */
+export function stackOf(p: PlayerState): number {
+  return p.betCap !== null ? Math.max(0, Math.min(p.chips, p.betCap - p.contributed)) : p.chips;
+}
+
 export function putChips(p: PlayerState, amount: number): number {
-  const amt = Math.max(0, Math.min(amount, p.chips));
+  const amt = Math.max(0, Math.min(amount, stackOf(p)));
   p.chips -= amt;
   p.streetBet += amt;
   p.contributed += amt;
-  if (p.chips === 0 && p.inHand) {
+  // 칩이 바닥나거나 한도 설정 한도에 닿으면 올인과 같은 규칙
+  if ((p.chips === 0 || (p.betCap !== null && p.contributed >= p.betCap)) && p.inHand) {
     p.allIn = true;
     p.wentAllIn = true;
   }
   return amt;
+}
+
+/** 이번 게임의 증강 풀 (null = 전체) */
+export function poolSet(state: GameState): ReadonlySet<AugmentId> | null {
+  return state.options.pool ? new Set(state.options.pool) : null;
+}
+
+/** 다른 사람이 가진 유일 증강 (선택지에서 뺀다) */
+export function takenByOthers(state: GameState, p: PlayerState): AugmentId[] {
+  return [...state.players, ...state.joiners.map((j) => j.player)]
+    .filter((x) => x !== p)
+    .flatMap((x) => x.augments.map((a) => a.id))
+    .filter((id) => AUGMENTS[id].unique);
+}
+
+/** 새 보유 증강 (횟수는 처음부터 꽉 참) */
+export function newOwnedAugment(state: GameState, id: AugmentId, wildRank?: number, parity?: 'even' | 'odd'): OwnedAugment {
+  const def = AUGMENTS[id];
+  const aug: OwnedAugment = {
+    id,
+    usesLeft: def.uses?.per === 'game' ? def.uses.count : null,
+    usedThisHand: false,
+    revealed: false,
+    publicId: null,
+    acquiredHand: state.handNumber,
+  };
+  if (id === 'favoritism') aug.wildRank = wildRank ?? 2 + state.rng.int(13);
+  if (id === 'exemption') aug.armed = false;
+  if (id === 'disguise') aug.fakeId = null;
+  if (id === 'shepherd') aug.fakeUsed = false;
+  if (id === 'parity') aug.parity = parity ?? (state.rng.int(2) ? 'even' : 'odd');
+  return aug;
 }
 
 /** 지금 족보 순위가 뒤집혀 있는가: 밥상 뒤집기 횟수 + 언더독, 짝수 번이면 상쇄 */
@@ -285,7 +340,8 @@ export function lockError(state: GameState): string | null {
 
 /** 서버 기준 족보 계산용 보드: 공개된 보드에서 봉인된 카드 제외 */
 export function evalBoard(state: GameState): Card[] {
-  return state.board.slice(0, state.boardRevealed).filter((_, i) => !state.effects.sealed.includes(i));
+  // 공용 카드는 모두가 보드처럼 쓴다
+  return [...state.board.slice(0, state.boardRevealed).filter((_, i) => !state.effects.sealed.includes(i)), ...state.effects.shared];
 }
 
 /** 이 플레이어가 볼 수 있는 보드 (짙은 안개로 가려진 플랍은 null) */
@@ -317,7 +373,16 @@ export function glassShows(state: GameState, owner: PlayerState): boolean {
 /** 보는 사람에게 보이는 공개 카드 (쇼다운·유리 테이블로 공개된 다른 사람 카드) */
 export function publicCards(state: GameState): Card[] {
   const out: Card[] = [];
-  for (const p of state.players) if (p.inHand && (p.shown || glassShows(state, p))) out.push(...p.hole);
+  for (const p of state.players) {
+    if (!p.inHand) continue;
+    // 연막탄으로 숨긴 카드는 공개된 카드가 아니다
+    if (p.shown || glassShows(state, p)) out.push(...p.hole.filter((c) => c !== p.smoked));
+    // 미끼 공개·반쪽짜리 비밀 등으로 공개된 홀카드, 인디언 포커의 이마 카드(본인 외에는 공개)
+    else {
+      for (const c of p.exposed) if (p.hole.includes(c)) out.push(c);
+      if (p.forehead && p.hole.includes(p.forehead) && !p.exposed.includes(p.forehead)) out.push(p.forehead);
+    }
+  }
   return out;
 }
 
@@ -356,4 +421,9 @@ export function payTax(state: GameState, p: PlayerState, secret = false): number
 
 export function nameOf(state: GameState, id: string): string {
   return playerById(state, id)?.name ?? '?';
+}
+
+/** 인디언 포커: 본인에게 가려진 이마 카드 (쇼다운 등으로 공개되면 없음) */
+export function foreheadOf(p: PlayerState): Card | null {
+  return p.forehead && !p.shown && p.hole.includes(p.forehead) ? p.forehead : null;
 }

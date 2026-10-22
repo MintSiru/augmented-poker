@@ -45,6 +45,14 @@ export function computePots(players: PotContribution[], deadMoney = 0): Pot[] {
   if (deadMoney > 0) {
     if (pots.length) pots[0].amount += deadMoney;
     else pots.push({ amount: deadMoney, eligible: live.map((p) => p.id) });
+  } else if (deadMoney < 0) {
+    // 팟에서 미리 꺼내 간 칩(예약 주문 등): 메인팟부터 뺀다
+    let debt = -deadMoney;
+    for (const pot of pots) {
+      const take = Math.min(debt, pot.amount);
+      pot.amount -= take;
+      debt -= take;
+    }
   }
   return pots;
 }

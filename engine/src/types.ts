@@ -19,6 +19,7 @@ export type Phase = 'augmentSelect' | 'betting' | 'discard' | 'declare' | 'react
 export interface RespondAnswer {
   accept?: boolean;
   bid?: number;
+  /** 강함/약함, 교환 진열대·재활용의 고른 후보 카드 번호 (-1 = 바꾸지 않음) 등 */
   choice?: number;
   cardIndex?: number;
 }
@@ -32,7 +33,9 @@ export interface RespondState {
   /** 응답 (결과가 나올 때까지 당사자 뷰에만) */
   answers: Record<string, RespondAnswer>;
   /** 제안 내용 (선언자가 고른 카드 등, 당사자 뷰에만) */
-  params: { targetId?: string; cardIndex?: number; card?: Card };
+  params: { targetId?: string; cardIndex?: number; card?: Card; extra?: Record<string, unknown> };
+  /** 응답 제한 시간 (초, 기본 15) */
+  seconds?: number;
   /** 공동 환승: 수락 후 각자 카드 고르기 단계 */
   stage: 'offer' | 'pick';
   /** 응답이 끝나면 돌아갈 단계 */
@@ -208,6 +211,41 @@ export interface PlayerState {
   /** 재충전: 되돌릴 증강을 고르는 중 / 이번 선택 라운드에서 이미 재충전했는가 */
   rechargePending: boolean;
   rechargeDone: boolean;
+  /** 이번 핸드에 공개된 내 홀카드 (미끼 공개·반쪽짜리 비밀·배짱 시험·교환 진열대 등, 이미 공개된 카드로 취급) */
+  exposed: Card[];
+  /** 봉인 봉투: 보관 중인 예비 카드 (나만 봄, 플랍 라운드 동안 교체 가능) */
+  envelope: Card | null;
+  /** 선불 교환: 플랍 직전에 새 카드 1장을 받는다 */
+  prepay: boolean;
+  /** 냉동 보관: 보관한 카드 (핸드가 바뀌어도 유지, 이후 덱에서 제외) */
+  frozen: Card | null;
+  /** 한도 설정: 이번 핸드에 낼 수 있는 최대 칩 (null = 없음) / 다음 핸드에 걸 한도 */
+  betCap: number | null;
+  betCapNext: boolean;
+  /** 적금: 적립한 0.1BB 단위 수 (나에게만) */
+  savings: number;
+  /** 예약 주문: 이번 핸드에 지정한 숫자 (공개) */
+  reserveRank: number | null;
+  /** 현상수배: 이번 핸드·다음 핸드 대상 */
+  wanted: string | null;
+  wantedNext: string | null;
+  /** 사이드 베팅·빨대 꼽기: 비공개로 지목한 사람 */
+  sideBetOn: string | null;
+  strawOn: string | null;
+  /** 복수: 직전 쇼다운에서 나를 이긴 상대 (나에게만) */
+  nemesis: string | null;
+  /** 연승을 마지막으로 센 핸드 (연승 수당·폭주기관차가 같은 카운터를 쓰므로 한 번만) */
+  streakHand: number;
+  /** 연막탄: 공개할 때 끝까지 숨긴 홀카드 (다른 플레이어 뷰·로그에서 '??') */
+  smoked: Card | null;
+  /** 인디언 포커: 이마에 붙인 홀카드 (본인만 못 봄) */
+  forehead: Card | null;
+  /** 색맹: 이번 핸드 색 플러시 */
+  colorBlindOn: boolean;
+  /** 그림자 분신: 이번 판정에서 무늬를 바꾼 홀카드 */
+  shadow: { index: number; to: Card } | null;
+  /** 오마하의 피: 홀카드 2장을 모두 써서 한 단계 위로 */
+  omaha: boolean;
   /** 기록관용: 이번 핸드 프리플랍에 자발적으로 칩을 냈는가, 리버에서 베팅·레이즈했는가 */
   vpipHand: boolean;
   aggressed: boolean;
@@ -306,6 +344,8 @@ export interface GameOptions {
   recharge: boolean;
   /** 플레이어당 게임 전체 증강 리롤 횟수 */
   rerolls: number;
+  /** 이번 게임의 증강 풀 (null = 전체). 새 증강을 뽑는 모든 곳에 적용 */
+  pool: AugmentId[] | null;
 }
 
 /** 사용된 카드 (카운팅 보유자에게만 보임) */
@@ -329,6 +369,8 @@ export interface RoundState {
   firstFrom: number;
   /** 남은 레이즈 허용 수 (null = 제한 없음). 서킷브레이커 후 1 */
   raiseCap: number | null;
+  /** 한 번만 더: raiseCap 이 이 효과로 걸렸는가 (상한을 넘는 올인은 콜 금액만) */
+  oneMore: boolean;
   /** 자물쇠: 이번 라운드에는 액티브·공개형 증강 사용 불가 */
   locked: boolean;
   /** 자본주의: 이번 라운드에서 가장 크게 베팅·레이즈한 사람과 금액 */
@@ -372,6 +414,13 @@ export interface TableEffects {
   magnet: { suit: string; used: boolean } | null;
   /** 두 번의 운명 (두 번째 보드는 리버만 다름) */
   twoFates: boolean;
+  /** 침묵의 리버: 리버 베팅 없이 쇼다운 */
+  silentRiver: boolean;
+  /** 시한폭탄: 체크 = 폴드 (면역·올인 예외) */
+  timeBomb: boolean;
+  timeBombImmune: string[];
+  /** 공용 카드: 모두가 보드처럼 쓰는 공개 카드 */
+  shared: Card[];
 }
 
 /** 선언된 액티브·공개형 증강 (3초 반응 대기 후 적용) */
@@ -426,6 +475,8 @@ export interface GameStats {
   kickedChips: number;
   /** 플레이어별 재충전한 증강 */
   recharges: Record<string, AugmentId[]>;
+  /** 증강별 선택지에 나온 횟수 */
+  offered: Partial<Record<AugmentId, number>>;
 }
 
 export interface GameState {
@@ -467,7 +518,13 @@ export interface GameState {
   /** 다음 핸드에 적용할 보드 효과 */
   nextHand: { reverse: boolean; prophecy: boolean; freezeCard: Card | null };
   /** 지금 열린 선언 기회의 단계 */
-  windowStage: 'flop' | 'turn' | 'river' | 'preShowdown' | null;
+  windowStage: 'flop' | 'turn' | 'turnEnd' | 'river' | 'preShowdown' | null;
+  /** 딜러의 변덕: 아직 시작하지 않은 반시계 핸드 수, 이번 핸드가 반시계인가 */
+  whimLeft: number;
+  reversed: boolean;
+  /** 인디언 포커: 다음 핸드에 이마 카드를 붙이는가 (면역으로 빠진 사람) */
+  indianNext: boolean;
+  indianImmuneNext: string[];
   /** 자본주의: 보드 추가 여부를 정하는 사람 */
   capitalChooser: string | null;
   /** 진행 중인 제안·입찰 */
@@ -485,6 +542,10 @@ export interface GameState {
   teams: string[][];
   /** 운명 공동체: 다음 핸드에 적용할 팀 */
   teamsNext: string[][] | null;
+  /** 교환 진열대로 모두에게 공개된 후보 카드 */
+  offerCards: Card[];
+  /** 복기 노트: 플랍이 공개된 시점에 각자 완성했던 족보 종류 (핸드마다) */
+  flopCategory: Record<string, number>;
   /** 기록관: 플레이어별 공개 행동 기록 (참여 핸드 수, 프리플랍 참여 수, 쇼다운에서 드러난 블러프 수) */
   records: Record<string, { hands: number; vpip: number; bluffs: number }>;
   used: UsedCard[];
@@ -563,6 +624,10 @@ export type GameAction =
   | { type: 'draw'; accept: boolean }
   /** 탈취: 반응 대기 중인 선언을 빼앗고 대상·카드를 다시 고른다 */
   | { type: 'steal'; targetId?: string; boardIndex?: number; cardIndex?: number; choice?: number }
+  /** 봉인 봉투: 보관 카드와 바꿀 홀카드 (생략하면 버림) */
+  | { type: 'envelope'; cardIndex?: number }
+  /** 냉동 보관: 보관한 카드를 꺼내 홀카드와 바꾼다 */
+  | { type: 'coldStorage'; cardIndex: number }
   /** 증강 리롤: 지금 선택지를 새로 뽑는다 */
   | { type: 'reroll' }
   /** 재충전: augment 없이 보내면 재충전 카드를 고른 상태(대상 고르기), augment 를 주면 그 증강을 처음 횟수로 */

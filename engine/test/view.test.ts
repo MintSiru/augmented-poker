@@ -9,6 +9,7 @@ import {
   AUGMENTS,
   applyAction,
   applyTimeouts,
+  canHold,
   createGame,
   debugGiveAugment,
   getPending,
@@ -53,6 +54,11 @@ function ownVisible(s: GameState, me: GameState['players'][number]): boolean {
   return me.inHand && (me.shown || (e.glass && !e.glassImmune.includes(me.id)) || !e.blackout || e.blackoutImmune.includes(me.id));
 }
 
+/** 인디언 포커: 본인에게 가려진 이마 카드 */
+function foreheadOf(p: GameState['players'][number]): Card | null {
+  return p.forehead && !p.shown && p.hole.includes(p.forehead) ? p.forehead : null;
+}
+
 function glassShows(s: GameState, p: GameState['players'][number]): boolean {
   return s.effects.glass && p.inHand && !s.effects.glassImmune.includes(p.id);
 }
@@ -67,7 +73,30 @@ function perturb(s: GameState, viewerId: string, rng: Rng): GameState {
   void glass;
   for (const q of c.players) {
     const visible = q.inHand && (q.shown || glassShows(c, q) || (q === viewer && ownVisible(c, q)));
-    if (!visible) addArr(q.hole);
+    // 공개된 홀카드(미끼 공개 등)는 그대로 두고 나머지만 바꾼다
+    // 인디언 포커: 남의 이마 카드는 공개, 내 이마 카드는 나에게 비공개
+    const fh = foreheadOf(q);
+    if (!visible) q.hole.forEach((c, i) => !q.exposed.includes(c) && c !== fh && slots.push({ get: () => q.hole[i], set: (x) => (q.hole[i] = x) }));
+    else if (q === viewer && fh && !q.exposed.includes(fh)) {
+      const i = q.hole.indexOf(fh);
+      const qq = q;
+      slots.push({ get: () => qq.hole[i], set: (x) => { qq.hole[i] = x; qq.forehead = x; } });
+    }
+    // 연막탄으로 숨긴 카드는 공개된 뒤에도 다른 사람에게는 비공개
+    else if (q !== viewer && q.smoked) {
+      const i = q.hole.indexOf(q.smoked);
+      const qq = q;
+      const entry = c.result?.entries.find((e) => e.id === qq.id);
+      if (i >= 0)
+        slots.push({
+          get: () => qq.hole[i],
+          set: (x) => {
+            if (entry) entry.cards = entry.cards.map((y) => (y === qq.smoked ? x : y));
+            qq.hole[i] = x;
+            qq.smoked = x;
+          },
+        });
+    }
     if (q !== viewer) addArr(q.discarded);
     if (q !== viewer) {
       const qq = q;
@@ -75,6 +104,8 @@ function perturb(s: GameState, viewerId: string, rng: Rng): GameState {
       if (qq.lockerReady) slots.push({ get: () => qq.lockerReady!, set: (x) => (qq.lockerReady = x) });
       if (qq.destinyCard) slots.push({ get: () => qq.destinyCard!, set: (x) => (qq.destinyCard = x) });
       if (qq.eitherOr) addArr(qq.eitherOr.cards);
+      if (qq.envelope) slots.push({ get: () => qq.envelope!, set: (x) => (qq.envelope = x) });
+      if (qq.frozen) slots.push({ get: () => qq.frozen!, set: (x) => (qq.frozen = x) });
     }
   }
   addArr(c.deck);
@@ -127,6 +158,13 @@ function perturb(s: GameState, viewerId: string, rng: Rng): GameState {
     q.blindsPaid = rng.int(4);
     if (q.eitherOr) q.eitherOr.pick = rng.int(2) ? rng.int(2) : null;
     if (q.contract !== null) q.contract = rng.int(2);
+    // 4차 경제형: 적금 적립액·복수 대상·사이드 베팅/빨대 지목은 본인만
+    const others = c.players.filter((x) => x !== q).map((x) => x.id);
+    q.savings = rng.int(10);
+    q.nemesis = rng.int(2) ? others[rng.int(others.length)] : null;
+    if (q.sideBetOn) q.sideBetOn = others[rng.int(others.length)];
+    if (q.strawOn) q.strawOn = others[rng.int(others.length)];
+    q.betCapNext = rng.int(2) === 0;
   }
   // 제안·입찰: 다른 사람의 응답(입찰가·비공개 선언)과 다른 사람이 제안한 내용
   if (c.respond) {
@@ -153,17 +191,23 @@ const CARD_RE = /(?<![A-Za-z0-9])[2-9TJQKA][shdc](?![A-Za-z0-9])/g;
 function allowedCards(s: GameState, viewerId: string): Set<Card> {
   const me = s.players.find((p) => p.id === viewerId)!;
   const ok = new Set<Card>([...me.discarded]);
-  if (ownVisible(s, me)) me.hole.forEach((c) => ok.add(c));
+  if (ownVisible(s, me)) me.hole.forEach((c) => c !== foreheadOf(me) && ok.add(c));
   for (const c of [me.keptCard, me.lockerStored, me.lockerReady, me.destinyCard]) if (c) ok.add(c);
   s.board.slice(0, s.boardRevealed).forEach((c, i) => {
     if (!fogHides(s, viewerId, i)) ok.add(c);
   });
   for (const p of s.players) {
-    if (p.inHand && (p.shown || glassShows(s, p))) p.hole.forEach((c) => ok.add(c));
+    if (p.inHand && (p.shown || glassShows(s, p))) p.hole.forEach((c) => (p === me || c !== p.smoked) && ok.add(c));
     p.shepherdShown.forEach((c) => ok.add(c));
     if (p.alchemy) [p.alchemy.from, p.alchemy.to].forEach((c) => ok.add(c));
+    if (p.inHand) p.exposed.forEach((c) => ok.add(c));
+    const fh = foreheadOf(p);
+    if (fh && p !== me) ok.add(fh);
   }
+  s.effects.shared.forEach((c) => ok.add(c));
   for (const n of me.notes) if (n.hand === s.handNumber) n.cards?.forEach((c) => ok.add(c));
+  // 이번 핸드에 처음 받은 내 홀카드 (나중에 바꿔치기·소매치기 등으로 넘어가도 이미 본 카드)
+  for (const l of s.log) if (l.hand === s.handNumber && l.to?.includes(me.id) && l.text.startsWith('내 홀카드')) l.text.match(CARD_RE)?.forEach((c) => ok.add(c));
   if (me.augments.some((a) => a.id === 'counting')) s.used.forEach((u) => ok.add(u.card));
   s.used.filter((u) => u.kind === 'rewind' || u.kind === 'shown' || u.kind === 'called').forEach((u) => ok.add(u.card));
   s.result?.board.forEach((c) => ok.add(c));
@@ -176,6 +220,8 @@ function allowedCards(s: GameState, viewerId: string): Set<Card> {
     });
   }
   if (s.nextHand.freezeCard) ok.add(s.nextHand.freezeCard);
+  s.offerCards.forEach((c) => ok.add(c));
+  for (const c of [me.envelope, me.frozen]) if (c) ok.add(c);
   // 카드 경매로 공개된 카드 (실명 다트 대상 제외)
   if (s.auctionCard && !(s.effects.blindDarted.includes(viewerId) && !s.effects.fogLifted)) ok.add(s.auctionCard);
   s.result?.entries.forEach((e) => e.cards.forEach((c) => ok.add(c)));
@@ -200,8 +246,12 @@ function checkAllViews(s: GameState, rng: Rng) {
       you: { ...view.you, counting: view.you.counting ? { ...view.you.counting, unseen: [], outCards: [] } : null },
     };
     const ok = allowedCards(s, p.id);
-    for (const m of JSON.stringify(current).match(CARD_RE) ?? []) {
-      if (!ok.has(m)) throw new Error(`${p.id} can see forbidden card ${m} (hand ${s.handNumber}, phase ${s.phase})`);
+    const cur = JSON.stringify(current);
+    for (const m of cur.match(CARD_RE) ?? []) {
+      if (!ok.has(m)) {
+        const at = cur.indexOf(m);
+        throw new Error(`${p.id} can see forbidden card ${m} (hand ${s.handNumber}, phase ${s.phase}) board=${s.board.join(",")}/${s.boardRevealed} fh=${s.players.map((x) => x.forehead).join(",")} holes=${s.players.map((x) => x.hole.join("")).join(",")} …${cur.slice(Math.max(0, at - 300), at + 300)}`);
+      }
     }
     for (const pv of view.players) {
       const real = s.players.find((x) => x.id === pv.id)!;
@@ -230,6 +280,39 @@ describe('플레이어 뷰에 다른 사람의 비공개 정보가 없다', () =
     checkAllViews(s, checkRng);
     expect(steps).toBeGreaterThan(10);
   });
+
+  it.each([
+    [3, 41],
+    [5, 42],
+    [8, 43],
+  ])('%i인 봇 게임, 4차 증강을 잔뜩 준 상태의 모든 단계', (n, seed) => {
+    const rng = seededRng(seed);
+    const checkRng = seededRng(seed + 1000);
+    const s = createGame(makePlayers(n), { rng, handsPerLevel: 2, debug: true });
+    const pool4 = ALL_AUGMENT_IDS.filter((id) => AUGMENTS[id].pool === 4);
+    const giveRng = seededRng(seed + 7);
+    let given = false;
+    let steps = 0;
+    while (s.phase !== 'gameOver' && steps < 2500) {
+      if (!given && s.phase === 'betting') {
+        given = true;
+        for (const p of s.players) {
+          const mine: AugmentId[] = p.augments.map((a) => a.id);
+          for (let k = 0; k < 14; k++) {
+            const id = pool4[giveRng.int(pool4.length)];
+            if (!canHold(mine, id)) continue;
+            mine.push(id);
+            debugGiveAugment(s, p.id, id);
+          }
+        }
+      }
+      checkAllViews(s, checkRng);
+      stepBots(s, rng);
+      steps++;
+    }
+    checkAllViews(s, checkRng);
+    expect(steps).toBeGreaterThan(10);
+  }, 300000);
 
   it('엔진 상태 자체(덱 등)는 뷰에 포함되지 않는다', () => {
     const s = createGame(makePlayers(3), { rng: seededRng(1) });

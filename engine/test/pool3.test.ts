@@ -1155,3 +1155,42 @@ describe('3차 풀 포함 봇 게임', () => {
     expect(lastNote(s, 'p1')).toMatch(/승률은 \d+\.\d%/);
   });
 });
+
+// ───────────────────────── 4차: 증강 풀 설정 ─────────────────────────
+
+describe('증강 풀 설정', () => {
+  it('프리셋별 증강 수와 별 개수, 직접 고르기, 별마다 최소 3개 검사', async () => {
+    const { poolIds, poolStarCounts, poolError } = await import('../src/augments.js');
+    expect(poolIds('p1')).toHaveLength(35);
+    expect(poolIds('p12')).toHaveLength(68);
+    expect(poolIds('p123')).toHaveLength(107);
+    expect(poolIds('all')).toHaveLength(ALL_AUGMENT_IDS.length);
+    expect(poolIds('custom', ['thermal', 'nope', 'thermal'])).toEqual(['thermal']);
+    expect(poolStarCounts(poolIds('p1')).reduce((a, b) => a + b, 0)).toBe(35);
+    expect(poolError(poolIds('p1'))).toBeNull();
+    expect(poolError(['thermal', 'observer', 'mulligan'])).toContain('★★ 3개');
+  });
+
+  it('꺼진 증강은 선택지·리롤·중도 참여 선택지에 나오지 않고, 모자라면 낮은 별 → 높은 별 순서로 채운다', () => {
+    const pool: AugmentId[] = ['thermal', 'observer', 'mulligan', 'clairvoyance', 'counting', 'rewind', 'foresight', 'seal', 'restart'];
+    for (let seed = 0; seed < 20; seed++) {
+      const s = createGame(makePlayers(3), { rng: seededRng(seed), pool, rerolls: 1 });
+      for (const p of s.players) {
+        expect(p.pickOptions!.length).toBe(3);
+        for (const id of p.pickOptions!) expect(pool).toContain(id);
+      }
+      act(s, 'p1', { type: 'reroll' });
+      for (const id of s.players[0].pickOptions!) expect(pool).toContain(id);
+      ok(addJoiner(s, { id: 'j1', name: 'J1', isBot: true }));
+      for (const id of s.joiners[0].player.pickOptions!) expect(pool).toContain(id);
+    }
+    // ★★ 를 모두 가졌으면 ★ 에서, ★ 도 다 가졌으면 ★★★ 에서 채운다
+    const only: AugmentId[] = ['thermal', 'clairvoyance', 'counting', 'rewind', 'foresight', 'seal', 'restart'];
+    const o1 = rollAugmentOffer(1, ['clairvoyance', 'counting'], seededRng(1), 2, [], new Set(only));
+    expect(o1).toEqual(['rewind', 'thermal', expect.stringMatching(/foresight|seal|restart/)]);
+    const o2 = rollAugmentOffer(1, ['clairvoyance', 'counting', 'thermal'], seededRng(1), 2, [], new Set(only));
+    expect(o2).toHaveLength(3);
+    expect(o2[0]).toBe('rewind');
+    expect(['foresight', 'seal', 'restart']).toContain(o2[1]);
+  });
+});

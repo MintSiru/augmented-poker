@@ -13,6 +13,8 @@ export function rankLabel(r: string): string {
 }
 
 export function cardHtml(card: string, opts: { size?: 'sm' | 'md' | 'lg'; extra?: string; attrs?: string } = {}): string {
+  // 비공개로 남은 카드 (연막탄)
+  if (card === '??') return `<span class="card back ${opts.size ?? 'md'} ${opts.extra ?? ''}" title="비공개"></span>`;
   const r = rankLabel(card[0]);
   const s = card[1];
   const red = s === 'h' || s === 'd';

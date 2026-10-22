@@ -21,6 +21,9 @@ import {
   immunityCandidates,
   stealCandidates,
   AUGMENTS,
+  poolIds,
+  poolError,
+  POOL_PRESET_LABEL,
   REACTION_MS,
   createGame,
   cryptoRng,
@@ -81,6 +84,8 @@ export const DEFAULT_SETTINGS: RoomSettings = {
   autoKickMinutes: 5,
   recharge: false,
   rerolls: 2,
+  augPool: 'all',
+  augCustom: [],
 };
 
 export const ROOM_NAME_MAX = 20;
@@ -206,6 +211,7 @@ export class Room {
       startingChips: s.startingChips,
       smallBlind: sb,
       bigBlind: bb,
+      augPool: s.augPool === 'custom' ? `직접 고름(${poolIds('custom', s.augCustom).length}개)` : POOL_PRESET_LABEL[s.augPool],
     };
   }
 
@@ -500,6 +506,14 @@ export class Room {
       if (typeof patch.midJoin !== 'boolean') return '잘못된 값입니다.';
       s.midJoin = patch.midJoin;
     }
+    if (patch.augPool !== undefined) {
+      if (!['p1', 'p12', 'p123', 'all', 'custom'].includes(patch.augPool as string)) return '잘못된 값입니다.';
+      s.augPool = patch.augPool as RoomSettings['augPool'];
+    }
+    if (patch.augCustom !== undefined) {
+      if (!Array.isArray(patch.augCustom) || patch.augCustom.length > 400) return '잘못된 값입니다.';
+      s.augCustom = poolIds('custom', patch.augCustom);
+    }
     if (patch.rerolls !== undefined) {
       const v = int(patch.rerolls, 0, 3);
       if (v === null) return '증강 리롤은 0~3회입니다.';
@@ -548,6 +562,8 @@ export class Room {
     if (humans.length + bots < 2) return '2명 이상이어야 시작할 수 있습니다. (봇으로 채우기를 켜 보세요)';
     if (humans.length + bots > 8) return '최대 8명입니다.';
     if (this.startingBB() < 10) return `시작 칩이 ${Math.floor(this.startingBB())}BB 입니다. 10BB 이상이어야 시작할 수 있습니다.`;
+    const poolErr = poolError(poolIds(this.settings.augPool, this.settings.augCustom));
+    if (poolErr) return poolErr;
     for (let i = 0; i < bots; i++) {
       this.members.push({
         id: 'b_' + randomBytes(4).toString('hex'),
@@ -575,6 +591,7 @@ export class Room {
         fixedLevelHands: s.levelHands,
         recharge: s.recharge,
         rerolls: s.rerolls,
+        pool: s.augPool === 'all' ? null : poolIds(s.augPool, s.augCustom),
       },
     );
     for (const m of this.humans()) if (!m.connected) m.absentStreak = 0;
@@ -727,9 +744,17 @@ export class Room {
     const g = this.game!;
     const st = g.stats;
     const ids = [...new Set([...Object.keys(st.picks), ...Object.keys(st.uses)])] as (keyof typeof st.picks)[];
-    const rows = ids
-      .map((id) => ({ 증강: id, 선택: st.picks[id] ?? 0, 사용: st.uses[id] ?? 0 }))
+    const offeredIds = Object.keys(st.offered) as (keyof typeof st.picks)[];
+    const rows = [...new Set([...ids, ...offeredIds])]
+      .map((id) => {
+        const off = st.offered[id] ?? 0;
+        const pick = st.picks[id] ?? 0;
+        return { 증강: id, 나옴: off, 선택: pick, 선택률: off ? `${Math.round((pick / off) * 100)}%` : '-', 사용: st.uses[id] ?? 0 };
+      })
       .sort((a, b) => b.선택 - a.선택);
+    const s = this.settings;
+    const poolSize = s.augPool === 'all' ? Object.keys(AUGMENTS).length : poolIds(s.augPool, s.augCustom).length;
+    console.log(`[증강 풀] ${POOL_PRESET_LABEL[s.augPool]} (${poolSize}개) · 한 번 이상 선택된 증강 ${Object.keys(st.picks).length}개`);
     const star3 = ids.filter((id) => AUGMENTS[id]?.stars === 3).reduce((sum, id) => sum + (st.uses[id] ?? 0), 0);
     console.log(
       `\n[게임 종료 통계] 방 ${this.code} · 총 핸드 ${g.handNumber} · 재충전 ${g.options.recharge ? '켜짐' : '꺼짐'}` +
@@ -774,7 +799,7 @@ export class Room {
       }
       case 'respond':
         // 제안·입찰·비공개 선언: 15초 (응답하지 않으면 기본 응답)
-        base = this.opts.respondSeconds * 1000;
+        base = (this.game?.respond?.seconds ?? this.opts.respondSeconds) * 1000;
         break;
       case 'discard':
       case 'declare':
